@@ -8,7 +8,7 @@ log("脚本加载", IS_TOP ? "顶层" : "iframe", location.href);
 
 // ── 设置（从 chrome.storage 加载） ───────────────────────────────
 let _settings = {
-  apiUrl: "http://localhost:8002",
+  apiUrl: "https://bandujiangjiang-production.up.railway.app",
   deepseekKey: "",
   siliconflowKey: "",
   wereadKey: "",

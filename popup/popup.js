@@ -1,4 +1,4 @@
-const DEFAULT_API_URL = "http://localhost:8002";
+const DEFAULT_API_URL = "https://bandujiangjiang-production.up.railway.app";
 
 async function loadSettings() {
   const data = await chrome.storage.local.get([

@@ -11,7 +11,7 @@
   ],
   "host_permissions": [
     "https://weread.qq.com/*",
-    "http://localhost:8002/*"
+    "https://bandujiangjiang-production.up.railway.app/*"
   ],
   "background": {
     "service_worker": "background/service-worker.js"
