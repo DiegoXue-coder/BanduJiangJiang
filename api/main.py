@@ -34,10 +34,14 @@ def _sf_key(request: Request) -> str:
 def _wr_key(request: Request) -> str:
     return request.headers.get("x-weread-key", "").strip() or os.environ.get("WEREAD_API_KEY", "")
 
-def _make_ds(key: str) -> OpenAI:
+def _make_ds(key: str) -> OpenAI | None:
+    if not key:
+        return None
     return OpenAI(api_key=key, base_url="https://api.deepseek.com")
 
-def _make_sf(key: str) -> OpenAI:
+def _make_sf(key: str) -> OpenAI | None:
+    if not key:
+        return None
     return OpenAI(api_key=key, base_url="https://api.siliconflow.cn/v1")
 
 # ── 知识库 SQLite ──────────────────────────────────────────────────
@@ -444,6 +448,8 @@ async def get_related(q: str, request: Request, exclude_book_id: str = "", limit
 @app.post("/ask", response_model=AskResponse)
 async def ask(req: AskRequest, request: Request):
     ds = _make_ds(_ds_key(request))
+    if not ds:
+        raise HTTPException(status_code=401, detail="缺少 DeepSeek API Key，请在扩展设置中填写")
     sf = _make_sf(_sf_key(request))
     ctx = req.context
     context_block = ""
