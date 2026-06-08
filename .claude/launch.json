@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "popup",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["serve", "-s", "popup", "-p", "5500", "--no-clipboard"],
+      "port": 5500
+    }
+  ]
+}

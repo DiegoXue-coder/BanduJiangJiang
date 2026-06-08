@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>伴读讲讲</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <div class="popup-header">
+    <div class="popup-logo">📖</div>
+    <div>
+      <div class="popup-title">伴读讲讲</div>
+      <div class="popup-subtitle">微信读书语音伴读助手</div>
+    </div>
+  </div>
+
+  <!-- 必填：DeepSeek Key -->
+  <div class="popup-section">
+    <label class="popup-label">
+      DeepSeek API Key
+      <span class="popup-required">必填</span>
+    </label>
+    <div class="popup-key-row">
+      <input id="deepseek-key" type="password" class="popup-input" placeholder="sk-xxxxxxxxxxxxxxxx" autocomplete="off" />
+      <button class="popup-eye-btn" data-target="deepseek-key" title="显示/隐藏">👁</button>
+    </div>
+    <a href="https://platform.deepseek.com/api_keys" target="_blank" class="popup-key-hint">去 DeepSeek 控制台获取 ↗</a>
+  </div>
+
+  <!-- 可选功能（折叠） -->
+  <div class="popup-section">
+    <button class="popup-collapse-btn" data-target="optional-panel">
+      <span class="collapse-arrow">▶</span> 可选功能
+    </button>
+    <div id="optional-panel" class="popup-collapse-panel">
+
+      <div class="popup-subsection">
+        <label class="popup-label">
+          SiliconFlow API Key
+          <span class="popup-optional">高精度语音识别</span>
+        </label>
+        <div class="popup-key-row">
+          <input id="siliconflow-key" type="password" class="popup-input" placeholder="sk-xxxxxxxxxxxxxxxx" autocomplete="off" />
+          <button class="popup-eye-btn" data-target="siliconflow-key" title="显示/隐藏">👁</button>
+        </div>
+        <a href="https://cloud.siliconflow.cn/account/ak" target="_blank" class="popup-key-hint">去 SiliconFlow 控制台获取 ↗</a>
+        <div class="popup-feature-tip">未填写时语音提问自动降级到浏览器内置识别</div>
+      </div>
+
+      <div class="popup-subsection">
+        <label class="popup-label">
+          微信读书 Skill Key
+          <span class="popup-optional">书籍上下文增强</span>
+        </label>
+        <div class="popup-key-row">
+          <input id="weread-key" type="password" class="popup-input" placeholder="wrk-xxxxxxxxxxxxxxxx" autocomplete="off" />
+          <button class="popup-eye-btn" data-target="weread-key" title="显示/隐藏">👁</button>
+        </div>
+        <a href="https://weread.qq.com/r/weread-skills" target="_blank" class="popup-key-hint">去微信读书 Skills 页扫码获取 ↗</a>
+        <div class="popup-feature-tip">未填写时 AI 仍可工作，但无用户划线等增强上下文</div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- 其他设置（折叠） -->
+  <div class="popup-section">
+    <button class="popup-collapse-btn" data-target="settings-panel">
+      <span class="collapse-arrow">▶</span> 其他设置
+    </button>
+    <div id="settings-panel" class="popup-collapse-panel">
+
+      <div class="popup-subsection">
+        <label class="popup-label">讲解风格</label>
+        <select id="style-select" class="popup-input">
+          <option value="simple">通俗易懂（默认）</option>
+          <option value="academic">学术严谨</option>
+          <option value="story">故事化讲解</option>
+          <option value="socratic">苏格拉底提问式</option>
+        </select>
+      </div>
+
+      <div class="popup-subsection">
+        <label class="popup-label">语音朗读</label>
+        <label class="popup-toggle">
+          <input id="tts-toggle" type="checkbox" checked />
+          <span class="toggle-track"></span>
+          <span class="toggle-label">自动朗读回答</span>
+        </label>
+      </div>
+
+      <div class="popup-subsection">
+        <label class="popup-label">后端地址</label>
+        <input id="api-url" type="text" class="popup-input" placeholder="http://localhost:8002" autocomplete="off" />
+      </div>
+
+    </div>
+  </div>
+
+  <button id="save-btn" class="popup-save-btn">保存设置</button>
+  <div id="save-msg" class="popup-save-msg"></div>
+
+  <div class="popup-footer">
+    <a href="https://weread.qq.com" target="_blank" class="popup-link">打开微信读书</a>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

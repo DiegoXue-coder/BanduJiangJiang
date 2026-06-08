@@ -1,0 +1,41 @@
+{
+  "manifest_version": 3,
+  "name": "伴读讲讲",
+  "version": "0.1.0",
+  "description": "微信读书语音伴读助手 — 遇到难懂段落，开口就懂",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting",
+    "clipboardRead"
+  ],
+  "host_permissions": [
+    "https://weread.qq.com/*",
+    "http://localhost:8002/*"
+  ],
+  "background": {
+    "service_worker": "background/service-worker.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://weread.qq.com/web/reader/*"],
+      "js": ["content/content.js"],
+      "css": ["content/content.css"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
