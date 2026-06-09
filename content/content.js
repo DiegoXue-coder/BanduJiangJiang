@@ -749,7 +749,7 @@ function bindTopEvents() {
       btn.classList.add("active");
       _settings.style = btn.dataset.style;
       // 同步存回 storage
-      chrome.storage.local.set({ style: _settings.style });
+      try { chrome.storage.local.set({ style: _settings.style }); } catch {}
     });
   });
   // 初始化时同步当前风格到按钮高亮
@@ -760,9 +760,9 @@ function bindTopEvents() {
   }
   syncStyleBtn(_settings.style);
   // 当 popup 改变风格时实时同步
-  chrome.storage.onChanged.addListener(changes => {
+  try { chrome.storage.onChanged.addListener(changes => {
     if (changes.style) syncStyleBtn(changes.style.newValue);
-  });
+  }); } catch {}
 
   // 标签切换
   document.getElementById("bandu-tab-chat")
