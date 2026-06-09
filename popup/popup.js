@@ -115,14 +115,6 @@ document.getElementById("test-btn").addEventListener("click", async () => {
 // 保存
 document.getElementById("save-btn").addEventListener("click", async () => {
   const deepseekKey = document.getElementById("deepseek-key").value.trim();
-  if (!deepseekKey) {
-    const msg = document.getElementById("save-msg");
-    msg.textContent = "请填写 DeepSeek API Key";
-    msg.style.color = "#e05252";
-    setTimeout(() => { msg.textContent = ""; msg.style.color = ""; }, 3000);
-    document.getElementById("deepseek-key").focus();
-    return;
-  }
 
   await chrome.storage.local.set({
     apiUrl:         document.getElementById("api-url").value.trim()         || DEFAULT_API_URL,
