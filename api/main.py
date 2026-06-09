@@ -84,6 +84,10 @@ FREE_DAILY_LIMIT = 20  # 每 IP 每天免费次数
 
 def _init_usage_db():
     with _get_db() as conn:
+        # 检测旧表结构（有 date 列），有则删除重建
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(usage_limits)").fetchall()]
+        if "date" in cols:
+            conn.execute("DROP TABLE usage_limits")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS usage_limits (
                 ip  TEXT PRIMARY KEY,
