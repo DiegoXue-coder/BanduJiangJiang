@@ -53,7 +53,11 @@
           <input id="siliconflow-key" type="password" class="popup-input" placeholder="sk-xxxxxxxxxxxxxxxx" autocomplete="off" />
           <button class="popup-eye-btn" data-target="siliconflow-key" title="显示/隐藏">👁</button>
         </div>
-        <a href="https://cloud.siliconflow.cn/account/ak" target="_blank" class="popup-key-hint">去 SiliconFlow 控制台获取 ↗</a>
+        <div style="display:flex;align-items:center;gap:8px;margin-top:4px;">
+          <a href="https://cloud.siliconflow.cn/account/ak" target="_blank" class="popup-key-hint">去 SiliconFlow 控制台获取 ↗</a>
+          <button id="test-sf-btn" class="popup-test-btn">测试</button>
+        </div>
+        <div id="test-sf-result" class="popup-test-result"></div>
         <div class="popup-feature-tip">未填写时语音提问自动降级到浏览器内置识别</div>
       </div>
 
@@ -66,7 +70,11 @@
           <input id="weread-key" type="password" class="popup-input" placeholder="wrk-xxxxxxxxxxxxxxxx" autocomplete="off" />
           <button class="popup-eye-btn" data-target="weread-key" title="显示/隐藏">👁</button>
         </div>
-        <a href="https://weread.qq.com/r/weread-skills" target="_blank" class="popup-key-hint">去微信读书 Skills 页扫码获取 ↗</a>
+        <div style="display:flex;align-items:center;gap:8px;margin-top:4px;">
+          <a href="https://weread.qq.com/r/weread-skills" target="_blank" class="popup-key-hint">去微信读书 Skills 页扫码获取 ↗</a>
+          <button id="test-wr-btn" class="popup-test-btn">测试</button>
+        </div>
+        <div id="test-wr-result" class="popup-test-result"></div>
         <div class="popup-feature-tip">未填写时 AI 仍可工作，但无用户划线等增强上下文</div>
       </div>
 

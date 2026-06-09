@@ -431,10 +431,10 @@ function buildUI() {
       </div>
       <div id="bandu-style-bar">
         <span class="bandu-style-label">风格</span>
-        <button class="bandu-style-btn active" data-style="simple">通俗</button>
-        <button class="bandu-style-btn" data-style="academic">学术</button>
-        <button class="bandu-style-btn" data-style="story">故事</button>
-        <button class="bandu-style-btn" data-style="socratic">苏格拉底</button>
+        <button class="bandu-style-btn active" data-style="simple" title="用大白话解释，简单易懂">通俗</button>
+        <button class="bandu-style-btn" data-style="academic" title="引用理论和专业概念，严谨深入">学术</button>
+        <button class="bandu-style-btn" data-style="story" title="用故事和比喻来解释，生动有趣">故事</button>
+        <button class="bandu-style-btn" data-style="socratic" title="先抛出问题引发思考，再给出解释">提问式</button>
       </div>
       <div id="bandu-input-row">
         <input id="bandu-text-input" type="text" placeholder="输入问题，回车发送…" />
@@ -522,6 +522,7 @@ function _findScrollContainer() {
 }
 
 function showSelectionHighlight(toolbarRect, text) {
+  return; // 暂时关闭高亮定位，等修复后重新开启
   hideSelectionHighlight(); // 清理旧的
 
   // 工具栏出现在选区上方，从工具栏底部开始

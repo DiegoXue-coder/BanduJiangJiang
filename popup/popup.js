@@ -46,6 +46,78 @@ async function loadFreeQuota(apiUrl, hasOwnKey) {
   }
 }
 
+// SiliconFlow 测试
+document.getElementById("test-sf-btn").addEventListener("click", async () => {
+  const btn    = document.getElementById("test-sf-btn");
+  const result = document.getElementById("test-sf-result");
+  const sfKey  = document.getElementById("siliconflow-key").value.trim();
+  const apiUrl = document.getElementById("api-url").value.trim() || DEFAULT_API_URL;
+
+  if (!sfKey) {
+    result.textContent = "请先填写 SiliconFlow API Key";
+    result.className = "popup-test-result test-fail";
+    return;
+  }
+  btn.disabled = true; btn.textContent = "测试中…"; result.textContent = "";
+  try {
+    const res = await fetch(`${apiUrl}/transcribe`, {
+      method: "POST",
+      headers: { "X-SiliconFlow-Key": sfKey, "Content-Type": "audio/webm" },
+      body: new Uint8Array(0),
+    });
+    if (res.status === 400 || res.ok) {
+      result.textContent = "✅ SiliconFlow Key 有效";
+      result.className = "popup-test-result test-ok";
+    } else if (res.status === 401 || res.status === 403) {
+      result.textContent = "❌ Key 无效，请检查是否填写正确";
+      result.className = "popup-test-result test-fail";
+    } else {
+      result.textContent = `❌ 错误 (${res.status})`;
+      result.className = "popup-test-result test-fail";
+    }
+  } catch {
+    result.textContent = "❌ 无法连接服务器";
+    result.className = "popup-test-result test-fail";
+  }
+  btn.disabled = false; btn.textContent = "测试";
+});
+
+// WeRead 测试
+document.getElementById("test-wr-btn").addEventListener("click", async () => {
+  const btn    = document.getElementById("test-wr-btn");
+  const result = document.getElementById("test-wr-result");
+  const wrKey  = document.getElementById("weread-key").value.trim();
+  const apiUrl = document.getElementById("api-url").value.trim() || DEFAULT_API_URL;
+
+  if (!wrKey) {
+    result.textContent = "请先填写微信读书 Skill Key";
+    result.className = "popup-test-result test-fail";
+    return;
+  }
+  btn.disabled = true; btn.textContent = "测试中…"; result.textContent = "";
+  try {
+    const res = await fetch(`${apiUrl}/context/current`, {
+      headers: { "X-WeRead-Key": wrKey },
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data.bookTitle) {
+        result.textContent = `✅ 连接成功，当前在读：${data.bookTitle}`;
+      } else {
+        result.textContent = "✅ Key 有效（暂无正在阅读的书）";
+      }
+      result.className = "popup-test-result test-ok";
+    } else {
+      result.textContent = "❌ Key 无效，请重新获取";
+      result.className = "popup-test-result test-fail";
+    }
+  } catch {
+    result.textContent = "❌ 无法连接服务器";
+    result.className = "popup-test-result test-fail";
+  }
+  btn.disabled = false; btn.textContent = "测试";
+});
+
 // 折叠面板
 document.querySelectorAll(".popup-collapse-btn").forEach(btn => {
   btn.addEventListener("click", () => {
