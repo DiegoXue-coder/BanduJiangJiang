@@ -376,7 +376,7 @@ async function askAI(question, context) {
   const res = await fetch(`${_settings.apiUrl}/ask`, {
     method: "POST",
     headers: jsonHeaders(),
-    body: JSON.stringify({ question, context }),
+    body: JSON.stringify({ question, context, style: _settings.style || "simple" }),
   });
   if (!res.ok) {
     let detail = "";

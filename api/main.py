@@ -86,10 +86,8 @@ def _init_usage_db():
     with _get_db() as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS usage_limits (
-                ip   TEXT NOT NULL,
-                date TEXT NOT NULL,
-                cnt  INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (ip, date)
+                ip  TEXT PRIMARY KEY,
+                cnt INTEGER NOT NULL DEFAULT 0
             )
         """)
         conn.commit()
@@ -104,28 +102,26 @@ def _get_client_ip(request: Request) -> str:
 
 def _check_and_increment_free(ip: str) -> tuple[bool, int]:
     """返回 (allowed, remaining)。allowed=False 时已超限，不计数。"""
-    today = time.strftime("%Y-%m-%d")
     with _get_db() as conn:
         row = conn.execute(
-            "SELECT cnt FROM usage_limits WHERE ip=? AND date=?", (ip, today)
+            "SELECT cnt FROM usage_limits WHERE ip=?", (ip,)
         ).fetchone()
         cnt = row["cnt"] if row else 0
         if cnt >= FREE_DAILY_LIMIT:
             return False, 0
         new_cnt = cnt + 1
         conn.execute(
-            "INSERT INTO usage_limits(ip, date, cnt) VALUES(?,?,?) "
-            "ON CONFLICT(ip,date) DO UPDATE SET cnt=excluded.cnt",
-            (ip, today, new_cnt)
+            "INSERT INTO usage_limits(ip, cnt) VALUES(?,?) "
+            "ON CONFLICT(ip) DO UPDATE SET cnt=excluded.cnt",
+            (ip, new_cnt)
         )
         conn.commit()
         return True, FREE_DAILY_LIMIT - new_cnt
 
 def _get_remaining_free(ip: str) -> int:
-    today = time.strftime("%Y-%m-%d")
     with _get_db() as conn:
         row = conn.execute(
-            "SELECT cnt FROM usage_limits WHERE ip=? AND date=?", (ip, today)
+            "SELECT cnt FROM usage_limits WHERE ip=?", (ip,)
         ).fetchone()
         cnt = row["cnt"] if row else 0
         return max(0, FREE_DAILY_LIMIT - cnt)
@@ -177,6 +173,7 @@ class BookContext(BaseModel):
 class AskRequest(BaseModel):
     question: str
     context: BookContext
+    style: str = "simple"  # simple | academic | story | socratic
 
 class AskResponse(BaseModel):
     answer: str
@@ -550,13 +547,21 @@ async def ask(req: AskRequest, request: Request):
 
     user_message = (context_block + f"\n用户问题：{req.question}") if context_block else req.question
 
+    # 风格附加指令
+    STYLE_SUFFIX = {
+        "academic":  "\n\n【风格要求】请用严谨的学术语言，引用相关理论或概念，可以适当使用专业术语并解释。",
+        "story":     "\n\n【风格要求】请用讲故事的方式解释，加入具体场景、比喻或类比，让人感觉身临其境。",
+        "socratic":  "\n\n【风格要求】请用苏格拉底式提问法：先抛出一两个启发性问题引导思考，再给出解释。",
+    }
+    system_prompt = SYSTEM_PROMPT + STYLE_SUFFIX.get(req.style, "")
+
     try:
         resp = await asyncio.to_thread(
             lambda: ds.chat.completions.create(
                 model="deepseek-chat",
                 max_tokens=512,
                 messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user",   "content": user_message},
                 ],
             )
