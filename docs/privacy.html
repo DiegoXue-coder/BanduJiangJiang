@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>隐私政策 — 伴读讲讲</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+      font-size: 15px;
+      line-height: 1.8;
+      color: #222;
+      background: #fafafa;
+      padding: 40px 20px;
+    }
+    .container {
+      max-width: 720px;
+      margin: 0 auto;
+      background: #fff;
+      border-radius: 12px;
+      padding: 48px;
+      box-shadow: 0 2px 16px rgba(0,0,0,0.06);
+    }
+    h1 {
+      font-size: 24px;
+      font-weight: 700;
+      margin-bottom: 8px;
+      color: #1a1a2e;
+    }
+    .meta {
+      font-size: 13px;
+      color: #888;
+      margin-bottom: 36px;
+    }
+    h2 {
+      font-size: 17px;
+      font-weight: 600;
+      margin: 32px 0 12px;
+      color: #1a1a2e;
+    }
+    p { margin-bottom: 12px; color: #444; }
+    ul { padding-left: 20px; margin-bottom: 12px; }
+    li { margin-bottom: 6px; color: #444; }
+    a { color: #4f8ef7; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .highlight {
+      background: #f0f4ff;
+      border-left: 3px solid #4f8ef7;
+      padding: 12px 16px;
+      border-radius: 4px;
+      margin: 16px 0;
+      color: #333;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>隐私政策</h1>
+    <div class="meta">伴读讲讲 · 最后更新：2026年6月</div>
+
+    <div class="highlight">
+      核心承诺：我们不收集、不存储、不出售你的任何个人数据。
+    </div>
+
+    <h2>1. 扩展收集哪些信息</h2>
+    <p>伴读讲讲不收集任何可识别个人身份的信息。具体来说：</p>
+    <ul>
+      <li><strong>API Key</strong>：你填写的 DeepSeek、SiliconFlow、微信读书 API Key 仅存储在你本地浏览器的 <code>chrome.storage.local</code> 中，不会上传到任何服务器。</li>
+      <li><strong>划选文字</strong>：你在微信读书中划选的段落文字，仅在你主动点击「讲讲」时发送到后端处理，处理完成后不做任何存储。</li>
+      <li><strong>问答记录</strong>：你的提问和 AI 回答会保存在云端数据库，用于提供历史记录和语义记忆功能。这些数据不与任何个人身份关联。</li>
+    </ul>
+
+    <h2>2. 剪贴板权限说明</h2>
+    <p>扩展申请了 <code>clipboardRead</code> 权限，用途如下：</p>
+    <p>当你在微信读书中划选文字并点击工具栏中的「讲讲」按钮时，扩展通过读取剪贴板获取你划选的内容，并将其发送给 AI 进行解释。</p>
+    <p>我们<strong>不会</strong>在其他任何时机读取你的剪贴板内容。</p>
+
+    <h2>3. 数据如何传输</h2>
+    <p>你的问题和书本上下文通过 HTTPS 加密传输到后端服务器（托管在 Railway），用于调用 AI 接口生成回答。传输过程全程加密。</p>
+
+    <h2>4. 第三方服务</h2>
+    <p>扩展依赖以下第三方服务，你使用这些服务时受其各自隐私政策约束：</p>
+    <ul>
+      <li><a href="https://platform.deepseek.com" target="_blank">DeepSeek</a> — AI 对话</li>
+      <li><a href="https://learn.microsoft.com/zh-cn/legal/cognitive-services/speech-service/privacy-note" target="_blank">Microsoft Edge TTS</a> — 语音合成</li>
+      <li><a href="https://siliconflow.cn" target="_blank">SiliconFlow</a>（可选）— 语音识别</li>
+    </ul>
+
+    <h2>5. 数据安全</h2>
+    <p>你的 API Key 只存储在本地，我们无法访问。问答记录存储在受保护的云端数据库中，不对外开放。</p>
+
+    <h2>6. 儿童隐私</h2>
+    <p>本扩展不面向 13 岁以下儿童，我们不会故意收集儿童的个人信息。</p>
+
+    <h2>7. 隐私政策变更</h2>
+    <p>如有重大变更，我们会更新本页面顶部的日期。建议定期查看。</p>
+
+    <h2>8. 联系我们</h2>
+    <p>如有任何隐私相关问题，请通过 GitHub Issues 联系：<br />
+    <a href="https://github.com/DiegoXue-coder/BanduJiangJiang/issues" target="_blank">github.com/DiegoXue-coder/BanduJiangJiang/issues</a></p>
+  </div>
+</body>
+</html>
