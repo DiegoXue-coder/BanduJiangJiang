@@ -291,6 +291,49 @@
   to   { opacity: 1; transform: scaleY(1);   transform-origin: center; }
 }
 
+/* ── 风格切换条 ── */
+#bandu-style-bar {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0 16px 6px;
+  flex-wrap: nowrap;
+}
+
+.bandu-style-label {
+  font-size: 11px;
+  color: #8a95b0;
+  flex-shrink: 0;
+  margin-right: 2px;
+}
+
+.bandu-style-btn {
+  font-size: 11px;
+  padding: 3px 9px;
+  border: 1px solid #d0d7e8;
+  border-radius: 20px;
+  background: #fff;
+  color: #5a6480;
+  cursor: pointer;
+  font-family: inherit;
+  white-space: nowrap;
+  transition: all 0.15s;
+}
+
+.bandu-style-btn:hover {
+  border-color: #4f8ef7;
+  color: #4f8ef7;
+}
+
+.bandu-style-btn.active {
+  background: #4f8ef7;
+  border-color: #4f8ef7;
+  color: #fff;
+  font-weight: 600;
+}
+
+#bandu-panel[data-tab="history"] #bandu-style-bar { display: none; }
+
 /* ── 上下文标签 ── */
 #bandu-context-bar {
   display: none;

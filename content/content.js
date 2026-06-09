@@ -429,6 +429,13 @@ function buildUI() {
         <span id="bandu-context-text"></span>
         <button id="bandu-context-clear" title="清除选中内容">✕</button>
       </div>
+      <div id="bandu-style-bar">
+        <span class="bandu-style-label">风格</span>
+        <button class="bandu-style-btn active" data-style="simple">通俗</button>
+        <button class="bandu-style-btn" data-style="academic">学术</button>
+        <button class="bandu-style-btn" data-style="story">故事</button>
+        <button class="bandu-style-btn" data-style="socratic">苏格拉底</button>
+      </div>
       <div id="bandu-input-row">
         <input id="bandu-text-input" type="text" placeholder="输入问题，回车发送…" />
         <button id="bandu-input-clear" style="display:none" title="清除输入">✕</button>
@@ -734,6 +741,28 @@ function bindTopEvents() {
   const textInput  = document.getElementById("bandu-text-input");
   const ctxClear   = document.getElementById("bandu-context-clear");
   const inputClear = document.getElementById("bandu-input-clear");
+
+  // 风格切换 pill 按钮
+  document.querySelectorAll(".bandu-style-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll(".bandu-style-btn").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      _settings.style = btn.dataset.style;
+      // 同步存回 storage
+      chrome.storage.local.set({ style: _settings.style });
+    });
+  });
+  // 初始化时同步当前风格到按钮高亮
+  function syncStyleBtn(style) {
+    document.querySelectorAll(".bandu-style-btn").forEach(b => {
+      b.classList.toggle("active", b.dataset.style === (style || "simple"));
+    });
+  }
+  syncStyleBtn(_settings.style);
+  // 当 popup 改变风格时实时同步
+  chrome.storage.onChanged.addListener(changes => {
+    if (changes.style) syncStyleBtn(changes.style.newValue);
+  });
 
   // 标签切换
   document.getElementById("bandu-tab-chat")
