@@ -378,7 +378,13 @@ async function askAI(question, context) {
     headers: jsonHeaders(),
     body: JSON.stringify({ question, context }),
   });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) {
+    let detail = "";
+    try { detail = (await res.json()).detail || ""; } catch {}
+    const err = new Error(detail || `HTTP ${res.status}`);
+    err.status = res.status;
+    throw err;
+  }
   return (await res.json()).answer;
 }
 
@@ -561,11 +567,6 @@ async function handleQuestion(question) {
   const q = question.trim();
   if (!q && !pendingContext) return;
 
-  if (!_settings.deepseekKey) {
-    showStatus("请先点击扩展图标，填写 DeepSeek API Key");
-    return;
-  }
-
   // 组合最终问题
   let fullQ;
   if (pendingContext && q) {
@@ -601,9 +602,15 @@ async function handleQuestion(question) {
     const bookId = findBookIdFromPerformance();
     const related = await fetchRelated(fullQ, bookId);
     if (related.length > 0) showRelated(related);
-  } catch {
+  } catch (e) {
     typingEl.remove();
-    showStatus("连接失败，请确认后端服务已启动");
+    if (e.status === 429) {
+      showStatus("今日免费次数已用完，请点击扩展图标填写自己的 DeepSeek Key");
+    } else if (e.status === 401) {
+      showStatus("API Key 无效，请重新检查设置");
+    } else {
+      showStatus("连接失败，请稍后重试");
+    }
   } finally {
     if (voiceBtn) voiceBtn.disabled = false;
     if (sendBtn)  sendBtn.disabled  = false;

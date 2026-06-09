@@ -15,6 +15,35 @@ async function loadSettings() {
   if (!data.deepseekKey) {
     document.getElementById("deepseek-key").focus();
   }
+
+  // 加载免费额度
+  const apiUrl = data.apiUrl || DEFAULT_API_URL;
+  loadFreeQuota(apiUrl, !!data.deepseekKey);
+}
+
+async function loadFreeQuota(apiUrl, hasOwnKey) {
+  const bar  = document.getElementById("free-quota-bar");
+  const text = document.getElementById("free-quota-text");
+  if (hasOwnKey) {
+    bar.className = "popup-quota-bar quota-own";
+    text.textContent = "使用自己的 API Key · 不限次数";
+    return;
+  }
+  try {
+    const res  = await fetch(`${apiUrl}/free-quota`);
+    const data = await res.json();
+    const rem  = data.remaining ?? 0;
+    const lim  = data.limit ?? 20;
+    bar.className = rem > 5 ? "popup-quota-bar quota-ok"
+                  : rem > 0 ? "popup-quota-bar quota-low"
+                  :           "popup-quota-bar quota-empty";
+    text.textContent = rem > 0
+      ? `今日免费额度：剩余 ${rem} / ${lim} 次`
+      : `今日免费额度已用完，请填写自己的 Key`;
+  } catch {
+    bar.className = "popup-quota-bar quota-error";
+    text.textContent = "无法连接到服务器";
+  }
 }
 
 // 折叠面板
@@ -34,6 +63,53 @@ document.querySelectorAll(".popup-eye-btn").forEach(btn => {
     const input = document.getElementById(btn.dataset.target);
     input.type  = input.type === "password" ? "text" : "password";
   });
+});
+
+// 测试连接
+document.getElementById("test-btn").addEventListener("click", async () => {
+  const btn    = document.getElementById("test-btn");
+  const result = document.getElementById("test-result");
+  const apiUrl = document.getElementById("api-url").value.trim() || DEFAULT_API_URL;
+  const dsKey  = document.getElementById("deepseek-key").value.trim();
+
+  btn.disabled = true;
+  btn.textContent = "测试中…";
+  result.textContent = "";
+  result.className = "popup-test-result";
+
+  try {
+    const headers = { "Content-Type": "application/json" };
+    if (dsKey) headers["X-DeepSeek-Key"] = dsKey;
+
+    const res = await fetch(`${apiUrl}/ask`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        question: "ping",
+        context: { bookTitle: "", author: "", chapterTitle: "", pageText: "", selection: "", userHighlights: [], popularHighlights: [] }
+      }),
+    });
+
+    if (res.ok) {
+      result.textContent = "✅ 连接成功，API Key 有效";
+      result.className = "popup-test-result test-ok";
+    } else if (res.status === 401) {
+      result.textContent = "❌ API Key 无效，请检查是否填写正确";
+      result.className = "popup-test-result test-fail";
+    } else if (res.status === 429) {
+      result.textContent = "✅ 服务器正常（今日免费次数已用完，请填写自己的 Key）";
+      result.className = "popup-test-result test-ok";
+    } else {
+      result.textContent = `❌ 服务器错误 (${res.status})`;
+      result.className = "popup-test-result test-fail";
+    }
+  } catch {
+    result.textContent = "❌ 无法连接服务器，请检查网络";
+    result.className = "popup-test-result test-fail";
+  }
+
+  btn.disabled = false;
+  btn.textContent = "测试连接";
 });
 
 // 保存

@@ -15,17 +15,26 @@
     </div>
   </div>
 
+  <!-- 免费额度提示 -->
+  <div id="free-quota-bar" class="popup-quota-bar">
+    <span id="free-quota-text">今日免费额度：加载中…</span>
+  </div>
+
   <!-- 必填：DeepSeek Key -->
   <div class="popup-section">
     <label class="popup-label">
       DeepSeek API Key
-      <span class="popup-required">必填</span>
+      <span class="popup-optional">填写后不限次数</span>
     </label>
     <div class="popup-key-row">
-      <input id="deepseek-key" type="password" class="popup-input" placeholder="sk-xxxxxxxxxxxxxxxx" autocomplete="off" />
+      <input id="deepseek-key" type="password" class="popup-input" placeholder="sk-xxxxxxxxxxxxxxxx（不填则使用免费额度）" autocomplete="off" />
       <button class="popup-eye-btn" data-target="deepseek-key" title="显示/隐藏">👁</button>
     </div>
-    <a href="https://platform.deepseek.com/api_keys" target="_blank" class="popup-key-hint">去 DeepSeek 控制台获取 ↗</a>
+    <div style="display:flex;align-items:center;gap:8px;margin-top:4px;">
+      <a href="https://platform.deepseek.com/api_keys" target="_blank" class="popup-key-hint">去 DeepSeek 控制台获取 ↗</a>
+      <button id="test-btn" class="popup-test-btn">测试连接</button>
+    </div>
+    <div id="test-result" class="popup-test-result"></div>
   </div>
 
   <!-- 可选功能（折叠） -->

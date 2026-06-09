@@ -78,6 +78,58 @@ def _init_db():
 
 _init_db()
 
+# ── 免费额度追踪 ────────────────────────────────────────────────────
+
+FREE_DAILY_LIMIT = 20  # 每 IP 每天免费次数
+
+def _init_usage_db():
+    with _get_db() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS usage_limits (
+                ip   TEXT NOT NULL,
+                date TEXT NOT NULL,
+                cnt  INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (ip, date)
+            )
+        """)
+        conn.commit()
+
+_init_usage_db()
+
+def _get_client_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+def _check_and_increment_free(ip: str) -> tuple[bool, int]:
+    """返回 (allowed, remaining)。allowed=False 时已超限，不计数。"""
+    today = time.strftime("%Y-%m-%d")
+    with _get_db() as conn:
+        row = conn.execute(
+            "SELECT cnt FROM usage_limits WHERE ip=? AND date=?", (ip, today)
+        ).fetchone()
+        cnt = row["cnt"] if row else 0
+        if cnt >= FREE_DAILY_LIMIT:
+            return False, 0
+        new_cnt = cnt + 1
+        conn.execute(
+            "INSERT INTO usage_limits(ip, date, cnt) VALUES(?,?,?) "
+            "ON CONFLICT(ip,date) DO UPDATE SET cnt=excluded.cnt",
+            (ip, today, new_cnt)
+        )
+        conn.commit()
+        return True, FREE_DAILY_LIMIT - new_cnt
+
+def _get_remaining_free(ip: str) -> int:
+    today = time.strftime("%Y-%m-%d")
+    with _get_db() as conn:
+        row = conn.execute(
+            "SELECT cnt FROM usage_limits WHERE ip=? AND date=?", (ip, today)
+        ).fetchone()
+        cnt = row["cnt"] if row else 0
+        return max(0, FREE_DAILY_LIMIT - cnt)
+
 MEMORY_THRESHOLD = 0.65  # 语境记忆阈值，比跨书展示更宽松
 
 async def _embed(text: str, sf: OpenAI | None = None) -> list[float]:
@@ -445,9 +497,31 @@ async def get_related(q: str, request: Request, exclude_book_id: str = "", limit
                for _, r in scored[:limit]]
     return {"records": results}
 
+@app.get("/free-quota")
+async def free_quota(request: Request):
+    """返回该 IP 今日剩余免费次数。"""
+    ip = _get_client_ip(request)
+    return {"remaining": _get_remaining_free(ip), "limit": FREE_DAILY_LIMIT}
+
 @app.post("/ask", response_model=AskResponse)
 async def ask(req: AskRequest, request: Request):
-    ds = _make_ds(_ds_key(request))
+    user_ds_key = request.headers.get("x-deepseek-key", "").strip()
+    if user_ds_key:
+        # 用户自带 Key，无限制
+        ds = _make_ds(user_ds_key)
+    else:
+        # 走免费额度
+        ip = _get_client_ip(request)
+        allowed, remaining = await asyncio.to_thread(_check_and_increment_free, ip)
+        if not allowed:
+            raise HTTPException(
+                status_code=429,
+                detail="今日免费次数已用完（每天20次）。请在扩展设置中填写自己的 DeepSeek API Key 继续使用。"
+            )
+        env_key = os.environ.get("DEEPSEEK_API_KEY", "")
+        ds = _make_ds(env_key)
+        if not ds:
+            raise HTTPException(status_code=503, detail="免费服务暂时不可用，请填写自己的 API Key")
     if not ds:
         raise HTTPException(status_code=401, detail="缺少 DeepSeek API Key，请在扩展设置中填写")
     sf = _make_sf(_sf_key(request))

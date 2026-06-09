@@ -241,3 +241,42 @@ body {
 }
 
 .popup-link:hover { text-decoration: underline; }
+
+/* 免费额度条 */
+.popup-quota-bar {
+  margin: 0 16px 4px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  text-align: center;
+}
+.quota-ok    { background: #eaf4eb; color: #2d7a3a; }
+.quota-low   { background: #fff8e1; color: #a06000; }
+.quota-empty { background: #fdecea; color: #c62828; }
+.quota-own   { background: #eef2ff; color: #3730a3; }
+.quota-error { background: #f5f5f5; color: #999; }
+
+/* 测试连接 */
+.popup-test-btn {
+  font-size: 11px;
+  padding: 3px 8px;
+  border: 1px solid #4f8ef7;
+  border-radius: 6px;
+  background: #fff;
+  color: #4f8ef7;
+  cursor: pointer;
+  font-family: inherit;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.popup-test-btn:hover { background: #eef4ff; }
+.popup-test-btn:disabled { opacity: 0.5; cursor: default; }
+
+.popup-test-result {
+  font-size: 12px;
+  margin-top: 6px;
+  min-height: 16px;
+}
+.test-ok   { color: #2d7a3a; }
+.test-fail { color: #c62828; }
