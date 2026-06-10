@@ -624,7 +624,12 @@ async function handleQuestion(question) {
   } catch (e) {
     typingEl.remove();
     if (e.status === 429) {
-      showStatus("今日免费次数已用完，请点击扩展图标填写自己的 DeepSeek Key");
+      const msg = e.message || "";
+      if (msg.includes("频繁")) {
+        showStatus("请求太频繁，请稍后再试");
+      } else {
+        showStatus("今日免费次数已用完，请点击扩展图标填写自己的 DeepSeek Key");
+      }
     } else if (e.status === 401) {
       showStatus("API Key 无效，请重新检查设置");
     } else {

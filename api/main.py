@@ -7,7 +7,9 @@ import time
 import json
 import asyncio
 import sqlite3
+import hashlib
 from pathlib import Path
+from collections import defaultdict
 
 import numpy as np
 
@@ -78,6 +80,20 @@ def _init_db():
 
 _init_db()
 
+def _cleanup_old_records():
+    """删除 90 天前的问答记录，防止数据库无限增长。"""
+    with _get_db() as conn:
+        conn.execute(
+            "DELETE FROM qa_history WHERE created_at < datetime('now', '-90 days')"
+        )
+        conn.commit()
+
+# 启动时清理一次
+try:
+    _cleanup_old_records()
+except Exception as e:
+    print(f"[清理] 旧记录清理失败: {e}")
+
 # ── 免费额度追踪 ────────────────────────────────────────────────────
 
 FREE_DAILY_LIMIT = 20  # 每 IP 每天免费次数
@@ -100,9 +116,27 @@ _init_usage_db()
 
 def _get_client_ip(request: Request) -> str:
     forwarded = request.headers.get("x-forwarded-for", "")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
+    raw = forwarded.split(",")[0].strip() if forwarded else (
+        request.client.host if request.client else "unknown"
+    )
+    # 对 IP 做单向哈希，不存明文（隐私合规）
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+# ── 速率限制（每 IP 每分钟最多 30 次 /ask）────────────────────────
+_rate_store: dict[str, list[float]] = defaultdict(list)
+RATE_LIMIT   = 30   # 次
+RATE_WINDOW  = 60   # 秒
+
+def _check_rate_limit(ip: str) -> bool:
+    """返回 True 表示允许，False 表示超限。"""
+    now = time.time()
+    hits = _rate_store[ip]
+    # 清理窗口外的记录
+    _rate_store[ip] = [t for t in hits if now - t < RATE_WINDOW]
+    if len(_rate_store[ip]) >= RATE_LIMIT:
+        return False
+    _rate_store[ip].append(now)
+    return True
 
 def _check_and_increment_free(ip: str) -> tuple[bool, int]:
     """返回 (allowed, remaining)。allowed=False 时已超限，不计数。"""
@@ -149,9 +183,10 @@ app = FastAPI(title="伴读讲讲 API", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
+    allow_origins=["*"],   # Chrome 扩展 origin 每次不同，保持 *
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
+    max_age=600,
 )
 
 # 全局 fallback client（本地开发用，env 有值时生效）
@@ -506,6 +541,15 @@ async def free_quota(request: Request):
 
 @app.post("/ask", response_model=AskResponse)
 async def ask(req: AskRequest, request: Request):
+    # 输入长度校验
+    if len(req.question) > 2000:
+        raise HTTPException(status_code=400, detail="问题太长，请控制在 2000 字以内")
+
+    # 速率限制
+    ip = _get_client_ip(request)
+    if not _check_rate_limit(ip):
+        raise HTTPException(status_code=429, detail="请求太频繁，请稍后再试")
+
     user_ds_key = request.headers.get("x-deepseek-key", "").strip()
     if user_ds_key:
         # 用户自带 Key，无限制
