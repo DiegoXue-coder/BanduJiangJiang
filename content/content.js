@@ -247,17 +247,28 @@ async function startVoice(onResult, onEnd) {
     setVoiceState("processing");
     showStatus("识别中…");
     try {
-      const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
+      const mimeType = recorder.mimeType || "audio/webm";
+      const blob = new Blob(chunks, { type: mimeType });
       log("发送音频:", (blob.size / 1024).toFixed(1), "KB");
-      const res = await fetch(`${_settings.apiUrl}/transcribe`, {
+
+      // 直接调 SiliconFlow，绕过 Railway 减少延迟
+      const ext = mimeType.includes("ogg") ? "ogg" : "webm";
+      const formData = new FormData();
+      formData.append("file", blob, `audio.${ext}`);
+      formData.append("model", "FunAudioLLM/SenseVoiceSmall");
+      formData.append("language", "zh");
+
+      const res = await fetch("https://api.siliconflow.cn/v1/audio/transcriptions", {
         method: "POST",
-        headers: { "Content-Type": blob.type, ...keyHeaders() },
-        body: blob,
+        headers: { "Authorization": `Bearer ${_settings.siliconflowKey}` },
+        body: formData,
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const { text } = await res.json();
+      const data = await res.json();
+      // 去除 SenseVoice 的情感标签如 <|zh|><|NEUTRAL|>
+      const text = (data.text || "").replace(/<\|[^|]+\|>/g, "").trim();
       log("转录结果:", JSON.stringify(text));
-      if (text?.trim()) onResult(text.trim());
+      if (text) onResult(text);
       else showStatus("没有识别到内容，请重试");
     } catch (e) {
       showStatus(`识别失败：${e.message}`);

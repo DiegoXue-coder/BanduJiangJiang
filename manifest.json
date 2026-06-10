@@ -11,7 +11,8 @@
   ],
   "host_permissions": [
     "https://weread.qq.com/*",
-    "https://bandujiangjiang-production.up.railway.app/*"
+    "https://bandujiangjiang-production.up.railway.app/*",
+    "https://api.siliconflow.cn/*"
   ],
   "background": {
     "service_worker": "background/service-worker.js"
