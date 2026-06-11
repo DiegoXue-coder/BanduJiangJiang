@@ -213,6 +213,7 @@ class AskRequest(BaseModel):
     question: str
     context: BookContext
     style: str = "simple"  # simple | academic | story | socratic
+    history: list[dict] = []  # [{role: "user"/"assistant", content: "..."}]
 
 class AskResponse(BaseModel):
     answer: str
@@ -595,23 +596,53 @@ async def ask(req: AskRequest, request: Request):
 
     user_message = (context_block + f"\n用户问题：{req.question}") if context_block else req.question
 
-    # 风格附加指令
+    # 风格附加指令 / 苏格拉底多轮对话
     STYLE_SUFFIX = {
-        "academic":  "\n\n【风格要求】请用严谨的学术语言，引用相关理论或概念，可以适当使用专业术语并解释。",
-        "story":     "\n\n【风格要求】请用讲故事的方式解释，加入具体场景、比喻或类比，让人感觉身临其境。",
-        "socratic":  "\n\n【风格要求】请用苏格拉底式提问法：先抛出一两个启发性问题引导思考，再给出解释。",
+        "academic": "\n\n【风格要求】请用严谨的学术语言，引用相关理论或概念，可以适当使用专业术语并解释。",
+        "story":    "\n\n【风格要求】请用讲故事的方式解释，加入具体场景、比喻或类比，让人感觉身临其境。",
     }
-    system_prompt = SYSTEM_PROMPT + STYLE_SUFFIX.get(req.style, "")
+
+    if req.style == "socratic":
+        # round = 已有轮数 // 2 + 1（每轮 = 1 user + 1 assistant）
+        round_num = len(req.history) // 2 + 1
+        if round_num >= 3:
+            socr_instr = (
+                "\n\n【苏格拉底收尾】用户已经通过对话自己推导出了答案。"
+                "请以"你已经推导出来了——"开头，总结这段对话中用户自己发现的洞见，不超过 120 字。"
+                "语气温暖肯定，不要再提问。"
+            )
+        elif round_num == 2:
+            socr_instr = (
+                "\n\n【苏格拉底追问】根据用户的回答，提一个更深入的追问，引导用户继续思考。"
+                "只问问题，不给答案，不超过 50 字。"
+            )
+        else:
+            socr_instr = (
+                "\n\n【苏格拉底首问】根据用户选中的内容，提一个能启发用户独立思考的问题。"
+                "只问问题，不给答案，不超过 50 字。"
+            )
+        system_prompt = SYSTEM_PROMPT + socr_instr
+        # 拼接多轮消息
+        messages = [{"role": "system", "content": system_prompt}]
+        for turn in req.history:
+            role = turn.get("role", "user")
+            content = str(turn.get("content", ""))[:1000]
+            if role in ("user", "assistant"):
+                messages.append({"role": role, "content": content})
+        messages.append({"role": "user", "content": user_message})
+    else:
+        system_prompt = SYSTEM_PROMPT + STYLE_SUFFIX.get(req.style, "")
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": user_message},
+        ]
 
     try:
         resp = await asyncio.to_thread(
             lambda: ds.chat.completions.create(
                 model="deepseek-chat",
                 max_tokens=512,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user",   "content": user_message},
-                ],
+                messages=messages,
             )
         )
         return AskResponse(answer=resp.choices[0].message.content)

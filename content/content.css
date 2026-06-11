@@ -601,3 +601,88 @@
   40%            { transform: scale(1.0); opacity: 1.0; }
 }
 
+
+/* ── 苏格拉底回复行 ── */
+#bandu-socr-reply {
+  display: none;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  background: linear-gradient(135deg, rgba(89,86,213,0.08), rgba(79,142,247,0.06));
+  border-top: 1px solid rgba(89,86,213,0.15);
+  border-bottom: 1px solid rgba(89,86,213,0.10);
+}
+
+.bandu-socr-label {
+  font-size: 12px;
+  color: #7c5fe6;
+  font-weight: 600;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+#bandu-socr-input {
+  flex: 1;
+  border: 1px solid rgba(89,86,213,0.3);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 13px;
+  background: rgba(255,255,255,0.9);
+  color: #1a1d23;
+  outline: none;
+}
+
+#bandu-socr-input:focus {
+  border-color: #7c5fe6;
+  box-shadow: 0 0 0 2px rgba(124,95,230,0.15);
+}
+
+#bandu-socr-send {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: #7c5fe6;
+  color: #fff;
+  border: none;
+  cursor: pointer;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: background 0.15s;
+}
+
+#bandu-socr-send:hover { background: #5956D5; }
+
+#bandu-socr-skip {
+  font-size: 11px;
+  color: #8a94a8;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 2px 4px;
+  flex-shrink: 0;
+  text-decoration: underline;
+}
+
+#bandu-socr-skip:hover { color: #555; }
+
+#bandu-socr-voice {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: rgba(124,95,230,0.12);
+  color: #7c5fe6;
+  border: 1px solid rgba(124,95,230,0.25);
+  cursor: pointer;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: background 0.15s;
+}
+
+#bandu-socr-voice:hover { background: rgba(124,95,230,0.22); }
+#bandu-socr-voice:disabled { opacity: 0.5; cursor: not-allowed; }

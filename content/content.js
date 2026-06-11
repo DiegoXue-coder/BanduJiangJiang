@@ -382,12 +382,25 @@ function updateStopBtn() {
   if (btn) btn.style.display = currentAudio ? "inline-flex" : "none";
 }
 
+// ── 苏格拉底多轮对话状态 ─────────────────────────────────────────
+let _socr = { active: false, round: 0, history: [], context: null };
+
+function socrReset() {
+  _socr = { active: false, round: 0, history: [], context: null };
+  const replyRow = document.getElementById("bandu-socr-reply");
+  if (replyRow) replyRow.style.display = "none";
+  const inputRow = document.getElementById("bandu-input-row");
+  if (inputRow) inputRow.style.display = "flex";
+  const styleBar = document.getElementById("bandu-style-bar");
+  if (styleBar) styleBar.style.display = "flex";
+}
+
 // ── API ───────────────────────────────────────────────────────────
-async function askAI(question, context) {
+async function askAI(question, context, history = []) {
   const res = await fetch(`${_settings.apiUrl}/ask`, {
     method: "POST",
     headers: jsonHeaders(),
-    body: JSON.stringify({ question, context, style: _settings.style || "simple" }),
+    body: JSON.stringify({ question, context, style: _settings.style || "simple", history }),
   });
   if (!res.ok) {
     let detail = "";
@@ -451,6 +464,13 @@ function buildUI() {
         <input id="bandu-text-input" type="text" placeholder="输入问题，回车发送…" />
         <button id="bandu-input-clear" style="display:none" title="清除输入">✕</button>
         <button id="bandu-send-btn">发送</button>
+      </div>
+      <div id="bandu-socr-reply" style="display:none">
+        <span class="bandu-socr-label">你的想法：</span>
+        <input id="bandu-socr-input" type="text" placeholder="输入或语音回答…" />
+        <button id="bandu-socr-voice" title="语音回答">🎤</button>
+        <button id="bandu-socr-send">→</button>
+        <button id="bandu-socr-skip" title="结束苏格拉底对话">跳过</button>
       </div>
     </div>`;
   document.body.appendChild(root);
@@ -582,25 +602,10 @@ function setInputValue(text) {
   if (clearBtn) clearBtn.style.display = text ? "flex" : "none";
 }
 
-async function handleQuestion(question) {
-  const q = question.trim();
-  if (!q && !pendingContext) return;
-
-  // 组合最终问题
-  let fullQ;
-  if (pendingContext && q) {
-    fullQ = `关于这段话："${pendingContext}"，${q}`;
-  } else if (pendingContext) {
-    fullQ = `请帮我解释这段话："${pendingContext}"`;
-  } else {
-    fullQ = q;
-  }
-  clearContext();
-
-  addMessage("user", fullQ);
-  const voiceBtn      = document.getElementById("bandu-voice-btn");
-  const sendBtn       = document.getElementById("bandu-send-btn");
-  const msgContainer  = document.getElementById("bandu-messages");
+async function _doAsk(fullQ, context, history = []) {
+  const voiceBtn     = document.getElementById("bandu-voice-btn");
+  const sendBtn      = document.getElementById("bandu-send-btn");
+  const msgContainer = document.getElementById("bandu-messages");
   if (voiceBtn) voiceBtn.disabled = true;
   if (sendBtn)  sendBtn.disabled  = true;
 
@@ -611,33 +616,106 @@ async function handleQuestion(question) {
   msgContainer.scrollTop = msgContainer.scrollHeight;
 
   try {
-    const context = await extractBookContext();
-    const answer  = await askAI(fullQ, context);
+    const answer = await askAI(fullQ, context, history);
     typingEl.remove();
     addMessage("assistant", answer);
     showStatus("");
     speakText(answer);
-    saveHistory(fullQ, answer, context);
-    const bookId = findBookIdFromPerformance();
-    const related = await fetchRelated(fullQ, bookId);
-    if (related.length > 0) showRelated(related);
+    return answer;
   } catch (e) {
     typingEl.remove();
     if (e.status === 429) {
-      const msg = e.message || "";
-      if (msg.includes("频繁")) {
-        showStatus("请求太频繁，请稍后再试");
-      } else {
-        showStatus("今日免费次数已用完，请点击扩展图标填写自己的 DeepSeek Key");
-      }
+      showStatus(e.message?.includes("频繁")
+        ? "请求太频繁，请稍后再试"
+        : "今日免费次数已用完，请点击扩展图标填写自己的 DeepSeek Key");
     } else if (e.status === 401) {
       showStatus("API Key 无效，请重新检查设置");
     } else {
       showStatus("连接失败，请稍后重试");
     }
+    return null;
   } finally {
     if (voiceBtn) voiceBtn.disabled = false;
     if (sendBtn)  sendBtn.disabled  = false;
+  }
+}
+
+async function handleQuestion(question) {
+  const q = question.trim();
+  if (!q && !pendingContext) return;
+
+  let fullQ;
+  if (pendingContext && q) {
+    fullQ = `关于这段话："${pendingContext}"，${q}`;
+  } else if (pendingContext) {
+    fullQ = `请帮我解释这段话："${pendingContext}"`;
+  } else {
+    fullQ = q;
+  }
+  clearContext();
+  addMessage("user", fullQ);
+
+  // ── 苏格拉底模式入口 ──────────────────────────────────────────
+  if (_settings.style === "socratic") {
+    const context = await extractBookContext();
+    _socr = { active: true, round: 1, history: [], context };
+    // 隐藏普通输入行和风格栏
+    document.getElementById("bandu-input-row").style.display = "none";
+    document.getElementById("bandu-style-bar").style.display = "none";
+
+    const answer = await _doAsk(fullQ, context, []);
+    if (!answer) { socrReset(); return; }
+
+    _socr.history.push({ role: "user", content: fullQ });
+    _socr.history.push({ role: "assistant", content: answer });
+    _showSocrReply();
+    return;
+  }
+
+  // ── 普通模式 ──────────────────────────────────────────────────
+  const context = await extractBookContext();
+  const answer  = await _doAsk(fullQ, context);
+  if (answer) {
+    saveHistory(fullQ, answer, context);
+    const bookId  = findBookIdFromPerformance();
+    const related = await fetchRelated(fullQ, bookId);
+    if (related.length > 0) showRelated(related);
+  }
+}
+
+function _showSocrReply() {
+  const replyRow = document.getElementById("bandu-socr-reply");
+  const input    = document.getElementById("bandu-socr-input");
+  if (!replyRow) return;
+  replyRow.style.display = "flex";
+  input?.focus();
+  // 显示轮次提示
+  const MAX = 3;
+  showStatus(`第 ${_socr.round} / ${MAX} 轮 — 分享你的想法，继续推导`);
+}
+
+async function handleSocrReply(userAnswer) {
+  const ans = userAnswer.trim();
+  if (!ans) return;
+  addMessage("user", ans);
+  showStatus("");
+
+  _socr.history.push({ role: "user", content: ans });
+  _socr.round++;
+
+  const answer = await _doAsk(ans, _socr.context, _socr.history.slice(0, -1));
+  if (!answer) { socrReset(); return; }
+
+  _socr.history.push({ role: "assistant", content: answer });
+
+  if (_socr.round > 3) {
+    // 总结完毕，保存整个对话并退出苏格拉底模式
+    const firstQ = _socr.history[0]?.content || ans;
+    saveHistory(firstQ, answer, _socr.context);
+    showStatus("苏格拉底对话结束 ✓");
+    socrReset();
+  } else {
+    _showSocrReply();
   }
 }
 
@@ -792,10 +870,43 @@ function bindTopEvents() {
     fab.classList.toggle("bandu-fab-active");
   });
 
+  // 苏格拉底回复行
+  const socrInput = document.getElementById("bandu-socr-input");
+  const socrSend  = document.getElementById("bandu-socr-send");
+  const socrSkip  = document.getElementById("bandu-socr-skip");
+  const socrVoice = document.getElementById("bandu-socr-voice");
+  socrSend?.addEventListener("click", () => {
+    const v = socrInput.value.trim();
+    if (v) { socrInput.value = ""; handleSocrReply(v); }
+  });
+  socrInput?.addEventListener("keydown", e => {
+    if (e.key === "Enter") socrSend?.click();
+  });
+  socrSkip?.addEventListener("click", () => {
+    showStatus("");
+    socrReset();
+  });
+  socrVoice?.addEventListener("click", async () => {
+    if (isListening) { stopVoice(); return; }
+    socrVoice.textContent = "⏹";
+    socrVoice.disabled = true;
+    showStatus("准备中…");
+    await startVoice(
+      (text) => {
+        socrInput.value = text;
+        showStatus("识别完成 — 回车发送或继续修改");
+      },
+      () => {
+        socrVoice.textContent = "🎤";
+        socrVoice.disabled = false;
+      }
+    );
+  });
+
   closeBtn.addEventListener("click", () => {
     panel.classList.remove("bandu-panel-open");
     fab.classList.remove("bandu-fab-active");
-    stopVoice(); stopAudio(); clearContext();
+    stopVoice(); stopAudio(); clearContext(); socrReset();
   });
 
   ttsBtn.addEventListener("click", () => {
