@@ -628,14 +628,21 @@ async def ask(req: AskRequest, request: Request):
                 "问题简短有力，不超过 30 字，只有一句话。"
                 "禁止解释、禁止分析、禁止给答案。禁止 Markdown 符号和 emoji。"
             )
-        # 拼接多轮消息
+        # 苏格拉底模式：user_message 只传上下文 + 选文，不带"解释"动词
+        # 防止 AI 看到"请解释"就直接给答案
+        if ctx.selection:
+            socr_user = (context_block + f"\n请针对上面这段内容展开苏格拉底式对话。") if context_block else req.question
+        else:
+            socr_user = user_message  # 用户自己打的追问，原样传
+
         messages = [{"role": "system", "content": system_prompt}]
         for turn in req.history:
             role = turn.get("role", "user")
             content = str(turn.get("content", ""))[:1000]
             if role in ("user", "assistant"):
                 messages.append({"role": role, "content": content})
-        messages.append({"role": "user", "content": user_message})
+        # round1 用清洁版，后续轮次（history 已有内容）用原始回答
+        messages.append({"role": "user", "content": socr_user if not req.history else req.question})
     else:
         system_prompt = SYSTEM_PROMPT + STYLE_SUFFIX.get(req.style, "")
         messages = [
