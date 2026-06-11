@@ -603,25 +603,31 @@ async def ask(req: AskRequest, request: Request):
     }
 
     if req.style == "socratic":
-        # round = 已有轮数 // 2 + 1（每轮 = 1 user + 1 assistant）
         round_num = len(req.history) // 2 + 1
         if round_num >= 3:
-            socr_instr = (
-                "\n\n【苏格拉底收尾】用户已经通过对话自己推导出了答案。"
-                "请以"你已经推导出来了——"开头，总结这段对话中用户自己发现的洞见，不超过 120 字。"
-                "语气温暖肯定，不要再提问。"
+            system_prompt = (
+                "你是一位苏格拉底式的阅读导师。"
+                "用户通过两轮对话已经自己推导出了答案。"
+                "请以"你已经推导出来了——"开头，用温暖肯定的语气，"
+                "总结用户在这段对话中自己发现的洞见，不超过 100 字。"
+                "禁止再提问。禁止 Markdown 符号和 emoji。"
             )
         elif round_num == 2:
-            socr_instr = (
-                "\n\n【苏格拉底追问】根据用户的回答，提一个更深入的追问，引导用户继续思考。"
-                "只问问题，不给答案，不超过 50 字。"
+            system_prompt = (
+                "你是一位苏格拉底式的阅读导师。"
+                "你的唯一任务是提问，绝对不能给出解释或答案。"
+                "根据用户的回答，提一个更深入的追问，引导他继续独立思考。"
+                "问题简短有力，不超过 30 字，只有一句话。"
+                "禁止解释、禁止分析、禁止给答案。禁止 Markdown 符号和 emoji。"
             )
         else:
-            socr_instr = (
-                "\n\n【苏格拉底首问】根据用户选中的内容，提一个能启发用户独立思考的问题。"
-                "只问问题，不给答案，不超过 50 字。"
+            system_prompt = (
+                "你是一位苏格拉底式的阅读导师。"
+                "你的唯一任务是提问，绝对不能给出解释或答案。"
+                "根据用户选中的内容，提一个能触发独立思考的开放性问题。"
+                "问题简短有力，不超过 30 字，只有一句话。"
+                "禁止解释、禁止分析、禁止给答案。禁止 Markdown 符号和 emoji。"
             )
-        system_prompt = SYSTEM_PROMPT + socr_instr
         # 拼接多轮消息
         messages = [{"role": "system", "content": system_prompt}]
         for turn in req.history:
