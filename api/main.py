@@ -602,9 +602,10 @@ async def ask(req: AskRequest, request: Request):
         "story":    "\n\n【风格要求】请用讲故事的方式解释，加入具体场景、比喻或类比，让人感觉身临其境。",
     }
 
+    round_num = len(req.history) // 2 + 1
+    SOCR_MAX_ROUNDS = 8
+
     if req.style == "socratic":
-        round_num = len(req.history) // 2 + 1
-        SOCR_MAX_ROUNDS = 8
         if round_num >= SOCR_MAX_ROUNDS:
             system_prompt = "你是阅读导师，必须以"你已经推导出来了——"开头给出核心洞见，2-3句话结束对话。"
             socr_max_tokens = 300
@@ -667,7 +668,21 @@ async def ask(req: AskRequest, request: Request):
                 messages=messages,
             )
         )
-        return AskResponse(answer=resp.choices[0].message.content)
+        raw = resp.choices[0].message.content
+
+        # 苏格拉底 Q 轮：后处理提取，只取问句，AI 的解释对用户不可见
+        if req.style == "socratic" and round_num < SOCR_MAX_ROUNDS and not raw.startswith("你已经推导出来了"):
+            # 优先找独立问句（以？结尾的句子）
+            import re as _re
+            sentences = _re.split(r'(?<=[。！？\?])', raw)
+            questions = [s.strip() for s in sentences if s.strip().endswith(("？", "?"))]
+            if questions:
+                raw = questions[0]  # 只取第一个问句
+            # 若 AI 没生成问号句，截取前 30 字兜底
+            elif len(raw) > 30:
+                raw = raw[:30]
+
+        return AskResponse(answer=raw)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"DeepSeek API 错误: {e}")
 
