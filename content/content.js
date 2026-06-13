@@ -659,11 +659,12 @@ async function handleQuestion(question) {
   if (_settings.style === "socratic") {
     const context = await extractBookContext();
     _socr = { active: true, round: 1, history: [], context };
-    // 隐藏普通输入行和风格栏
     document.getElementById("bandu-input-row").style.display = "none";
     document.getElementById("bandu-style-bar").style.display = "none";
 
-    const answer = await _doAsk(fullQ, context, []);
+    // 第1轮只传选中内容，不带"请解释"动词，避免 AI 直接解释
+    const socrQ = context.selection || fullQ;
+    const answer = await _doAsk(socrQ, context, []);
     if (!answer) { socrReset(); return; }
 
     _socr.history.push({ role: "user", content: fullQ });

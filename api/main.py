@@ -606,34 +606,32 @@ async def ask(req: AskRequest, request: Request):
         round_num = len(req.history) // 2 + 1
         if round_num >= 3:
             system_prompt = (
-                "你是一位苏格拉底式的阅读导师。"
-                "用户通过两轮对话已经自己推导出了答案。"
-                "请以"你已经推导出来了——"开头，用温暖肯定的语气，"
-                "总结用户在这段对话中自己发现的洞见，不超过 100 字。"
-                "禁止再提问。禁止 Markdown 符号和 emoji。"
+                "你是苏格拉底式阅读导师。"
+                "必须以"你已经推导出来了——"开头，总结用户在对话中自己发现的洞见，不超过80字。"
+                "只输出总结，不提问，不解释，不加任何前缀。"
             )
-        elif round_num == 2:
-            system_prompt = (
-                "你是一位苏格拉底式的阅读导师。"
-                "你的唯一任务是提问，绝对不能给出解释或答案。"
-                "根据用户的回答，提一个更深入的追问，引导他继续独立思考。"
-                "问题简短有力，不超过 30 字，只有一句话。"
-                "禁止解释、禁止分析、禁止给答案。禁止 Markdown 符号和 emoji。"
-            )
+            socr_max_tokens = 200
         else:
-            system_prompt = (
-                "你是一位苏格拉底式的阅读导师。"
-                "你的唯一任务是提问，绝对不能给出解释或答案。"
-                "根据用户选中的内容，提一个能触发独立思考的开放性问题。"
-                "问题简短有力，不超过 30 字，只有一句话。"
-                "禁止解释、禁止分析、禁止给答案。禁止 Markdown 符号和 emoji。"
-            )
-        # 苏格拉底模式：user_message 只传上下文 + 选文，不带"解释"动词
-        # 防止 AI 看到"请解释"就直接给答案
-        if ctx.selection:
-            socr_user = (context_block + f"\n请针对上面这段内容展开苏格拉底式对话。") if context_block else req.question
+            example = "示例输出（仅供格式参考）：「如果利润有上限，亏损也有下限吗？」"
+            if round_num == 2:
+                system_prompt = (
+                    "你是苏格拉底式阅读导师。根据用户的回答提一个追问。\n"
+                    "规则：只输出一个问句，不超过25字，不解释，不分析，不给答案，不加任何前缀。\n"
+                    f"{example}"
+                )
+            else:
+                system_prompt = (
+                    "你是苏格拉底式阅读导师。根据用户提供的文字提一个启发性问题。\n"
+                    "规则：只输出一个问句，不超过25字，不解释，不分析，不给答案，不加任何前缀。\n"
+                    f"{example}"
+                )
+            socr_max_tokens = 60  # 物理限制，防止 AI 自行展开
+
+        # 第1轮：只传选文本身，不带"请解释"动词
+        if not req.history:
+            socr_user = ctx.selection if ctx.selection else req.question
         else:
-            socr_user = user_message  # 用户自己打的追问，原样传
+            socr_user = req.question  # 后续轮：用户自己的回答原样传
 
         messages = [{"role": "system", "content": system_prompt}]
         for turn in req.history:
@@ -641,8 +639,7 @@ async def ask(req: AskRequest, request: Request):
             content = str(turn.get("content", ""))[:1000]
             if role in ("user", "assistant"):
                 messages.append({"role": role, "content": content})
-        # round1 用清洁版，后续轮次（history 已有内容）用原始回答
-        messages.append({"role": "user", "content": socr_user if not req.history else req.question})
+        messages.append({"role": "user", "content": socr_user})
     else:
         system_prompt = SYSTEM_PROMPT + STYLE_SUFFIX.get(req.style, "")
         messages = [
@@ -650,11 +647,12 @@ async def ask(req: AskRequest, request: Request):
             {"role": "user",   "content": user_message},
         ]
 
+    max_tokens = socr_max_tokens if req.style == "socratic" else 512
     try:
         resp = await asyncio.to_thread(
             lambda: ds.chat.completions.create(
                 model="deepseek-chat",
-                max_tokens=512,
+                max_tokens=max_tokens,
                 messages=messages,
             )
         )
