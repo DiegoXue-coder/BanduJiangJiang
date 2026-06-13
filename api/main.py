@@ -604,48 +604,37 @@ async def ask(req: AskRequest, request: Request):
 
     if req.style == "socratic":
         round_num = len(req.history) // 2 + 1
-        SOCR_MAX_ROUNDS = 8  # 安全上限，防止无限循环
+        SOCR_MAX_ROUNDS = 8
         if round_num >= SOCR_MAX_ROUNDS:
-            # 强制收尾
-            system_prompt = (
-                "你是一位温暖的阅读导师。对话已经进行了很多轮。\n"
-                "必须以"你已经推导出来了——"开头，用2-3句话给出核心洞见，结束对话。\n"
-                "禁止 Markdown 符号和 emoji。"
-            )
+            system_prompt = "你是阅读导师，必须以"你已经推导出来了——"开头给出核心洞见，2-3句话结束对话。"
             socr_max_tokens = 300
         elif round_num >= 3:
-            # 第3轮起：AI 自己判断用户是否理解
+            # 完形填空式：AI 选择两条路之一补全
             system_prompt = (
-                "你是一位苏格拉底式阅读导师。判断用户是否已真正理解了核心洞见。\n\n"
-                "如果用户的回答触及了核心：\n"
-                "  → 以"你已经推导出来了——"开头，用2-3句话给出完整洞见，结束对话。\n\n"
-                "如果用户的回答还停留在表面或方向偏了：\n"
-                "  → 用一句话轻轻拨正方向（≤20字），再提一个更深的追问（≤25字）。\n"
-                "  → 不给出答案，继续引导。\n\n"
-                "禁止 Markdown 符号和 emoji。"
+                "你是苏格拉底式阅读导师。根据用户的回答，从以下两条路选一条输出：\n\n"
+                "路A——用户已触及核心，输出：\n"
+                "你已经推导出来了——[用2-3句揭示洞见]\n\n"
+                "路B——用户还未到位，输出：\n"
+                "[一句拨正方向，≤15字]。[一个追问，≤20字，问号结尾]\n\n"
+                "只输出以上格式的内容，不加任何其他文字。"
             )
             socr_max_tokens = 300
         elif round_num == 2:
-            # 第2轮：轻度引导 + 追问
+            # 完形填空式：固定格式两句话
             system_prompt = (
-                "你是一位苏格拉底式阅读导师。\n"
-                "用户刚刚给出了他的想法。你的任务：\n"
-                "1. 用一句话肯定或轻微修正用户的方向（≤20字）\n"
-                "2. 紧接着提一个更深入的追问（≤25字）\n"
-                "总共两句话，不给出最终答案，不展开解释。\n"
-                "禁止 Markdown 符号和 emoji。"
+                "你是苏格拉底式阅读导师。按以下格式输出两句话，不多不少：\n\n"
+                "[对用户回答的一句点评或轻微拨正，≤15字]。[一个追问，≤20字，问号结尾]\n\n"
+                "只输出这两句，不加解释、不给答案、不加任何其他内容。"
             )
-            socr_max_tokens = 120
+            socr_max_tokens = 100
         else:
-            # 第1轮：只抛一个问题，零解释零解读
+            # 完形填空式：直接补全问句
             system_prompt = (
-                "你是一位苏格拉底式阅读导师。\n"
-                "只做一件事：针对用户选中的文字，提一个能触发独立思考的问题。\n"
-                "输出格式：只有一句问句，不超过25字，句末用问号结尾。\n"
-                "严禁：任何解释、任何解读、任何背景介绍、任何肯定语句。\n"
-                "示例：「如果收益有上限，那风险该由谁来承担？」"
+                "你是苏格拉底式阅读导师。针对用户提供的文字，直接输出一个问句。\n\n"
+                "格式：[问句，≤20字，问号结尾]\n\n"
+                "只输出问句本身，不加任何解释、引导语或前缀。"
             )
-            socr_max_tokens = 60
+            socr_max_tokens = 50
 
         # 第1轮：只传选文本身，不带"请解释"动词
         if not req.history:
@@ -668,11 +657,13 @@ async def ask(req: AskRequest, request: Request):
         ]
 
     max_tokens = socr_max_tokens if req.style == "socratic" else 512
+    temperature = 0.3 if req.style == "socratic" else 1.0
     try:
         resp = await asyncio.to_thread(
             lambda: ds.chat.completions.create(
                 model="deepseek-chat",
                 max_tokens=max_tokens,
+                temperature=temperature,
                 messages=messages,
             )
         )
