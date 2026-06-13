@@ -131,6 +131,34 @@
   font-size: 14px;
   line-height: 1.6;
   word-break: break-word;
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
+}
+
+.bandu-copy-btn {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  border: 1px solid #d0d5e8;
+  background: #fff;
+  color: #8a94a8;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s;
+  line-height: 1.4;
+}
+
+.bandu-msg-assistant:hover .bandu-copy-btn {
+  opacity: 1;
+}
+
+.bandu-copy-btn.copied {
+  color: #5956D5;
+  border-color: #5956D5;
 }
 
 .bandu-msg-user {
@@ -145,6 +173,7 @@
   color: #1a1a2e;
   align-self: flex-start;
   border-bottom-left-radius: 4px;
+  position: relative;
 }
 
 /* ── 状态行 ── */

@@ -499,6 +499,20 @@ function addMessage(role, text) {
   const el = document.createElement("div");
   el.className = `bandu-msg bandu-msg-${role}`;
   el.textContent = text;
+  if (role === "assistant") {
+    const btn = document.createElement("button");
+    btn.className = "bandu-copy-btn";
+    btn.textContent = "复制";
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      navigator.clipboard.writeText(text).then(() => {
+        btn.textContent = "已复制";
+        btn.classList.add("copied");
+        setTimeout(() => { btn.textContent = "复制"; btn.classList.remove("copied"); }, 1500);
+      });
+    });
+    el.appendChild(btn);
+  }
   c.appendChild(el);
   while (c.children.length > 20) c.removeChild(c.firstChild);
   c.scrollTop = c.scrollHeight;
