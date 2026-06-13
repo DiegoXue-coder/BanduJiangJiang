@@ -709,8 +709,10 @@ async function handleSocrReply(userAnswer) {
 
   _socr.history.push({ role: "assistant", content: answer });
 
-  if (_socr.round > 3) {
-    // 总结完毕，保存整个对话并退出苏格拉底模式
+  // 检测 AI 是否给出了收尾总结（第3轮起 AI 自主判断）
+  const isDone = answer.startsWith("你已经推导出来了");
+
+  if (isDone) {
     const firstQ = _socr.history[0]?.content || ans;
     saveHistory(firstQ, answer, _socr.context);
     showStatus("苏格拉底对话结束 ✓");
