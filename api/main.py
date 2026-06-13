@@ -669,18 +669,22 @@ async def ask(req: AskRequest, request: Request):
             )
         )
         raw = resp.choices[0].message.content
+        print(f"[苏格拉底] round={round_num} style={req.style} raw={repr(raw[:80])}")
 
-        # 苏格拉底 Q 轮：后处理提取，只取问句，AI 的解释对用户不可见
-        if req.style == "socratic" and round_num < SOCR_MAX_ROUNDS and not raw.startswith("你已经推导出来了"):
-            # 优先找独立问句（以？结尾的句子）
-            import re as _re
-            sentences = _re.split(r'(?<=[。！？\?])', raw)
-            questions = [s.strip() for s in sentences if s.strip().endswith(("？", "?"))]
-            if questions:
-                raw = questions[0]  # 只取第一个问句
-            # 若 AI 没生成问号句，截取前 30 字兜底
-            elif len(raw) > 30:
-                raw = raw[:30]
+        # 苏格拉底 Q 轮：截取第一个问号之前的内容，AI 的解释永远不可见
+        is_socr_q = (req.style == "socratic"
+                     and round_num < SOCR_MAX_ROUNDS
+                     and not raw.startswith("你已经推导出来了"))
+        if is_socr_q:
+            # 找第一个中文或英文问号，截断后面所有内容
+            for qmark in ("？", "?"):
+                idx = raw.find(qmark)
+                if idx >= 0:
+                    raw = raw[:idx + 1].strip()
+                    break
+            else:
+                raw = raw[:40]  # 没有问号时兜底截40字
+            print(f"[苏格拉底] 提取后={repr(raw)}")
 
         return AskResponse(answer=raw)
     except Exception as e:
