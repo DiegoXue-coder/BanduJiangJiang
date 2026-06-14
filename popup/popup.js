@@ -1,4 +1,16 @@
 const DEFAULT_API_URL = "https://bandujiangjiang-production.up.railway.app";
+const _EXT_SECRET = "REPLACE_WITH_YOUR_SECRET";
+
+async function _getExtToken() {
+  const day = new Date().toISOString().slice(0, 10);
+  const key = await crypto.subtle.importKey(
+    "raw", new TextEncoder().encode(_EXT_SECRET),
+    { name: "HMAC", hash: "SHA-256" }, false, ["sign"]
+  );
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(day));
+  return Array.from(new Uint8Array(sig))
+    .map(b => b.toString(16).padStart(2, "0")).join("").slice(0, 32);
+}
 
 async function loadSettings() {
   const data = await chrome.storage.local.get([
@@ -61,9 +73,10 @@ document.getElementById("test-sf-btn").addEventListener("click", async () => {
   }
   btn.disabled = true; btn.textContent = "测试中…"; result.textContent = "";
   try {
+    const extToken = await _getExtToken();
     const res = await fetch(`${apiUrl}/transcribe`, {
       method: "POST",
-      headers: { "X-SiliconFlow-Key": sfKey, "Content-Type": "audio/webm" },
+      headers: { "X-SiliconFlow-Key": sfKey, "Content-Type": "audio/webm", "X-Extension-Token": extToken },
       body: new Uint8Array(0),
     });
     if (res.status === 400 || res.ok) {
@@ -97,8 +110,9 @@ document.getElementById("test-wr-btn").addEventListener("click", async () => {
   }
   btn.disabled = true; btn.textContent = "测试中…"; result.textContent = "";
   try {
+    const extToken = await _getExtToken();
     const res = await fetch(`${apiUrl}/context/current`, {
-      headers: { "X-WeRead-Key": wrKey },
+      headers: { "X-WeRead-Key": wrKey, "X-Extension-Token": extToken },
     });
     if (res.ok) {
       const data = await res.json();
@@ -158,6 +172,7 @@ document.getElementById("test-btn").addEventListener("click", async () => {
   try {
     const headers = { "Content-Type": "application/json" };
     if (dsKey) headers["X-DeepSeek-Key"] = dsKey;
+    headers["X-Extension-Token"] = await _getExtToken();
 
     const res = await fetch(`${apiUrl}/ask`, {
       method: "POST",

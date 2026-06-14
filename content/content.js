@@ -4,6 +4,20 @@
 const IS_TOP = window === window.top;
 const log = (...a) => console.log("[伴读讲讲]", ...a);
 
+// ── HMAC 日签名令牌（与后端 EXTENSION_SECRET 对应）────────────────
+const _EXT_SECRET = "REPLACE_WITH_YOUR_SECRET"; // 需与 Railway EXTENSION_SECRET 一致
+
+async function _getExtToken() {
+  const day = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+  const key = await crypto.subtle.importKey(
+    "raw", new TextEncoder().encode(_EXT_SECRET),
+    { name: "HMAC", hash: "SHA-256" }, false, ["sign"]
+  );
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(day));
+  return Array.from(new Uint8Array(sig))
+    .map(b => b.toString(16).padStart(2, "0")).join("").slice(0, 32);
+}
+
 log("脚本加载", IS_TOP ? "顶层" : "iframe", location.href);
 
 // ── 设置（从 chrome.storage 加载） ───────────────────────────────
@@ -34,6 +48,7 @@ async function loadSettings() {
     darkMode:       !!data.darkMode,
     panelWidth:     data.panelWidth  || 360,
     panelHeight:    data.panelHeight || 520,
+    extToken:       await _getExtToken(),
   };
   ttsEnabled = _settings.tts;
   applyTheme();
@@ -53,6 +68,7 @@ function keyHeaders() {
   if (_settings.deepseekKey)    h["X-DeepSeek-Key"]    = _settings.deepseekKey;
   if (_settings.siliconflowKey) h["X-SiliconFlow-Key"] = _settings.siliconflowKey;
   if (_settings.wereadKey)      h["X-WeRead-Key"]       = _settings.wereadKey;
+  if (_settings.extToken)       h["X-Extension-Token"]  = _settings.extToken;
   return h;
 }
 
