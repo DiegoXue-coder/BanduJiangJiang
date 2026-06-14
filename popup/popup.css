@@ -280,3 +280,11 @@ body {
 }
 .test-ok   { color: #2d7a3a; }
 .test-fail { color: #c62828; }
+
+/* 滑块 */
+.popup-slider {
+  width: 100%;
+  margin-top: 6px;
+  accent-color: #5956D5;
+  cursor: pointer;
+}

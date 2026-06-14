@@ -14,21 +14,37 @@ let _settings = {
   wereadKey: "",
   style: "simple",
   tts: true,
+  darkMode: false,
+  panelWidth: 360,
+  panelHeight: 520,
 };
 
 async function loadSettings() {
   const data = await chrome.storage.local.get([
     "apiUrl", "deepseekKey", "siliconflowKey", "wereadKey", "style", "tts",
+    "darkMode", "panelWidth", "panelHeight",
   ]);
   _settings = {
-    apiUrl:         data.apiUrl         || "http://localhost:8002",
+    apiUrl:         data.apiUrl         || "https://bandujiangjiang-production.up.railway.app",
     deepseekKey:    data.deepseekKey    || "",
     siliconflowKey: data.siliconflowKey || "",
     wereadKey:      data.wereadKey      || "",
     style:          data.style          || "simple",
     tts:            data.tts !== false,
+    darkMode:       !!data.darkMode,
+    panelWidth:     data.panelWidth  || 360,
+    panelHeight:    data.panelHeight || 520,
   };
   ttsEnabled = _settings.tts;
+  applyTheme();
+}
+
+function applyTheme() {
+  const root = document.getElementById("bandu-root");
+  if (!root) return;
+  root.classList.toggle("bandu-dark", _settings.darkMode);
+  root.style.setProperty("--bd-panel-w", `${_settings.panelWidth}px`);
+  root.style.setProperty("--bd-panel-h", `${_settings.panelHeight}px`);
 }
 
 // 返回所有请求都应带上的 header（GET 用）
@@ -474,6 +490,7 @@ function buildUI() {
       </div>
     </div>`;
   document.body.appendChild(root);
+  applyTheme();
   bindTopEvents();
 }
 
@@ -1121,8 +1138,14 @@ if (IS_TOP) {
 
   // 设置变更时实时同步（用户在 popup 保存后立即生效）
   chrome.storage.onChanged.addListener((changes) => {
-    const keys = ["apiUrl", "deepseekKey", "siliconflowKey", "wereadKey", "style", "tts"];
-    if (keys.some(k => k in changes)) loadSettings();
+    const keys = ["apiUrl", "deepseekKey", "siliconflowKey", "wereadKey", "style", "tts",
+                  "darkMode", "panelWidth", "panelHeight"];
+    if (!keys.some(k => k in changes)) return;
+    // 视觉类设置立即应用，无需等待异步
+    if ("darkMode"    in changes) { _settings.darkMode    = changes.darkMode.newValue;    applyTheme(); }
+    if ("panelWidth"  in changes) { _settings.panelWidth  = changes.panelWidth.newValue;  applyTheme(); }
+    if ("panelHeight" in changes) { _settings.panelHeight = changes.panelHeight.newValue; applyTheme(); }
+    loadSettings();
   });
 } else {
   log("iframe 初始化，绑定划词事件");
