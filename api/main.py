@@ -32,13 +32,17 @@ _pool: asyncpg.Pool | None = None
 async def get_pool() -> asyncpg.Pool:
     global _pool
     if _pool is None:
-        _pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
+        # statement_cache_size=0 required for Supabase Transaction Pooler (PgBouncer)
+        _pool = await asyncpg.create_pool(
+            DATABASE_URL, min_size=1, max_size=5, statement_cache_size=0
+        )
     return _pool
 
 async def init_db():
     pool = await get_pool()
     async with pool.acquire() as conn:
-        await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+        # pgvector 在 Supabase 默认已启用，表结构通过 SQL Editor 预建
+        # 此处仅做幂等检查，确保表存在
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS qa_history (
                 id            BIGSERIAL PRIMARY KEY,
@@ -51,11 +55,6 @@ async def init_db():
                 selection     TEXT NOT NULL DEFAULT '',
                 embedding     vector(1024)
             )
-        """)
-        # HNSW 索引加速向量相似度查询
-        await conn.execute("""
-            CREATE INDEX IF NOT EXISTS qa_history_embedding_hnsw
-            ON qa_history USING hnsw (embedding vector_cosine_ops)
         """)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS daily_usage (
