@@ -12,8 +12,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# 数据目录（Railway 持久卷挂载点）
-RUN mkdir -p /data
-
 EXPOSE 8080
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
