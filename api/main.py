@@ -41,8 +41,7 @@ async def get_pool() -> asyncpg.Pool:
 async def init_db():
     pool = await get_pool()
     async with pool.acquire() as conn:
-        # pgvector 在 Supabase 默认已启用，表结构通过 SQL Editor 预建
-        # 此处仅做幂等检查，确保表存在
+        await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS qa_history (
                 id            BIGSERIAL PRIMARY KEY,
