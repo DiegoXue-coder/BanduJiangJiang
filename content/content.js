@@ -5,7 +5,7 @@ const IS_TOP = window === window.top;
 const log = (...a) => console.log("[伴读讲讲]", ...a);
 
 // ── HMAC 日签名令牌（与后端 EXTENSION_SECRET 对应）────────────────
-const _EXT_SECRET = "REPLACE_WITH_YOUR_SECRET"; // 需与 Railway EXTENSION_SECRET 一致
+const _EXT_SECRET = "ce15f8e8-5956-42c5-9a6d-a0fc7d504f7b"; // 需与 Railway EXTENSION_SECRET 一致
 
 async function _getExtToken() {
   const day = new Date().toISOString().slice(0, 10); // YYYY-MM-DD

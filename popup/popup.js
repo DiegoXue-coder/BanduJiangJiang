@@ -1,5 +1,5 @@
 const DEFAULT_API_URL = "https://bandujiangjiang-production.up.railway.app";
-const _EXT_SECRET = "REPLACE_WITH_YOUR_SECRET";
+const _EXT_SECRET = "ce15f8e8-5956-42c5-9a6d-a0fc7d504f7b";
 
 async function _getExtToken() {
   const day = new Date().toISOString().slice(0, 10);
