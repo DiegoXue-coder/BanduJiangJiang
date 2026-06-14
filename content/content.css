@@ -87,6 +87,34 @@
   --bd-shadow:       0 8px 40px rgba(0,0,0,0.55);
 }
 
+/* ── 拖拽调整大小 ── */
+.bandu-resize-left {
+  position: absolute;
+  left: 0; top: 20px; bottom: 20px;
+  width: 6px;
+  cursor: ew-resize;
+  z-index: 10;
+  border-radius: 3px 0 0 3px;
+}
+.bandu-resize-top {
+  position: absolute;
+  top: 0; left: 20px; right: 20px;
+  height: 6px;
+  cursor: ns-resize;
+  z-index: 10;
+}
+.bandu-resize-corner {
+  position: absolute;
+  top: 0; left: 0;
+  width: 20px; height: 20px;
+  cursor: nwse-resize;
+  z-index: 11;
+  border-radius: 16px 0 0 0;
+}
+.bandu-resize-left:hover,
+.bandu-resize-top:hover   { background: var(--bd-accent-light); }
+#bandu-root.bandu-resizing * { user-select: none !important; }
+
 /* ── 浮动按钮 ── */
 #bandu-fab {
   width: 52px;

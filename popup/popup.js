@@ -2,8 +2,7 @@ const DEFAULT_API_URL = "https://bandujiangjiang-production.up.railway.app";
 
 async function loadSettings() {
   const data = await chrome.storage.local.get([
-    "apiUrl", "deepseekKey", "siliconflowKey", "wereadKey", "style", "tts",
-    "darkMode", "panelWidth", "panelHeight",
+    "apiUrl", "deepseekKey", "siliconflowKey", "wereadKey", "style", "tts", "darkMode",
   ]);
   document.getElementById("api-url").value        = data.apiUrl        || DEFAULT_API_URL;
   document.getElementById("deepseek-key").value   = data.deepseekKey   || "";
@@ -12,13 +11,6 @@ async function loadSettings() {
   document.getElementById("style-select").value   = data.style         || "simple";
   document.getElementById("tts-toggle").checked   = data.tts !== false;
   document.getElementById("dark-mode-toggle").checked = !!data.darkMode;
-
-  const pw = data.panelWidth  || 360;
-  const ph = data.panelHeight || 520;
-  document.getElementById("panel-width").value  = pw;
-  document.getElementById("panel-height").value = ph;
-  document.getElementById("panel-width-val").textContent  = pw + "px";
-  document.getElementById("panel-height-val").textContent = ph + "px";
 
   // 首次安装：DeepSeek Key 为空时自动展开并聚焦
   if (!data.deepseekKey) {
@@ -132,20 +124,6 @@ document.getElementById("dark-mode-toggle").addEventListener("change", (e) => {
   chrome.storage.local.set({ darkMode: e.target.checked });
 });
 
-// 宽度滑块 — 实时同步
-document.getElementById("panel-width").addEventListener("input", (e) => {
-  const v = parseInt(e.target.value);
-  document.getElementById("panel-width-val").textContent = v + "px";
-  chrome.storage.local.set({ panelWidth: v });
-});
-
-// 高度滑块 — 实时同步
-document.getElementById("panel-height").addEventListener("input", (e) => {
-  const v = parseInt(e.target.value);
-  document.getElementById("panel-height-val").textContent = v + "px";
-  chrome.storage.local.set({ panelHeight: v });
-});
-
 // 折叠面板
 document.querySelectorAll(".popup-collapse-btn").forEach(btn => {
   btn.addEventListener("click", () => {
@@ -224,8 +202,6 @@ document.getElementById("save-btn").addEventListener("click", async () => {
     style:          document.getElementById("style-select").value,
     tts:            document.getElementById("tts-toggle").checked,
     darkMode:       document.getElementById("dark-mode-toggle").checked,
-    panelWidth:     parseInt(document.getElementById("panel-width").value),
-    panelHeight:    parseInt(document.getElementById("panel-height").value),
   });
 
   const msg = document.getElementById("save-msg");

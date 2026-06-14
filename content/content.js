@@ -442,6 +442,9 @@ function buildUI() {
       </svg>
     </div>
     <div id="bandu-panel" data-tab="chat">
+      <div class="bandu-resize-left"></div>
+      <div class="bandu-resize-top"></div>
+      <div class="bandu-resize-corner"></div>
       <div id="bandu-header">
         <span id="bandu-title">伴读讲讲</span>
         <div id="bandu-header-actions">
@@ -491,7 +494,56 @@ function buildUI() {
     </div>`;
   document.body.appendChild(root);
   applyTheme();
+  initResize();
   bindTopEvents();
+}
+
+function initResize() {
+  const panel = document.getElementById("bandu-panel");
+  const root  = document.getElementById("bandu-root");
+  if (!panel || !root) return;
+
+  const MIN_W = 300, MAX_W = 600, MIN_H = 380, MAX_H = 800;
+
+  function startDrag(e, dirW, dirH) {
+    e.preventDefault();
+    e.stopPropagation();
+    const startX = e.clientX, startY = e.clientY;
+    const startW = _settings.panelWidth, startH = _settings.panelHeight;
+
+    root.classList.add("bandu-resizing");
+
+    function onMove(e) {
+      if (dirW) {
+        _settings.panelWidth = Math.round(
+          Math.min(MAX_W, Math.max(MIN_W, startW - (e.clientX - startX)))
+        );
+      }
+      if (dirH) {
+        _settings.panelHeight = Math.round(
+          Math.min(MAX_H, Math.max(MIN_H, startH - (e.clientY - startY)))
+        );
+      }
+      applyTheme();
+    }
+
+    function onUp() {
+      root.classList.remove("bandu-resizing");
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      try { chrome.storage.local.set({ panelWidth: _settings.panelWidth, panelHeight: _settings.panelHeight }); } catch {}
+    }
+
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }
+
+  panel.querySelector(".bandu-resize-left")
+    ?.addEventListener("mousedown", e => startDrag(e, true, false));
+  panel.querySelector(".bandu-resize-top")
+    ?.addEventListener("mousedown", e => startDrag(e, false, true));
+  panel.querySelector(".bandu-resize-corner")
+    ?.addEventListener("mousedown", e => startDrag(e, true, true));
 }
 
 // idle | preparing | recording | processing
