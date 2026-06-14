@@ -503,7 +503,7 @@ function initResize() {
   const root  = document.getElementById("bandu-root");
   if (!panel || !root) return;
 
-  const MIN_W = 300, MAX_W = 600, MIN_H = 380, MAX_H = 800;
+  const MIN_W = 240, MAX_W = 600, MIN_H = 320, MAX_H = 800;
 
   function startDrag(e, dirW, dirH) {
     e.preventDefault();

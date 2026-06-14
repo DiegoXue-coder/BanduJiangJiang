@@ -40,8 +40,8 @@
   --bd-socr-border:  rgba(89,86,213,0.12);
   --bd-shadow:       0 8px 40px rgba(0,0,0,0.15);
   position: fixed;
-  bottom: 32px;
-  right: 32px;
+  bottom: 20px;
+  right: 16px;
   z-index: 999999;
   font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
 }
@@ -136,25 +136,26 @@
 /* ── 面板 ── */
 #bandu-panel {
   position: fixed;
-  bottom: 96px;
-  right: 32px;
+  bottom: 80px;
+  right: 0;
   width: var(--bd-panel-w, 360px);
-  max-height: var(--bd-panel-h, 520px);
+  height: var(--bd-panel-h, 520px);
   background: var(--bd-bg);
-  border-radius: 16px;
+  border-radius: 16px 0 0 16px;
   box-shadow: var(--bd-shadow);
   border: 1px solid var(--bd-border);
+  border-right: none;
   display: flex;
   flex-direction: column;
   overflow: hidden;
   opacity: 0;
-  transform: translateY(12px) scale(0.97);
+  transform: translateX(12px) scale(0.97);
   pointer-events: none;
   transition: opacity 0.22s ease, transform 0.22s ease;
 }
 #bandu-panel.bandu-panel-open {
   opacity: 1;
-  transform: translateY(0) scale(1);
+  transform: translateX(0) scale(1);
   pointer-events: all;
 }
 
