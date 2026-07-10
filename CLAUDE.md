@@ -1,125 +1,36 @@
 # 伴读讲讲 — 项目上下文
 
-## 项目定性
+## 这个仓库现在有两个产品
 
-Chrome 扩展 + 本地 Python 后端，专为微信读书网页版（weread.qq.com）打造的 AI 语音伴读助手。
+1. **`extension/`** —— 原始的 Chrome 扩展（专为微信读书网页版打造的 AI 语音伴读助手）。**已冻结，不再迭代，但保留不删除。** 具体上下文见 `extension/CLAUDE.md`。
+2. **`mobile/`** —— **正在积极开发的新产品**：从 Chrome 扩展转型的独立手机端 App，围绕"公版经典精读"定位，核心体验是"划线 → AI 苏格拉底式讲解 → 语音对话"，并为长期数据飞轮打地基。**这是当前的开发重心。**
 
-- 用户在微信读书划线 → 点"讲讲"按钮 → AI 解释 → TTS 朗读
-- 支持语音提问（VAD 自动停顿检测 → SenseVoice 转文字 → DeepSeek 回答）
+两者共用同一个后端 `api/`（DeepSeek 对话、TTS、STT、PostgreSQL+pgvector）——后端只做"加"不做"改"：`extension/` 依赖的旧接口和旧表结构原样保留，手机端的新接口新表另外加，新接口统一加 `/app` 前缀区分。
 
 ---
 
-## 技术栈
+## 手机端新产品的完整背景，看这里
+
+架构决策、技术选型的推理过程、以及正式的项目管理文档，全部记录在：
+
+- **`docs/学习笔记/`** —— 每个技术决策的推理过程（语音架构、跨平台框架、EPUB渲染、数据库Schema、后端API设计等），从 `00-技能清单.md` 开始看
+- **`docs/项目管理/`** —— 正式的范围声明、WBS 任务分解、风险登记表
+
+**在对手机端新产品做任何架构判断之前，先读这两个文件夹**，不要凭空假设或重新推导已经讨论过的决策。
+
+---
+
+## 手机端技术栈速览
 
 | 层 | 技术 |
 |----|------|
-| 浏览器扩展 | Chrome MV3，content.js + popup + service-worker |
-| 后端 | Python 3.13 + FastAPI，运行在 localhost:8002 |
-| AI 对话 | DeepSeek Chat (`deepseek-chat`) |
-| 语音合成 TTS | Microsoft Edge TTS (`edge_tts`) |
-| 语音识别 STT | SiliconFlow SenseVoiceSmall（中文优化） |
-| 音频转换 | PyAV（WebM → WAV，SenseVoice 不接受 WebM） |
-
----
-
-## 微信读书官方 Skill API（2026-05-17 开放）
-
-### 基本信息
-
-- 官方页面：https://weread.qq.com/r/weread-skills
-- 开源 SDK：https://github.com/Ceelog/OpenWeRead（TypeScript，MIT）
-- 安装 SDK：`pnpm add openweread`
-- API Key 格式：`wrk-xxxxxxxx`，在官方 Skills 管理页扫码获取
-- 环境变量名：`WEREAD_API_KEY`
-
-### 可用接口
-
-| 接口路径 | 功能 | 关键返回字段 |
-|---------|------|------------|
-| `/shelf/sync` | 书架同步 | `books[]`（含 `bookId`、`readUpdateTime`） |
-| `/book/info` | 书籍详情 | `title`、`author`、`intro` |
-| `/book/chapterinfo` | 章节目录 | `chapters[]`（`chapterUid`、`title`） |
-| `/book/getprogress` | 阅读进度 | `chapterUid`（当前章节） |
-| `/book/bookmarklist` | 用户划线和笔记 | `updated[]`（`markText`、`createTime`） |
-| `/book/bestbookmarks` | 热门划线 | `items[]`（`markText`、`totalCount`） |
-| `/book/underlines` | 划线列表 | 同上 |
-| `/user/notebooks` | 有笔记的书籍 | 书籍列表 + 笔记条数 |
-| `/readdata/detail` | 阅读统计 | 时长、天数 |
-| `/store/search` | 书城搜索 | 书籍列表 |
-| `/book/recommend` | 个性化推荐 | 书籍列表 |
-| `/book/similar` | 相似书籍 | 书籍列表 |
-| `/review/list/mine` | 我的书评 | 评论列表 |
-
-### SDK 基本用法（TypeScript）
-
-```typescript
-import { OpenWeRead } from "openweread";
-const weread = new OpenWeRead({ apiKey: process.env.WEREAD_API_KEY! });
-
-// 并发拉取书本完整上下文
-const [bookInfo, chapters, progress, myMarks, hotMarks] = await Promise.allSettled([
-  weread.book.getInfo({ bookId }),
-  weread.book.getChapterInfo({ bookId }),
-  weread.book.getProgress({ bookId }),
-  weread.book.getBookmarkList({ bookId }),
-  weread.book.getBestBookmarks({ bookId }),
-]);
-```
-
----
-
-## 当前架构痛点与 API 接入方案
-
-### 现有痛点
-
-1. **DOM 选择器脆弱**：`content.js` 靠 `.readerTopBar_title_link`、`.readerChapterContent` 等类名抓书名/章节/正文，微信读书改版即废
-2. **剪贴板 hack**：划词后点 `wr_copy` 按钮 → 等 150ms → 读剪贴板，不稳定且污染用户剪贴板
-3. **上下文极度有限**：只能看当前页 DOM，截断到 2000 字
-4. **对用户偏好一无所知**：不知道用户已经划了哪些线、关注什么
-
-### 接入后改善
-
-| 痛点 | 改善方式 |
-|------|---------|
-| 书名/章节获取 | URL 提取 `bookId` → `/book/info` + `/book/chapterinfo`（不依赖 DOM） |
-| 正文上下文 | 用 `/book/getprogress` 知道当前章节，配合章节目录给 AI 更完整的书本结构 |
-| 用户偏好 | `/book/bookmarklist` 拿用户自己的划线，作为 AI prompt 的偏好信号 |
-| 热门难点 | `/book/bestbookmarks` 知道这本书其他读者觉得难的段落 |
-
-### 接入架构设计
-
-```
-content.js
-  → 从 URL 提取 bookId（正则：/web/reader/([A-Za-z0-9]+)）
-  → 调后端 GET /context/:bookId
-
-后端 /context/:bookId
-  → 并发调 WeRead API（book/info + chapterinfo + getprogress + bookmarklist）
-  → 组装结构化 BookContext 返回给扩展
-
-后端 /ask
-  → 接收问题 + 富上下文（含用户划线、当前章节、书籍信息）
-  → 传给 DeepSeek 生成答案
-```
-
-### 建议实现顺序
-
-1. `api/` 目录新增 TypeScript 子项目，安装 `openweread`
-2. 实现 `weread-context.ts`：`buildBookContext(bookId)` 函数，并发拉 5 个接口，`Promise.allSettled` 容错
-3. 后端新增 `GET /context/{book_id}` 端点（Python httpx 调 WeRead API，或 Node 微服务透传）
-4. `content.js` 中 `extractBookContext()` 改为调后端接口，删除 DOM 选择器链
-5. 更新 `api/.env.example` 加入 `WEREAD_API_KEY=wrk-xxxxxxxx`
-
-### System Prompt 优化方向
-
-获得 API 后，`SYSTEM_PROMPT` 可补充用户画像段：
-```
-用户在这本书中自己标注了以下内容（代表他的关注点）：
-{userHighlights}
-
-其他读者在这本书中最常标注的段落（代表全书难点）：
-{popularHighlights}
-```
+| 移动端框架 | React Native / Expo（`mobile/`，延续已有原型） |
+| EPUB 渲染 | `@epubjs-react-native`（WebView + epub.js） |
+| 后端 | Python 3.13 + FastAPI（`api/`，与扩展共用） |
+| 数据库 | PostgreSQL + pgvector（Railway 托管） |
+| AI 对话 | DeepSeek Chat（国内可访问，不用 Claude/GPT 等海外模型，避开中国大陆访问限制） |
+| 语音合成/识别 | Microsoft Edge TTS / SiliconFlow SenseVoiceSmall |
+| 内容来源 | 预置公版经典书库（不做用户自行导入任意 EPUB，DRM 限制详见学习笔记） |
 
 ---
 
@@ -127,30 +38,31 @@ content.js
 
 ```
 伴读讲讲/
-├── manifest.json          # Chrome 扩展声明（MV3）
-├── content/
-│   ├── content.js         # 核心：注入微信读书页面的脚本
-│   └── content.css        # 面板和浮动按钮样式
-├── background/
-│   └── service-worker.js  # 后台保活，备用 CORS 转发
-├── popup/
-│   ├── popup.html         # 扩展图标弹窗
-│   ├── popup.js
-│   └── popup.css
-├── icons/                 # 16/48/128px 图标
-├── api/
-│   ├── main.py            # FastAPI 后端（DeepSeek + EdgeTTS + SenseVoice）
+├── CLAUDE.md               # 本文件
+├── extension/               # 【已冻结】原 Chrome 扩展，详见 extension/CLAUDE.md
+│   ├── manifest.json
+│   ├── content/
+│   ├── background/
+│   ├── popup/
+│   ├── icons/
+│   └── gen_icons.py
+├── mobile/                  # 【开发中】新的手机端 App（React Native / Expo）
+├── api/                     # 共用后端（FastAPI），扩展和手机端都调用
+│   ├── main.py
 │   ├── requirements.txt
-│   └── .env               # DEEPSEEK_API_KEY, SILICONFLOW_API_KEY, WEREAD_API_KEY
-└── gen_icons.py           # 图标生成脚本
+│   └── .env
+├── docs/
+│   ├── 学习笔记/             # 技术决策推理过程
+│   ├── 项目管理/             # 范围声明 / WBS / 风险登记表
+│   ├── index.html            # Chrome Web Store 隐私政策页（GitHub Pages 托管，勿改路径）
+│   └── privacy.html
+└── railway.toml
 ```
 
 ---
 
 ## 关键约束
 
-- 后端跑在 `localhost:8002`（manifest.json host_permissions 已声明）
-- TTS 回答前必须过 `clean_for_tts()` 剥掉 Markdown 符号和 emoji
-- 音频管道：浏览器录 WebM → 后端 PyAV 转 WAV 16kHz mono → SenseVoice → 文字
-- AI 回答控制在 150 字内（System Prompt 约束），TTS 朗读时间合理
-- `Promise.allSettled`（不用 `Promise.all`）调 WeRead API，单个接口失败不影响整体
+- `Promise.allSettled`（不用 `Promise.all`）调外部 API，单个接口失败不影响整体
+- AI 回答控制在合理字数内，TTS 朗读时间要合理
+- 后端新增内容遵循"只加不改"原则，不破坏 `extension/` 现有依赖
