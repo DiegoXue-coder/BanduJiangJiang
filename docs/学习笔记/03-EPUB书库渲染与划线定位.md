@@ -1,0 +1,44 @@
+# EPUB 自建书库：格式、分页、划线定位、渲染方案
+
+> 学习背景：从"HTML 是可编程画布"这个已有认知一路推导到 EPUB 文件结构、
+> 分页机制、划线如何跨设备稳定定位，最后到 React Native 里怎么实际显示电子书。
+
+## EPUB 文件本质：打包的网页
+
+一个 `.epub` 文件本质上是一个压缩包，里面装的是：
+- 每章一个 HTML/XHTML 文件（跟 `content.js` 打交道的网页是同一种东西）
+- CSS 样式文件
+- 一个"索引"文件（manifest / 目录），记录各章节文件的顺序
+
+跟制作 App 时的"文件管理、页码管理"是同一种思路，只是发生在电子书这个场景里。
+
+## 分页（pagination）不是文件自带的，是阅读器现场算的
+
+关键认知：**电子书文件里没有"第几页"这个概念**，只有连续流动的文字（reflowable text）。"一页能装多少字、在哪里换页"是阅读 App 每次打开书时，根据当前字号、屏幕大小、横竖屏**现场计算**出来的——换个字号，分页结果就整个变了。
+
+而且这件事**没有统一标准算法**：EPUB 官方标准把"怎么分页"这件事故意留白，交给每个阅读 App 自己发挥，所以同一本书在苹果、Kindle、微信读书里页码经常对不上，这是设计上的开放性，不是谁做得差。
+
+## 划线怎么跨字号/跨设备稳定定位：CFI
+
+如果划线只记"第几页"，换字号重新分页后位置就全错了。也不能只记"划线的文字内容"本身，因为同一句话可能在书里出现不止一次，会认错。
+
+真正的解法是 **EPUB CFI（Canonical Fragment Identifier）**——理解成"电子书内部的精确地址"，是一条指向 **文档结构本身** 的路径（类似文件夹路径：第几章文件 → 第几个段落 → 第几个字符开始），而不是指向"渲染出来的第几页"。文档结构本身不随字号/分页变化，所以 CFI 地址永远能精确找回同一处内容。
+
+**对伴读讲讲的意义**：数据库里存用户划线时，应该存 CFI 地址而不是页码，这样划线才能跨设备、跨字号稳定复现，也才能支撑"跨书连接"这类数据飞轮功能。
+
+## 在 React Native 里怎么显示 EPUB：WebView 方案
+
+2026 年生态里主流做法（如 `@epubjs-react-native`）不是把电子书内容"翻译"成原生组件（React Native 平时的做法），也不是自己画像素（Flutter 的做法），而是**第三条路**：在 App 里嵌入一个隐藏的"迷你浏览器"（WebView），用一个成熟的网页端 JS 库 `epub.js` 来解析和渲染电子书内容——因为浏览器本来就是渲染 HTML 最成熟的工具，没必要重新发明。
+
+**这个"取巧"方案的代价：**
+1. **性能开销**——WebView 相当于在 App 里跑一个完整的迷你浏览器引擎，比纯原生渲染更吃内存/CPU，翻页手感可能不如原生阅读器跟手。
+2. **桥接问题（对伴读讲讲最关键）**——电子书内容活在 WebView 自己的隔离世界里，App 主体逻辑（调用 DeepSeek、播 TTS 的部分）看不到里面发生的事，必须专门写"桥"把划线事件传出来、把"跳转到某个 CFI/高亮某段"的指令传进去。AI 讲解当前段落、TTS 朗读同步这些核心功能，都要经过这座桥，是最容易出 bug、最费工的地方。
+3. **原生手感的细微差异**——WebView 里的选字体验（长按出现的小手柄、菜单）是网页自己画的，跟手机系统原生选字会有细微不同。
+
+## 参考资料
+
+- [epubjs-react-native (GitHub)](https://github.com/victorsoares96/epubjs-react-native)
+- [react-native-readium (npm)](https://www.npmjs.com/package/react-native-readium)
+- [EpubCFI System (DeepWiki)](https://deepwiki.com/futurepress/epub.js/4.1-epubcfi-system)
+- [EPUB Annotations Use Cases and Requirements (W3C)](https://www.w3.org/TR/epub-anno-ucr/)
+- [Reflowable vs Fixed-layout ePUBs](https://www.getmagicbox.com/blog/reflowable-vs-fixed-layout-epubs-best-ebook-format-for-multiple-devices/)
