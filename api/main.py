@@ -5,6 +5,7 @@ import io
 import re
 import time
 import hmac
+import uuid
 import hashlib
 import datetime
 import asyncio
@@ -13,7 +14,7 @@ from contextlib import asynccontextmanager
 
 import asyncpg
 
-from fastapi import FastAPI, HTTPException, Request, Depends
+from fastapi import FastAPI, HTTPException, Request, Depends, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel
@@ -21,6 +22,8 @@ from openai import OpenAI
 import edge_tts
 import av
 import httpx
+import ebooklib
+from ebooklib import epub
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -56,6 +59,10 @@ async def init_db():
                 embedding     vector(1024)
             )
         """)
+        # 手机端：加 user_id（数据飞轮永久保留，不再自动清理旧记录）
+        await conn.execute(
+            "ALTER TABLE qa_history ADD COLUMN IF NOT EXISTS user_id BIGINT NOT NULL DEFAULT 1"
+        )
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS daily_usage (
                 ip    TEXT    NOT NULL,
@@ -64,10 +71,59 @@ async def init_db():
                 PRIMARY KEY (ip, date)
             )
         """)
-        # 清理 90 天前的旧记录
-        await conn.execute(
-            "DELETE FROM qa_history WHERE created_at < NOW() - INTERVAL '90 days'"
-        )
+
+        # ── 手机端新表（WBS 阶段一：地基）──────────────────────────
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id         BIGSERIAL PRIMARY KEY,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        # v1 单用户：写死种子用户 id=1（HMAC 会员卡式验证，不做注册登录）
+        await conn.execute("""
+            INSERT INTO users (id) VALUES (1)
+            ON CONFLICT (id) DO NOTHING
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS books (
+                id         BIGSERIAL PRIMARY KEY,
+                user_id    BIGINT NOT NULL REFERENCES users(id),
+                title      TEXT NOT NULL DEFAULT '',
+                author     TEXT NOT NULL DEFAULT '',
+                file_path  TEXT NOT NULL DEFAULT '',
+                added_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS chapters (
+                id          BIGSERIAL PRIMARY KEY,
+                book_id     BIGINT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+                order_index INTEGER NOT NULL,
+                title       TEXT NOT NULL DEFAULT ''
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS highlights (
+                id               BIGSERIAL PRIMARY KEY,
+                user_id          BIGINT NOT NULL REFERENCES users(id),
+                book_id          BIGINT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+                chapter_id       BIGINT REFERENCES chapters(id) ON DELETE CASCADE,
+                cfi_location     TEXT NOT NULL DEFAULT '',
+                highlighted_text TEXT NOT NULL DEFAULT '',
+                note             TEXT NOT NULL DEFAULT '',
+                embedding        vector(1024),
+                created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS reading_progress (
+                user_id              BIGINT NOT NULL REFERENCES users(id),
+                book_id              BIGINT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+                current_cfi_location TEXT NOT NULL DEFAULT '',
+                updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (user_id, book_id)
+            )
+        """)
     print("[DB] 初始化完成，pgvector 已启用")
 
 @asynccontextmanager
@@ -232,6 +288,27 @@ class HistorySaveRequest(BaseModel):
     answer: str
     selection: str = ""
 
+# ── 手机端 App 请求/响应模型（WBS 阶段一骨架）──────────────────────
+
+class ChapterOut(BaseModel):
+    id: int
+    order_index: int
+    title: str
+
+class BookOut(BaseModel):
+    id: int
+    title: str
+    author: str
+    added_at: datetime.datetime
+    current_cfi_location: str = ""
+
+class BookContextOut(BaseModel):
+    id: int
+    title: str
+    author: str
+    chapters: list[ChapterOut]
+    current_cfi_location: str = ""
+
 # ── 系统 Prompt ────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = """你是"伴读讲讲"，一位亲切的读书陪伴助手。
@@ -328,6 +405,27 @@ def _webm_to_wav(audio_bytes: bytes) -> bytes:
         in_cont.close()
     out_io.seek(0)
     return out_io.read()
+
+# ── EPUB 章节目录提取 ──────────────────────────────────────────────
+
+def _extract_chapter_titles(book: "epub.EpubBook") -> list[str]:
+    """优先用 EPUB 自带目录(toc)取章节标题，toc 缺失时回退到 spine 文档顺序。"""
+    titles: list[str] = []
+
+    def walk(nodes):
+        for node in nodes:
+            if isinstance(node, tuple):
+                section, children = node
+                if getattr(section, "title", ""):
+                    titles.append(section.title)
+                walk(children)
+            elif getattr(node, "title", ""):
+                titles.append(node.title)
+
+    walk(book.toc)
+    if titles:
+        return titles
+    return [item.get_name() for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT)]
 
 # ── 微信读书 Skill API ─────────────────────────────────────────────
 
@@ -686,3 +784,96 @@ async def transcribe(request: Request, _=ExtAuth):
         print(f"[转录] 错误: {e}")
         raise HTTPException(status_code=502, detail=f"SenseVoice 错误: {e}")
     return {"text": text}
+
+# ── 手机端 App 接口（/app 前缀，WBS 阶段一骨架）─────────────────────
+# 不涉及 AI 对话逻辑、界面样式——纯粹的地基层，鉴权复用 Chrome 插件同一套
+# HMAC 会员卡式验证（ExtAuth），v1 单用户写死 user_id=1。
+
+APP_USER_ID       = 1
+EPUB_STORAGE_DIR  = os.environ.get("EPUB_STORAGE_DIR", "epub_storage")
+os.makedirs(EPUB_STORAGE_DIR, exist_ok=True)
+MAX_EPUB_BYTES    = 50 * 1024 * 1024  # 50MB
+
+@app.post("/app/books/import", response_model=BookOut)
+async def app_import_book(file: UploadFile = File(...), _=ExtAuth):
+    """把一本 EPUB 导入书库：解析标题/作者/章节目录，写入 books + chapters。"""
+    if not (file.filename or "").lower().endswith(".epub"):
+        raise HTTPException(status_code=400, detail="只支持 .epub 文件")
+
+    raw = await file.read()
+    if len(raw) > MAX_EPUB_BYTES:
+        raise HTTPException(status_code=413, detail="文件过大，请控制在 50MB 以内")
+
+    file_path = os.path.join(EPUB_STORAGE_DIR, f"{uuid.uuid4().hex}.epub")
+    with open(file_path, "wb") as f:
+        f.write(raw)
+
+    try:
+        book_epub = epub.read_epub(file_path)
+        title  = (book_epub.get_metadata("DC", "title")   or [("", {})])[0][0] or file.filename
+        author = (book_epub.get_metadata("DC", "creator") or [("", {})])[0][0] or ""
+        chapter_titles = _extract_chapter_titles(book_epub)
+    except Exception as e:
+        os.remove(file_path)
+        raise HTTPException(status_code=400, detail=f"EPUB 解析失败: {e}")
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            book_row = await conn.fetchrow("""
+                INSERT INTO books (user_id, title, author, file_path)
+                VALUES ($1, $2, $3, $4)
+                RETURNING id, added_at
+            """, APP_USER_ID, title, author, file_path)
+            book_id = book_row["id"]
+
+            for idx, chapter_title in enumerate(chapter_titles):
+                await conn.execute("""
+                    INSERT INTO chapters (book_id, order_index, title)
+                    VALUES ($1, $2, $3)
+                """, book_id, idx, chapter_title)
+
+    return BookOut(id=book_id, title=title, author=author, added_at=book_row["added_at"])
+
+@app.get("/app/books", response_model=list[BookOut])
+async def app_get_library(_=ExtAuth):
+    """书架：返回当前用户的所有书本，附带各自的阅读进度。"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT b.id, b.title, b.author, b.added_at,
+                   COALESCE(rp.current_cfi_location, '') AS current_cfi_location
+            FROM books b
+            LEFT JOIN reading_progress rp
+                   ON rp.book_id = b.id AND rp.user_id = $1
+            WHERE b.user_id = $1
+            ORDER BY b.added_at DESC
+        """, APP_USER_ID)
+    return [BookOut(**dict(r)) for r in rows]
+
+@app.get("/app/books/{book_id}/context", response_model=BookContextOut)
+async def app_get_book_context(book_id: int, _=ExtAuth):
+    """翻开一本书：书本信息 + 章节目录 + 上次读到的位置。"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        book = await conn.fetchrow("""
+            SELECT id, title, author FROM books WHERE id = $1 AND user_id = $2
+        """, book_id, APP_USER_ID)
+        if not book:
+            raise HTTPException(status_code=404, detail="书本不存在")
+
+        chapters = await conn.fetch("""
+            SELECT id, order_index, title FROM chapters
+            WHERE book_id = $1 ORDER BY order_index
+        """, book_id)
+
+        progress = await conn.fetchrow("""
+            SELECT current_cfi_location FROM reading_progress
+            WHERE book_id = $1 AND user_id = $2
+        """, book_id, APP_USER_ID)
+
+    return BookContextOut(
+        id=book["id"], title=book["title"], author=book["author"],
+        chapters=[ChapterOut(**dict(c)) for c in chapters],
+        current_cfi_location=progress["current_cfi_location"] if progress else "",
+    )

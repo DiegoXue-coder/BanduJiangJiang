@@ -11,6 +11,8 @@ __pycache__/
 *.pyc
 *.pyo
 api/token_usage.jsonl
+api/venv/
+api/epub_storage/
 
 # Node
 node_modules/
