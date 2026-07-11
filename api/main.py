@@ -16,7 +16,7 @@ import asyncpg
 
 from fastapi import FastAPI, HTTPException, Request, Depends, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import Response, FileResponse
 from pydantic import BaseModel
 from openai import OpenAI
 import edge_tts
@@ -138,10 +138,15 @@ EXTENSION_SECRET = os.environ.get("EXTENSION_SECRET", "")
 MAX_AUDIO_BYTES  = 5 * 1024 * 1024  # 5MB
 
 def _verify_token(request: Request):
-    """验证来自扩展的 HMAC 日令牌，防止 API 被第三方滥用。"""
+    """验证来自扩展的 HMAC 日令牌，防止 API 被第三方滥用。
+
+    优先从请求头读取；EPUB 文件下载走的是 epubjs-react-native 内置的
+    expo-file-system downloadResumable，无法附带自定义请求头，所以这里
+    额外兼容从 query string 读 token（仅供 /app/books/{id}/file 使用）。
+    """
     if not EXTENSION_SECRET:
         return  # 未配置时跳过（本地开发模式）
-    token = request.headers.get("x-extension-token", "")
+    token = request.headers.get("x-extension-token", "") or request.query_params.get("token", "")
     if not token:
         raise HTTPException(status_code=401, detail="Missing token")
     today    = datetime.date.today().isoformat()
@@ -308,6 +313,23 @@ class BookContextOut(BaseModel):
     author: str
     chapters: list[ChapterOut]
     current_cfi_location: str = ""
+
+class HighlightIn(BaseModel):
+    chapter_id: int | None = None
+    cfi_location: str
+    highlighted_text: str
+    note: str = ""
+
+class HighlightOut(BaseModel):
+    id: int
+    chapter_id: int | None = None
+    cfi_location: str
+    highlighted_text: str
+    note: str
+    created_at: datetime.datetime
+
+class ProgressIn(BaseModel):
+    cfi_location: str
 
 # ── 系统 Prompt ────────────────────────────────────────────────────
 
@@ -880,3 +902,68 @@ async def app_get_book_context(book_id: int, _=ExtAuth):
         chapters=[ChapterOut(**dict(c)) for c in chapters],
         current_cfi_location=progress["current_cfi_location"] if progress else "",
     )
+
+@app.get("/app/books/{book_id}/file")
+async def app_get_book_file(book_id: int, _=ExtAuth):
+    """阅读器下载原始 EPUB 文件。鉴权 token 走 query string（见 _verify_token 注释）。"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        book = await conn.fetchrow(
+            "SELECT file_path FROM books WHERE id = $1 AND user_id = $2", book_id, APP_USER_ID
+        )
+    if not book or not os.path.isfile(book["file_path"]):
+        raise HTTPException(status_code=404, detail="书本文件不存在")
+    return FileResponse(book["file_path"], media_type="application/epub+zip")
+
+@app.get("/app/books/{book_id}/highlights", response_model=list[HighlightOut])
+async def app_get_highlights(book_id: int, _=ExtAuth):
+    """一本书的全部划线，阅读器打开时用来恢复已划的标记。"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT id, chapter_id, cfi_location, highlighted_text, note, created_at
+            FROM highlights
+            WHERE book_id = $1 AND user_id = $2
+            ORDER BY created_at
+        """, book_id, APP_USER_ID)
+    return [HighlightOut(**dict(r)) for r in rows]
+
+@app.post("/app/books/{book_id}/highlights", response_model=HighlightOut)
+async def app_save_highlight(book_id: int, body: HighlightIn, _=ExtAuth):
+    """保存一条划线，顺手算好 embedding（不推迟到阶段四补算）。"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        book = await conn.fetchrow(
+            "SELECT id FROM books WHERE id = $1 AND user_id = $2", book_id, APP_USER_ID
+        )
+        if not book:
+            raise HTTPException(status_code=404, detail="书本不存在")
+
+        embedding_str = None
+        try:
+            embedding_str = _vec_to_str(await _embed(body.highlighted_text))
+        except Exception as e:
+            print(f"[划线] embedding 计算失败，先不存向量: {e}")
+
+        row = await conn.fetchrow("""
+            INSERT INTO highlights
+                (user_id, book_id, chapter_id, cfi_location, highlighted_text, note, embedding)
+            VALUES ($1, $2, $3, $4, $5, $6, $7::vector)
+            RETURNING id, chapter_id, cfi_location, highlighted_text, note, created_at
+        """, APP_USER_ID, book_id, body.chapter_id, body.cfi_location,
+             body.highlighted_text, body.note, embedding_str)
+
+    return HighlightOut(**dict(row))
+
+@app.post("/app/books/{book_id}/progress")
+async def app_update_progress(book_id: int, body: ProgressIn, _=ExtAuth):
+    """更新阅读进度（当前 CFI 位置），用于下次打开这本书时恢复到原位。"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO reading_progress (user_id, book_id, current_cfi_location, updated_at)
+            VALUES ($1, $2, $3, NOW())
+            ON CONFLICT (user_id, book_id) DO UPDATE
+                SET current_cfi_location = $3, updated_at = NOW()
+        """, APP_USER_ID, book_id, body.cfi_location)
+    return {"ok": True}
