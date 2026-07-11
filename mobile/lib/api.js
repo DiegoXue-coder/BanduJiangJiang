@@ -38,3 +38,34 @@ export async function getLibrary() {
 export async function getBookContext(bookId) {
   return appFetch(`/app/books/${bookId}/context`);
 }
+
+// 阅读器用 epubjs-react-native 内置的 expo-file-system 下载 EPUB 文件，
+// 走的是普通 URL 下载，不会附带自定义请求头——所以这里把 token 放进
+// query string，跟后端 _verify_token 的 query 兜底逻辑对应。
+export function getBookFileUrl(bookId) {
+  return `${API_BASE}/app/books/${bookId}/file?token=${getExtToken()}`;
+}
+
+export async function getHighlights(bookId) {
+  return appFetch(`/app/books/${bookId}/highlights`);
+}
+
+export async function saveHighlight(bookId, { cfiLocation, highlightedText, note = '' }) {
+  return appFetch(`/app/books/${bookId}/highlights`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      cfi_location: cfiLocation,
+      highlighted_text: highlightedText,
+      note,
+    }),
+  });
+}
+
+export async function updateProgress(bookId, cfiLocation) {
+  return appFetch(`/app/books/${bookId}/progress`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cfi_location: cfiLocation }),
+  });
+}

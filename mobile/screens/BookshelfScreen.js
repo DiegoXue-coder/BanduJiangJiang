@@ -1,7 +1,7 @@
 import React, { useCallback, useState } from 'react';
 import {
   View, Text, FlatList, TouchableOpacity, StyleSheet,
-  ActivityIndicator, RefreshControl, SafeAreaView, Alert,
+  ActivityIndicator, RefreshControl, SafeAreaView,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { getLibrary } from '../lib/api';
@@ -90,8 +90,7 @@ export default function BookshelfScreen({ navigation }) {
         renderItem={({ item }) => (
           <BookCard
             book={item}
-            // 阅读器是阶段三的工作，现在还没做，先给个友好提示，不跳转到不存在的页面
-            onPress={() => Alert.alert(item.title, '阅读器功能开发中，敬请期待')}
+            onPress={() => navigation.navigate('Reader', { bookId: item.id })}
           />
         )}
       />
