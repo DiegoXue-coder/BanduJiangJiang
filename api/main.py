@@ -789,8 +789,11 @@ async def transcribe(request: Request, _=ExtAuth):
 # 不涉及 AI 对话逻辑、界面样式——纯粹的地基层，鉴权复用 Chrome 插件同一套
 # HMAC 会员卡式验证（ExtAuth），v1 单用户写死 user_id=1。
 
-APP_USER_ID       = 1
-EPUB_STORAGE_DIR  = os.environ.get("EPUB_STORAGE_DIR", "epub_storage")
+APP_USER_ID = 1
+# Railway 上 /data 是挂载的持久卷（bandujiangjiang-volume），存在就用它，
+# 否则说明是本地开发环境，退回相对路径，不强制要求 /data 存在。
+_DEFAULT_EPUB_DIR = "/data/epub_storage" if os.path.isdir("/data") else "epub_storage"
+EPUB_STORAGE_DIR  = os.environ.get("EPUB_STORAGE_DIR", _DEFAULT_EPUB_DIR)
 os.makedirs(EPUB_STORAGE_DIR, exist_ok=True)
 MAX_EPUB_BYTES    = 50 * 1024 * 1024  # 50MB
 
