@@ -903,9 +903,16 @@ async def app_get_book_context(book_id: int, _=ExtAuth):
         current_cfi_location=progress["current_cfi_location"] if progress else "",
     )
 
-@app.get("/app/books/{book_id}/file")
+@app.get("/app/books/{book_id}/file.epub")
 async def app_get_book_file(book_id: int, _=ExtAuth):
-    """阅读器下载原始 EPUB 文件。鉴权 token 走 query string（见 _verify_token 注释）。"""
+    """阅读器下载原始 EPUB 文件。
+
+    路径必须以 .epub 结尾——epubjs-react-native 内部靠 URL 字符串里有没有
+    ".epub" 子串来判断源文件类型（见 getSourceType.js），不是这个后缀的话它会
+    判断成"未知类型"，内部抛错但没有把错误抛到 UI 上，界面会卡在"正在下载书本"
+    转圈转到天荒地老——踩过这个坑，所以特意记这条注释。
+    鉴权 token 走 query string（见 _verify_token 注释）。
+    """
     pool = await get_pool()
     async with pool.acquire() as conn:
         book = await conn.fetchrow(

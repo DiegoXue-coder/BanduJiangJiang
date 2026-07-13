@@ -42,8 +42,12 @@ export async function getBookContext(bookId) {
 // 阅读器用 epubjs-react-native 内置的 expo-file-system 下载 EPUB 文件，
 // 走的是普通 URL 下载，不会附带自定义请求头——所以这里把 token 放进
 // query string，跟后端 _verify_token 的 query 兜底逻辑对应。
+//
+// 路径必须以 .epub 结尾：epubjs-react-native 靠 URL 字符串里有没有
+// ".epub" 子串判断源文件类型，没有的话会内部报错但不会显示出来，界面卡在
+// "正在下载书本"转圈——真机实测踩到的坑，不是猜的。
 export function getBookFileUrl(bookId) {
-  return `${API_BASE}/app/books/${bookId}/file?token=${getExtToken()}`;
+  return `${API_BASE}/app/books/${bookId}/file.epub?token=${getExtToken()}`;
 }
 
 export async function getHighlights(bookId) {
