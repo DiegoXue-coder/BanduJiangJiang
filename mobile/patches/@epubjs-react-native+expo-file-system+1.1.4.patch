@@ -1,0 +1,26 @@
+diff --git a/node_modules/@epubjs-react-native/expo-file-system/dist/cjs/useFileSystem.js b/node_modules/@epubjs-react-native/expo-file-system/dist/cjs/useFileSystem.js
+index c20f32e..2c12469 100644
+--- a/node_modules/@epubjs-react-native/expo-file-system/dist/cjs/useFileSystem.js
++++ b/node_modules/@epubjs-react-native/expo-file-system/dist/cjs/useFileSystem.js
+@@ -71,7 +71,7 @@ var __generator = (this && this.__generator) || function (thisArg, body) {
+ Object.defineProperty(exports, "__esModule", { value: true });
+ exports.useFileSystem = useFileSystem;
+ var react_1 = require("react");
+-var ExpoFileSystem = __importStar(require("expo-file-system"));
++var ExpoFileSystem = __importStar(require("expo-file-system/legacy"));
+ function useFileSystem() {
+     var _this = this;
+     var _a = (0, react_1.useState)(null), file = _a[0], setFile = _a[1];
+diff --git a/node_modules/@epubjs-react-native/expo-file-system/dist/esm/useFileSystem.js b/node_modules/@epubjs-react-native/expo-file-system/dist/esm/useFileSystem.js
+index 72a8a55..6a6a7db 100644
+--- a/node_modules/@epubjs-react-native/expo-file-system/dist/esm/useFileSystem.js
++++ b/node_modules/@epubjs-react-native/expo-file-system/dist/esm/useFileSystem.js
+@@ -35,7 +35,7 @@ var __generator = (this && this.__generator) || function (thisArg, body) {
+     }
+ };
+ import { useCallback, useState } from 'react';
+-import * as ExpoFileSystem from 'expo-file-system';
++import * as ExpoFileSystem from 'expo-file-system/legacy';
+ export function useFileSystem() {
+     var _this = this;
+     var _a = useState(null), file = _a[0], setFile = _a[1];

@@ -1,5 +1,6 @@
 import React from 'react';
 import { Text } from 'react-native';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { StatusBar } from 'expo-status-bar';
 import { NavigationContainer, getFocusedRouteNameFromRoute } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
@@ -35,28 +36,30 @@ function getTabBarStyle(route) {
 
 export default function App() {
   return (
-    <ReaderProvider>
-      <NavigationContainer>
-        <StatusBar style="auto" />
-        <Tab.Navigator
-          screenOptions={({ route }) => ({
-            headerShown: false,
-            tabBarActiveTintColor: BLUE,
-            tabBarInactiveTintColor: '#8a95b0',
-            tabBarIcon: ({ color }) => (
-              <Text style={{ fontSize: 18, color }}>{TAB_ICON[route.name]}</Text>
-            ),
-          })}
-        >
-          <Tab.Screen
-            name="书架"
-            component={BookshelfStackScreen}
-            options={({ route }) => ({ tabBarStyle: getTabBarStyle(route) })}
-          />
-          <Tab.Screen name="划线复盘" component={ReviewScreen} />
-          <Tab.Screen name="我的" component={ProfileScreen} />
-        </Tab.Navigator>
-      </NavigationContainer>
-    </ReaderProvider>
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <ReaderProvider>
+        <NavigationContainer>
+          <StatusBar style="auto" />
+          <Tab.Navigator
+            screenOptions={({ route }) => ({
+              headerShown: false,
+              tabBarActiveTintColor: BLUE,
+              tabBarInactiveTintColor: '#8a95b0',
+              tabBarIcon: ({ color }) => (
+                <Text style={{ fontSize: 18, color }}>{TAB_ICON[route.name]}</Text>
+              ),
+            })}
+          >
+            <Tab.Screen
+              name="书架"
+              component={BookshelfStackScreen}
+              options={({ route }) => ({ tabBarStyle: getTabBarStyle(route) })}
+            />
+            <Tab.Screen name="划线复盘" component={ReviewScreen} />
+            <Tab.Screen name="我的" component={ProfileScreen} />
+          </Tab.Navigator>
+        </NavigationContainer>
+      </ReaderProvider>
+    </GestureHandlerRootView>
   );
 }

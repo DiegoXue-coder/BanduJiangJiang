@@ -83,6 +83,7 @@ function ReaderInner({ bookId, bookTitle, initialLocation, initialAnnotations, n
         defaultTheme={THEMES.light}
         initialLocation={initialLocation || undefined}
         onReady={handleReady}
+        onDisplayError={(reason) => Alert.alert('加载失败', String(reason))}
         onLocationChange={handleLocationChange}
         menuItems={[
           {
