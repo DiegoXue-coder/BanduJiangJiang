@@ -9,6 +9,7 @@ import { ReaderProvider } from '@epubjs-react-native/core';
 
 import BookshelfScreen from './screens/BookshelfScreen';
 import ReaderScreen from './screens/ReaderScreen';
+import BookChatScreen from './screens/BookChatScreen';
 import ReviewScreen from './screens/ReviewScreen';
 import ProfileScreen from './screens/ProfileScreen';
 
@@ -24,13 +25,14 @@ function BookshelfStackScreen() {
     <BookshelfStack.Navigator screenOptions={{ headerShown: false }}>
       <BookshelfStack.Screen name="BookshelfHome" component={BookshelfScreen} />
       <BookshelfStack.Screen name="Reader" component={ReaderScreen} />
+      <BookshelfStack.Screen name="BookChat" component={BookChatScreen} />
     </BookshelfStack.Navigator>
   );
 }
 
 function getTabBarStyle(route) {
   const focusedRoute = getFocusedRouteNameFromRoute(route) ?? 'BookshelfHome';
-  if (focusedRoute === 'Reader') return { display: 'none' };
+  if (focusedRoute === 'Reader' || focusedRoute === 'BookChat') return { display: 'none' };
   return undefined;
 }
 

@@ -22,9 +22,15 @@ const THEME_LABEL = { light: '☀️', paper: '📜', dark: '🌙' };
 // 进度上报节流：翻页很频繁，没必要每次都请求后端
 const PROGRESS_DEBOUNCE_MS = 2000;
 
-function ReaderInner({ bookId, bookTitle, initialLocation, initialAnnotations, navigation }) {
+function ReaderInner({ bookId, bookTitle, author, initialLocation, initialAnnotations, navigation }) {
   const { addAnnotation, changeTheme } = useReader();
   const [themeName, setThemeName] = useState('light');
+  const [currentSectionTitle, setCurrentSectionTitle] = useState('');
+  // 长按原生菜单（menuItems）在拖动选区手柄调整范围后不会重新弹出——这是
+  // react-native-webview 自身的已知限制，不是我们代码能修的。改用这个悬浮条
+  // 兜底：只要 epub.js 报了新的选区（onSelected，拖动调整后也会正常触发），
+  // 就显示"划线/问AI"按钮，不依赖那个容易失效的原生菜单。
+  const [selection, setSelection] = useState(null); // { text, cfiRange }
   const progressTimer = useRef(null);
   const annotationsRestored = useRef(false);
 
@@ -38,8 +44,9 @@ function ReaderInner({ bookId, bookTitle, initialLocation, initialAnnotations, n
     }
   }
 
-  function handleLocationChange(_total, currentLocation) {
+  function handleLocationChange(_total, currentLocation, _progress, currentSection) {
     const cfi = currentLocation?.start?.cfi;
+    if (currentSection?.label) setCurrentSectionTitle(currentSection.label.trim());
     if (!cfi) return;
     if (progressTimer.current) clearTimeout(progressTimer.current);
     progressTimer.current = setTimeout(() => {
@@ -57,6 +64,12 @@ function ReaderInner({ bookId, bookTitle, initialLocation, initialAnnotations, n
     return false; // 保留选区高亮，不清除
   }
 
+  function openChat(selectionText = '') {
+    navigation.navigate('BookChat', {
+      bookId, bookTitle, author, chapterTitle: currentSectionTitle, selection: selectionText,
+    });
+  }
+
   function cycleTheme() {
     const next = THEME_ORDER[(THEME_ORDER.indexOf(themeName) + 1) % THEME_ORDER.length];
     setThemeName(next);
@@ -70,9 +83,14 @@ function ReaderInner({ bookId, bookTitle, initialLocation, initialAnnotations, n
           <Text style={styles.headerBtnText}>‹ 书架</Text>
         </TouchableOpacity>
         <Text style={styles.headerTitle} numberOfLines={1}>{bookTitle}</Text>
-        <TouchableOpacity onPress={cycleTheme} style={styles.headerBtn}>
-          <Text style={styles.headerBtnText}>{THEME_LABEL[themeName]}</Text>
-        </TouchableOpacity>
+        <View style={styles.headerRight}>
+          <TouchableOpacity onPress={() => openChat()} style={styles.headerBtn}>
+            <Text style={styles.headerBtnText}>💬</Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={cycleTheme} style={styles.headerBtn}>
+            <Text style={styles.headerBtnText}>{THEME_LABEL[themeName]}</Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
       <Reader
@@ -85,11 +103,19 @@ function ReaderInner({ bookId, bookTitle, initialLocation, initialAnnotations, n
         onReady={handleReady}
         onDisplayError={(reason) => Alert.alert('加载失败', String(reason))}
         onLocationChange={handleLocationChange}
+        onSelected={(text, cfiRange) => setSelection({ text, cfiRange })}
         menuItems={[
           {
             label: '划线',
             action: (cfiRange, text) => {
               handleHighlight(cfiRange, text);
+              return false;
+            },
+          },
+          {
+            label: '问AI',
+            action: (_cfiRange, text) => {
+              openChat(text);
               return false;
             },
           },
@@ -101,6 +127,36 @@ function ReaderInner({ bookId, bookTitle, initialLocation, initialAnnotations, n
           </View>
         )}
       />
+
+      {!!selection && (
+        <View style={styles.selectionBar}>
+          <Text style={styles.selectionBarText} numberOfLines={1}>“{selection.text}”</Text>
+          <View style={styles.selectionBarActions}>
+            <TouchableOpacity
+              style={styles.selectionBtn}
+              onPress={async () => {
+                await handleHighlight(selection.cfiRange, selection.text);
+                setSelection(null);
+              }}
+            >
+              <Text style={styles.selectionBtnText}>划线</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.selectionBtn}
+              onPress={() => {
+                const text = selection.text;
+                setSelection(null);
+                openChat(text);
+              }}
+            >
+              <Text style={styles.selectionBtnText}>问AI</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.selectionCloseBtn} onPress={() => setSelection(null)}>
+              <Text style={styles.selectionCloseBtnText}>✕</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
     </SafeAreaView>
   );
 }
@@ -150,6 +206,7 @@ export default function ReaderScreen({ route, navigation }) {
     <ReaderInner
       bookId={bookId}
       bookTitle={ctx.title}
+      author={ctx.author}
       initialLocation={ctx.current_cfi_location}
       initialAnnotations={highlights}
       navigation={navigation}
@@ -164,9 +221,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12, paddingVertical: 10,
     backgroundColor: BLUE,
   },
-  headerBtn: { padding: 6, minWidth: 44 },
+  headerBtn: { padding: 6, minWidth: 36 },
   headerBtnText: { color: '#fff', fontSize: 15, fontWeight: '600' },
   headerTitle: { flex: 1, textAlign: 'center', color: '#fff', fontSize: 16, fontWeight: '700' },
+  headerRight: { flexDirection: 'row', alignItems: 'center' },
 
   centerBox: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12 },
   loadingText: { color: '#8a95b0', fontSize: 13 },
@@ -176,4 +234,22 @@ const styles = StyleSheet.create({
     backgroundColor: BLUE, borderRadius: 10,
   },
   retryText: { color: '#fff', fontWeight: '600' },
+
+  selectionBar: {
+    position: 'absolute', left: 12, right: 12, bottom: 24,
+    backgroundColor: '#1a1a2eee', borderRadius: 14,
+    paddingVertical: 10, paddingHorizontal: 14,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    shadowColor: '#000', shadowOpacity: 0.2,
+    shadowOffset: { width: 0, height: 2 }, shadowRadius: 6, elevation: 4,
+  },
+  selectionBarText: { flex: 1, color: '#dcdce6', fontSize: 13, marginRight: 10 },
+  selectionBarActions: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  selectionBtn: {
+    paddingHorizontal: 12, paddingVertical: 7, borderRadius: 8,
+    backgroundColor: BLUE,
+  },
+  selectionBtnText: { color: '#fff', fontSize: 13, fontWeight: '600' },
+  selectionCloseBtn: { paddingHorizontal: 6, paddingVertical: 7 },
+  selectionCloseBtnText: { color: '#8a95b0', fontSize: 15 },
 });
