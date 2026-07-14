@@ -73,3 +73,56 @@ export async function updateProgress(bookId, cfiLocation) {
     body: JSON.stringify({ cfi_location: cfiLocation }),
   });
 }
+
+// ── 阶段四：AI 对话 + 语音 ──────────────────────────────────────────
+// 这几个接口（/ask、/tts/play、/transcribe、/history）在阶段一就确认过是
+// 格式无关的"独立能力"，浏览器插件和手机端共用同一套，不用另起一套后端逻辑。
+
+export async function askQuestion({ context, question, style = 'simple', history = [] }) {
+  const res = await askQuestionRaw({ context, question, style, history });
+  return res.answer;
+}
+
+async function askQuestionRaw(body) {
+  return appFetch('/ask', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+// /tts/play 这个接口本身不带鉴权（跟 /app/books/{id}/file.epub 同理，是要
+// 直接当音频播放地址用的，expo-av 不会带自定义请求头）。
+export function getTtsPlayUrl(text, voice = 'zh-CN-XiaoxiaoNeural') {
+  return `${API_BASE}/tts/play?text=${encodeURIComponent(text)}&voice=${encodeURIComponent(voice)}`;
+}
+
+export async function transcribeAudio(fileUri, uploadAsync, FileSystemUploadType) {
+  const result = await uploadAsync(`${API_BASE}/transcribe`, fileUri, {
+    httpMethod: 'POST',
+    uploadType: FileSystemUploadType.BINARY_CONTENT,
+    headers: {
+      'Content-Type': 'audio/m4a',
+      'x-extension-token': getExtToken(),
+    },
+  });
+  if (result.status && result.status >= 400) {
+    throw new Error(`HTTP ${result.status} ${result.body || ''}`.trim());
+  }
+  return JSON.parse(result.body).text;
+}
+
+export async function saveQaHistory({ bookId, bookTitle, chapterTitle, question, answer, selection = '' }) {
+  return appFetch('/history', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      book_id: String(bookId),
+      book_title: bookTitle,
+      chapter_title: chapterTitle,
+      question,
+      answer,
+      selection,
+    }),
+  });
+}
