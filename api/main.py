@@ -712,11 +712,16 @@ async def ask(req: AskRequest, request: Request, _=ExtAuth):
                 messages.append({"role": role, "content": content})
         messages.append({"role": "user", "content": socr_user})
     else:
+        # 验收标准要求"追问时上下文连贯"，非苏格拉底模式原来没带历史轮次，
+        # 补上（跟苏格拉底分支同样的处理方式），history 为空时行为不变。
         system_prompt = SYSTEM_PROMPT + STYLE_SUFFIX.get(req.style, "")
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user",   "content": user_message},
-        ]
+        messages = [{"role": "system", "content": system_prompt}]
+        for turn in req.history:
+            role    = turn.get("role", "user")
+            content = str(turn.get("content", ""))[:1000]
+            if role in ("user", "assistant"):
+                messages.append({"role": role, "content": content})
+        messages.append({"role": "user", "content": user_message})
 
     max_tokens  = socr_max_tokens if req.style == "socratic" else 512
     temperature = 0.3 if req.style == "socratic" else 1.0

@@ -51,6 +51,7 @@ export default function BookChatScreen({ route, navigation }) {
   const [isThinking, setThinking]   = useState(false);
   const [isRecording, setRecording] = useState(false);
   const [ttsOn, setTtsOn]           = useState(true);
+  const [style, setStyle]           = useState('simple'); // 'simple' 讲解 / 'socratic' 苏格拉底
   const [userHighlights, setUserHighlights] = useState([]);
 
   const recordingRef = useRef(null);
@@ -79,9 +80,35 @@ export default function BookChatScreen({ route, navigation }) {
     }
   }
 
+  // 静音不等于停止——静音是暂停（保留播放位置），取消静音要能从暂停的地方继续，
+  // 不能每次切换都把声音销毁重建（之前那样写会导致"取消静音后完全没反应"）。
+  async function pauseAudio() {
+    if (soundRef.current) {
+      await soundRef.current.pauseAsync().catch(() => {});
+    }
+  }
+
+  async function resumeAudio() {
+    if (soundRef.current) {
+      await soundRef.current.playAsync().catch(() => {});
+    }
+  }
+
+  function toggleTts() {
+    setTtsOn((prev) => {
+      const next = !prev;
+      if (next) {
+        resumeAudio();
+      } else {
+        pauseAudio();
+      }
+      return next;
+    });
+  }
+
   async function speakText(text) {
+    await stopAudio(); // 换新的一条回答，旧的播放（不管是不是暂停中）先彻底清掉
     if (!ttsOn) return;
-    await stopAudio();
     try {
       const { sound } = await Audio.Sound.createAsync(
         { uri: getTtsPlayUrl(text) },
@@ -103,6 +130,10 @@ export default function BookChatScreen({ route, navigation }) {
     addMsg('user', q);
     setThinking(true);
     try {
+      const history = messages.slice(-10).map(m => ({
+        role: m.role === 'assistant' ? 'assistant' : 'user',
+        content: m.text,
+      }));
       const answer = await askQuestion({
         context: {
           bookTitle, author, chapterTitle,
@@ -110,6 +141,8 @@ export default function BookChatScreen({ route, navigation }) {
           userHighlights, popularHighlights: [],
         },
         question: q,
+        style,
+        history,
       });
       addMsg('assistant', answer);
       speakText(answer);
@@ -122,17 +155,23 @@ export default function BookChatScreen({ route, navigation }) {
   }
 
   async function toggleRecording() {
+    console.log('[DEBUG] toggleRecording called, isRecording=', isRecording);
     if (isRecording) {
       setRecording(false);
       setStatus('识别中…');
       try {
+        console.log('[DEBUG] recordingRef.current=', !!recordingRef.current);
         const rec = recordingRef.current;
         await rec.stopAndUnloadAsync();
+        console.log('[DEBUG] stopAndUnloadAsync done');
         const uri = rec.getURI();
+        console.log('[DEBUG] recording uri=', uri);
         recordingRef.current = null;
         await Audio.setAudioModeAsync({ allowsRecordingIOS: false });
 
+        console.log('[DEBUG] calling transcribeAudio...');
         const text = await transcribeAudio(uri, FileSystem.uploadAsync, FileSystem.FileSystemUploadType);
+        console.log('[DEBUG] transcribeAudio returned:', JSON.stringify(text));
         if (text?.trim()) {
           setInput(text.trim());
           setStatus('识别完成 — 确认后点发送');
@@ -140,11 +179,13 @@ export default function BookChatScreen({ route, navigation }) {
           setStatus('未识别到内容，请重试');
         }
       } catch (e) {
+        console.log('[DEBUG] toggleRecording (stop) error:', e && e.message, e && e.stack);
         setStatus(`识别失败：${e.message}`);
       }
     } else {
       try {
         const { status: perm } = await Audio.requestPermissionsAsync();
+        console.log('[DEBUG] mic permission status:', perm);
         if (perm !== 'granted') {
           setStatus('需要麦克风权限，请到系统设置里开启');
           return;
@@ -156,7 +197,9 @@ export default function BookChatScreen({ route, navigation }) {
         recordingRef.current = recording;
         setRecording(true);
         setStatus('录音中 — 再次点击停止');
+        console.log('[DEBUG] recording started');
       } catch (e) {
+        console.log('[DEBUG] toggleRecording (start) error:', e && e.message, e && e.stack);
         setStatus(`无法启动录音：${e.message}`);
       }
     }
@@ -169,8 +212,23 @@ export default function BookChatScreen({ route, navigation }) {
           <Text style={styles.headerBtnText}>‹ 返回</Text>
         </TouchableOpacity>
         <Text style={styles.headerTitle} numberOfLines={1}>{bookTitle}</Text>
-        <TouchableOpacity onPress={() => { setTtsOn(v => !v); stopAudio(); }} style={styles.headerBtn}>
+        <TouchableOpacity onPress={toggleTts} style={styles.headerBtn}>
           <Text style={styles.headerBtnText}>{ttsOn ? '🔊' : '🔇'}</Text>
+        </TouchableOpacity>
+      </View>
+
+      <View style={styles.styleToggleRow}>
+        <TouchableOpacity
+          style={[styles.styleToggleBtn, style === 'simple' && styles.styleToggleBtnActive]}
+          onPress={() => setStyle('simple')}
+        >
+          <Text style={[styles.styleToggleText, style === 'simple' && styles.styleToggleTextActive]}>讲解</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.styleToggleBtn, style === 'socratic' && styles.styleToggleBtnActive]}
+          onPress={() => setStyle('socratic')}
+        >
+          <Text style={[styles.styleToggleText, style === 'socratic' && styles.styleToggleTextActive]}>苏格拉底</Text>
         </TouchableOpacity>
       </View>
 
@@ -237,6 +295,20 @@ const styles = StyleSheet.create({
   headerBtn: { padding: 6, minWidth: 44 },
   headerBtnText: { color: '#fff', fontSize: 15, fontWeight: '600' },
   headerTitle: { flex: 1, textAlign: 'center', color: '#fff', fontSize: 16, fontWeight: '700' },
+
+  styleToggleRow: {
+    flexDirection: 'row', gap: 8,
+    paddingHorizontal: 16, paddingVertical: 8,
+    backgroundColor: '#fff',
+    borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#dde3f0',
+  },
+  styleToggleBtn: {
+    paddingHorizontal: 14, paddingVertical: 6, borderRadius: 16,
+    backgroundColor: '#f4f6fb', borderWidth: 1, borderColor: '#dde3f0',
+  },
+  styleToggleBtnActive: { backgroundColor: BLUE, borderColor: BLUE },
+  styleToggleText: { fontSize: 13, color: '#5b6478', fontWeight: '600' },
+  styleToggleTextActive: { color: '#fff' },
 
   selectionBar: {
     backgroundColor: '#fff', paddingHorizontal: 16, paddingVertical: 10,
