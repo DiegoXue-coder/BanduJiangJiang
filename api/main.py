@@ -729,10 +729,11 @@ async def ask(req: AskRequest, request: Request, _=ExtAuth):
     try:
         resp = await asyncio.to_thread(
             lambda: ds.chat.completions.create(
-                model="deepseek-chat",
+                model="deepseek-v4-flash",
                 max_tokens=max_tokens,
                 temperature=temperature,
                 messages=messages,
+                extra_body={"thinking": {"type": "disabled"}},
             )
         )
         raw = resp.choices[0].message.content
