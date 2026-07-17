@@ -6,6 +6,18 @@
       "runtimeExecutable": "npx",
       "runtimeArgs": ["serve", "-s", "popup", "-p", "5500", "--no-clipboard"],
       "port": 5500
+    },
+    {
+      "name": "mobile-tunnel",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "mobile", "run", "tunnel"],
+      "port": 8081
+    },
+    {
+      "name": "mobile-lan",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "mobile", "run", "lan"],
+      "port": 8081
     }
   ]
 }
