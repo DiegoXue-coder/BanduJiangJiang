@@ -1251,12 +1251,16 @@ async def app_get_review(_=ExtAuth):
         # 关联主题：问答记录两两算向量相似度（跨书也算），阈值复用 /history/related
         # 那套已经调过的 SIMILARITY_THRESHOLD，不新造一个数字。每条最多标注一个
         # "最相似的另一条"，只做标注用，不合并成一条、不提供自动跳转。
+        # 2026-07-18 修复：排除 selection 相同的记录——针对同一段划线连续追问
+        # 好几轮，这些记录本来就是同一次对话，互相标"关联"是噪音，不是真的
+        # 发现了跨主题的联系。
         related_rows = await conn.fetch("""
             SELECT DISTINCT ON (a.id)
                    a.id AS item_id, bb.title AS related_book_title, b.question AS related_question
             FROM qa_history a
             JOIN books ba ON ba.id::text = a.book_id
             JOIN qa_history b ON b.id != a.id AND b.embedding IS NOT NULL AND b.user_id = $1
+                              AND b.selection != a.selection
             JOIN books bb ON bb.id::text = b.book_id
             WHERE a.user_id = $1 AND a.embedding IS NOT NULL
               AND 1 - (a.embedding <=> b.embedding) >= $2
