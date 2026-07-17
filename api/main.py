@@ -834,6 +834,21 @@ async def ask(req: AskRequest, request: Request, _=ExtAuth):
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"DeepSeek API 错误: {e}")
 
+@app.get("/debug/stream-test")
+async def debug_stream_test(_=ExtAuth):
+    """诊断用：跟真实 DeepSeek 调用无关，只用来确认"服务器逐块发送"这件事有没有
+    被 Railway 反向代理这类中间层缓冲成一次性到达。不消耗 DeepSeek 免费额度。
+    排查完可以删掉，先留着方便随时复查。"""
+    async def gen():
+        for i in range(5):
+            yield f"data: {json.dumps({'delta': f'块{i}', 't': time.time()})}\n\n"
+            await asyncio.sleep(1)
+        yield f"data: {json.dumps({'done': True})}\n\n"
+    return StreamingResponse(
+        gen(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+    )
+
 @app.post("/ask/stream")
 async def ask_stream(req: AskRequest, request: Request, _=ExtAuth):
     """流式版 /ask（阶段六）：DeepSeek 边生成边推给客户端，配合客户端按句切分
@@ -898,7 +913,18 @@ async def ask_stream(req: AskRequest, request: Request, _=ExtAuth):
                 print(f"[AskStream] round={round_num} style={req.style} final={repr(final_text[:80])}")
                 yield f"data: {json.dumps({'done': True, 'answer': final_text}, ensure_ascii=False)}\n\n"
 
-    return StreamingResponse(event_gen(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={
+            # 反向代理（Railway/nginx类）默认可能会把流式响应整个攒完再一次转发，
+            # 这样哪怕服务器这边是逐字发的，客户端收到时也会变成"一口气到达"。
+            # 这几个头是明确告诉中间层"别缓冲，来一点转发一点"的标准做法。
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 @app.post("/tts")
 async def tts(req: TTSRequest, _=ExtAuth):
