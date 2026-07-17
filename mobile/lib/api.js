@@ -78,17 +78,49 @@ export async function updateProgress(bookId, cfiLocation) {
 // 这几个接口（/ask、/tts/play、/transcribe、/history）在阶段一就确认过是
 // 格式无关的"独立能力"，浏览器插件和手机端共用同一套，不用另起一套后端逻辑。
 
-export async function askQuestion({ context, question, style = 'simple', history = [] }) {
-  const res = await askQuestionRaw({ context, question, style, history });
-  return res.answer;
-}
+// 流式版 /ask（阶段六）。RN 的 fetch 在部分环境下拿不到可读流，用
+// XMLHttpRequest 的 onprogress 读 responseText 增量这个更稳的老办法
+// （SSE 本质上就是持续增长的文本，不需要真的用 EventSource）。
+// 返回一个"取消"函数，调用方在组件卸载/用户中断时可以 abort 掉请求。
+export function streamAsk({ context, question, style = 'simple', history = [] }, { onDelta, onDone, onError }) {
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', `${API_BASE}/ask/stream`);
+  xhr.setRequestHeader('Content-Type', 'application/json');
+  xhr.setRequestHeader('x-extension-token', getExtToken());
 
-async function askQuestionRaw(body) {
-  return appFetch('/ask', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
+  let readIndex = 0;
+  let buffer = '';
+
+  xhr.onprogress = () => {
+    const newText = xhr.responseText.slice(readIndex);
+    readIndex = xhr.responseText.length;
+    buffer += newText;
+
+    const parts = buffer.split('\n\n');
+    buffer = parts.pop(); // 最后一段可能还没收全，留到下次 onprogress 再拼
+    for (const part of parts) {
+      const line = part.trim();
+      if (!line.startsWith('data:')) continue;
+      const jsonStr = line.slice(5).trim();
+      let payload;
+      try {
+        payload = JSON.parse(jsonStr);
+      } catch {
+        continue;
+      }
+      if (payload.delta) onDelta(payload.delta);
+      else if (payload.done) onDone(payload.answer);
+      else if (payload.error) onError(new Error(payload.error));
+    }
+  };
+
+  xhr.onerror = () => onError(new Error('网络请求失败'));
+  xhr.onload = () => {
+    if (xhr.status >= 400) onError(new Error(`HTTP ${xhr.status}`));
+  };
+
+  xhr.send(JSON.stringify({ context, question, style, history }));
+  return () => xhr.abort();
 }
 
 // /tts/play 这个接口本身不带鉴权（跟 /app/books/{id}/file.epub 同理，是要

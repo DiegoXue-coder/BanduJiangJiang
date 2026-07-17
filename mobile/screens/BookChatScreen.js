@@ -10,8 +10,12 @@ import {
 import { Audio } from 'expo-av';
 import * as FileSystem from 'expo-file-system/legacy';
 import {
-  askQuestion, getTtsPlayUrl, transcribeAudio, saveQaHistory, getHighlights, saveHighlight,
+  streamAsk, getTtsPlayUrl, transcribeAudio, saveQaHistory, getHighlights, saveHighlight,
 } from '../lib/api';
+
+// 按中文/英文句末标点切句——流式回答边生成边攒 buffer，攒够一整句就送去TTS，
+// 不用等全部回答生成完才开口。
+const SENTENCE_END = /([。！？；\n])/;
 
 const BLUE = '#4f8ef7';
 const RED  = '#f7564f';
@@ -49,6 +53,9 @@ export default function BookChatScreen({ route, navigation }) {
   const [input, setInput]           = useState('');
   const [status, setStatus]         = useState('');
   const [isThinking, setThinking]   = useState(false);
+  // 流式回答第一个字回来之前显示"打字中"动画，回来之后换成真正在长大的气泡，
+  // 不是两个同时显示
+  const [streamingId, setStreamingId] = useState(null);
   const [isRecording, setRecording] = useState(false);
   const [ttsOn, setTtsOn]           = useState(true);
   const [style, setStyle]           = useState('simple'); // 'simple' 讲解 / 'socratic' 苏格拉底
@@ -58,9 +65,12 @@ export default function BookChatScreen({ route, navigation }) {
   const [highlightSaved, setHighlightSaved] = useState(false);
   const [savingHighlight, setSavingHighlight] = useState(false);
 
-  const recordingRef = useRef(null);
-  const soundRef     = useRef(null);
-  const scrollRef    = useRef(null);
+  const recordingRef   = useRef(null);
+  const soundRef       = useRef(null);
+  const scrollRef      = useRef(null);
+  const ttsQueueRef    = useRef([]);   // 按句切好、等着播放的文字队列
+  const ttsPlayingRef  = useRef(false);
+  const abortStreamRef = useRef(null); // streamAsk() 返回的取消函数
 
   useEffect(() => {
     getHighlights(bookId)
@@ -93,6 +103,8 @@ export default function BookChatScreen({ route, navigation }) {
   }
 
   async function stopAudio() {
+    ttsQueueRef.current = [];
+    ttsPlayingRef.current = false;
     if (soundRef.current) {
       await soundRef.current.stopAsync().catch(() => {});
       await soundRef.current.unloadAsync().catch(() => {});
@@ -126,35 +138,74 @@ export default function BookChatScreen({ route, navigation }) {
     });
   }
 
-  async function speakText(text) {
-    await stopAudio(); // 换新的一条回答，旧的播放（不管是不是暂停中）先彻底清掉
-    if (!ttsOn) return;
+  // 流式回答按句切出来的每一句都过这里排队——上一句还没放完，新句子先进
+  // 队列，不会互相打断；播完一句自动接下一句，直到队列清空。
+  function enqueueTts(text) {
+    if (!ttsOn || !text.trim()) return;
+    ttsQueueRef.current.push(text.trim());
+    playNextInQueue();
+  }
+
+  async function playNextInQueue() {
+    if (ttsPlayingRef.current) return;
+    const next = ttsQueueRef.current.shift();
+    if (!next) return;
+    ttsPlayingRef.current = true;
     try {
       const { sound } = await Audio.Sound.createAsync(
-        { uri: getTtsPlayUrl(text) },
+        { uri: getTtsPlayUrl(next) },
         { shouldPlay: true },
       );
       soundRef.current = sound;
       sound.setOnPlaybackStatusUpdate(s => {
-        if (s.didJustFinish) { sound.unloadAsync(); soundRef.current = null; }
+        if (s.didJustFinish) {
+          sound.unloadAsync();
+          soundRef.current = null;
+          ttsPlayingRef.current = false;
+          playNextInQueue();
+        }
       });
     } catch (e) {
       console.warn('[TTS]', e.message);
+      ttsPlayingRef.current = false;
+      playNextInQueue(); // 这一句播放失败就跳过，不卡住后面排队的句子
     }
   }
 
-  async function handleSend(question) {
+  function handleSend(question) {
     const q = question.trim();
     if (!q || isThinking) return;
     setInput('');
     addMsg('user', q);
     setThinking(true);
-    try {
-      const history = messages.slice(-10).map(m => ({
-        role: m.role === 'assistant' ? 'assistant' : 'user',
-        content: m.text,
-      }));
-      const answer = await askQuestion({
+    stopAudio(); // 新一轮提问，先把上一轮还没播完的音频/队列清掉
+
+    const history = messages.slice(-10).map(m => ({
+      role: m.role === 'assistant' ? 'assistant' : 'user',
+      content: m.text,
+    }));
+
+    let assistantMsgId = null;
+    let fullText = '';
+    let sentenceBuffer = '';
+
+    // 把 buffer 里已经凑成整句的部分切出来送去TTS；isFinal时把剩下不满一句
+    // 的尾巴也当作最后一句处理（流式结束时可能没有标点收尾）
+    function flushSentences(isFinal) {
+      for (;;) {
+        const idx = sentenceBuffer.search(SENTENCE_END);
+        if (idx === -1) break;
+        enqueueTts(sentenceBuffer.slice(0, idx + 1));
+        sentenceBuffer = sentenceBuffer.slice(idx + 1);
+      }
+      if (isFinal && sentenceBuffer.trim()) {
+        enqueueTts(sentenceBuffer);
+        sentenceBuffer = '';
+      }
+    }
+
+    abortStreamRef.current = streamAsk(
+      {
         context: {
           bookTitle, author, chapterTitle,
           selection, pageText: '',
@@ -163,16 +214,41 @@ export default function BookChatScreen({ route, navigation }) {
         question: q,
         style,
         history,
-      });
-      addMsg('assistant', answer);
-      speakText(answer);
-      saveQaHistory({ bookId, bookTitle, chapterTitle, question: q, answer, selection, cfiRange }).catch(() => {});
-    } catch (e) {
-      setStatus(`提问失败：${e.message}`);
-    } finally {
-      setThinking(false);
-    }
+      },
+      {
+        onDelta: (delta) => {
+          fullText += delta;
+          sentenceBuffer += delta;
+          if (assistantMsgId === null) {
+            assistantMsgId = Date.now() + Math.random();
+            const id = assistantMsgId;
+            setStreamingId(id);
+            setMessages(prev => [...prev, { id, role: 'assistant', text: fullText }]);
+          } else {
+            const id = assistantMsgId;
+            setMessages(prev => prev.map(m => (m.id === id ? { ...m, text: fullText } : m)));
+          }
+          setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 30);
+          flushSentences(false);
+        },
+        onDone: (answer) => {
+          flushSentences(true);
+          setThinking(false);
+          setStreamingId(null);
+          abortStreamRef.current = null;
+          saveQaHistory({ bookId, bookTitle, chapterTitle, question: q, answer, selection, cfiRange }).catch(() => {});
+        },
+        onError: (e) => {
+          setStatus(`提问失败：${e.message}`);
+          setThinking(false);
+          setStreamingId(null);
+          abortStreamRef.current = null;
+        },
+      },
+    );
   }
+
+  useEffect(() => () => abortStreamRef.current?.(), []); // 离开页面时中断还没结束的流式请求
 
   async function toggleRecording() {
     console.log('[DEBUG] toggleRecording called, isRecording=', isRecording);
@@ -276,7 +352,7 @@ export default function BookChatScreen({ route, navigation }) {
           </Text>
         )}
         {messages.map(m => <Bubble key={m.id} role={m.role} text={m.text} />)}
-        {isThinking && <TypingBubble />}
+        {isThinking && streamingId === null && <TypingBubble />}
       </ScrollView>
 
       {!!status && <Text style={styles.status} numberOfLines={2}>{status}</Text>}
