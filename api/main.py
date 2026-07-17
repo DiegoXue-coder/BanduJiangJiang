@@ -567,7 +567,13 @@ async def save_history(req: HistorySaveRequest, request: Request, _=ExtAuth):
     sf = _make_sf(_sf_key(request))
     emb_str = None
     try:
-        vec = await _embed(f"{req.question} {req.answer}", sf)
+        # 2026-07-18：把 selection（划线原文）也加进去一起算向量，不能只用
+        # question+answer——"这个是什么意思"这类问题信息量太低，回答又短的话
+        # （苏格拉底模式常见），算出来的向量基本是在比较"措辞像不像"，导致
+        # 关联主题检测把毫不相关的记录标成"相关"。原文通常是实打实的古文内容，
+        # 加进去能把这种空洞问题的干扰稀释掉，同时还留着发现跨书概念联系的可能
+        # （纯比 selection 会漏掉"文字不同但主题相通"的情况，所以三个都要）。
+        vec = await _embed(f"{req.selection} {req.question} {req.answer}", sf)
         emb_str = _vec_to_str(vec)
     except Exception as e:
         print(f"[Embedding] 向量化失败: {e}")
@@ -1277,3 +1283,40 @@ async def app_get_review(_=ExtAuth):
             d["related_question"] = related["related_question"]
         items.append(ReviewItemOut(**d))
     return items
+
+@app.post("/app/backfill-embeddings")
+async def app_backfill_embeddings(request: Request, _=ExtAuth):
+    """一次性维护工具（2026-07-18）：给手机端自己的 qa_history 记录重新算
+    embedding，不管旧值是不是空的，一律用新公式（selection+question+answer）
+    覆盖——旧公式只用 question+answer，问题信息量低时关联检测容易把不相关的
+    记录误判为"相关"。只处理能在 books 表里找到归属的记录（跟 /app/review
+    同一个 JOIN 逻辑），插件那边的历史数据不碰。用完可以留着，以后公式再调
+    还能重跑。"""
+    sf = _make_sf(_sf_key(request))
+    if not sf:
+        raise HTTPException(status_code=401, detail="缺少 SiliconFlow API Key")
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT q.id, q.selection, q.question, q.answer
+            FROM qa_history q
+            JOIN books b ON b.id::text = q.book_id
+            WHERE q.user_id = $1
+        """, APP_USER_ID)
+
+    updated, failed = 0, []
+    for r in rows:
+        try:
+            vec = await _embed(f"{r['selection']} {r['question']} {r['answer']}", sf)
+            emb_str = _vec_to_str(vec)
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE qa_history SET embedding = $1::vector WHERE id = $2", emb_str, r["id"]
+                )
+            updated += 1
+        except Exception as e:
+            print(f"[Backfill] id={r['id']} 失败: {e}")
+            failed.append(r["id"])
+
+    return {"total": len(rows), "updated": updated, "failed": failed}
