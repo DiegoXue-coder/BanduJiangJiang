@@ -126,3 +126,9 @@ export async function saveQaHistory({ bookId, bookTitle, chapterTitle, question,
     }),
   });
 }
+
+// ── 阶段五：划线复盘 ────────────────────────────────────────────────
+
+export async function getReview() {
+  return appFetch('/app/review');
+}

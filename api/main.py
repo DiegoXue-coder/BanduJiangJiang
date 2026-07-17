@@ -331,6 +331,16 @@ class HighlightOut(BaseModel):
 class ProgressIn(BaseModel):
     cfi_location: str
 
+class ReviewItemOut(BaseModel):
+    type: str
+    id: int
+    created_at: datetime.datetime
+    book_id: int
+    book_title: str
+    text: str
+    question: str = ""
+    answer: str = ""
+
 # ── 系统 Prompt ────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = """你是"伴读讲讲"，一位亲切的读书陪伴助手。
@@ -980,3 +990,35 @@ async def app_update_progress(book_id: int, body: ProgressIn, _=ExtAuth):
                 SET current_cfi_location = $3, updated_at = NOW()
         """, APP_USER_ID, book_id, body.cfi_location)
     return {"ok": True}
+
+@app.get("/app/review", response_model=list[ReviewItemOut])
+async def app_get_review(_=ExtAuth):
+    """划线复盘：跨书聚合当前用户的划线 + 问答记录，按时间倒序。
+
+    qa_history 是扩展和手机端共用的表，扩展写入 /history 时不区分归属（微信读书的
+    bookId 是它自己的编号）。这里靠 JOIN books 反向过滤：只有 book_id 能对上手机端
+    自己 books 表里的书，才会出现在结果里，天然排除掉扩展那边的旧数据，不用改
+    /history 接口本身（只加不改）。
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT 'highlight' AS type, h.id, h.created_at,
+                   b.id AS book_id, b.title AS book_title,
+                   h.highlighted_text AS text, '' AS question, '' AS answer
+            FROM highlights h
+            JOIN books b ON b.id = h.book_id
+            WHERE h.user_id = $1
+
+            UNION ALL
+
+            SELECT 'qa' AS type, q.id, q.created_at,
+                   b.id AS book_id, b.title AS book_title,
+                   q.selection AS text, q.question, q.answer
+            FROM qa_history q
+            JOIN books b ON b.id::text = q.book_id
+            WHERE q.user_id = $1
+
+            ORDER BY created_at DESC
+        """, APP_USER_ID)
+    return [ReviewItemOut(**dict(r)) for r in rows]
