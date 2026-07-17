@@ -5,12 +5,12 @@
 import React, { useState, useRef, useEffect } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, ScrollView,
-  StyleSheet, KeyboardAvoidingView, Platform, SafeAreaView,
+  StyleSheet, KeyboardAvoidingView, Platform, SafeAreaView, Alert,
 } from 'react-native';
 import { Audio } from 'expo-av';
 import * as FileSystem from 'expo-file-system/legacy';
 import {
-  askQuestion, getTtsPlayUrl, transcribeAudio, saveQaHistory, getHighlights,
+  askQuestion, getTtsPlayUrl, transcribeAudio, saveQaHistory, getHighlights, saveHighlight,
 } from '../lib/api';
 
 const BLUE = '#4f8ef7';
@@ -53,6 +53,10 @@ export default function BookChatScreen({ route, navigation }) {
   const [ttsOn, setTtsOn]           = useState(true);
   const [style, setStyle]           = useState('simple'); // 'simple' 讲解 / 'socratic' 苏格拉底
   const [userHighlights, setUserHighlights] = useState([]);
+  // 长按选字进来的这段原文，可能已经在阅读器里划过线了——查一遍已有划线的
+  // cfi_location，避免同一段文字重复存两条划线记录
+  const [highlightSaved, setHighlightSaved] = useState(false);
+  const [savingHighlight, setSavingHighlight] = useState(false);
 
   const recordingRef = useRef(null);
   const soundRef     = useRef(null);
@@ -60,9 +64,25 @@ export default function BookChatScreen({ route, navigation }) {
 
   useEffect(() => {
     getHighlights(bookId)
-      .then(rows => setUserHighlights(rows.map(r => r.highlighted_text).filter(Boolean).slice(0, 8)))
+      .then(rows => {
+        setUserHighlights(rows.map(r => r.highlighted_text).filter(Boolean).slice(0, 8));
+        if (cfiRange && rows.some(r => r.cfi_location === cfiRange)) setHighlightSaved(true);
+      })
       .catch(() => {});
   }, [bookId]);
+
+  async function handleSaveHighlight() {
+    if (!selection || !cfiRange || highlightSaved || savingHighlight) return;
+    setSavingHighlight(true);
+    try {
+      await saveHighlight(bookId, { cfiLocation: cfiRange, highlightedText: selection });
+      setHighlightSaved(true);
+    } catch (e) {
+      Alert.alert('划线保存失败', e.message || '请稍后重试');
+    } finally {
+      setSavingHighlight(false);
+    }
+  }
 
   function addMsg(role, text) {
     setMessages(prev => {
@@ -235,6 +255,17 @@ export default function BookChatScreen({ route, navigation }) {
       {!!selection && (
         <View style={styles.selectionBar}>
           <Text style={styles.selectionText} numberOfLines={2}>“{selection}”</Text>
+          {!!cfiRange && (
+            <TouchableOpacity
+              style={[styles.saveHighlightBtn, highlightSaved && styles.saveHighlightBtnDone]}
+              onPress={handleSaveHighlight}
+              disabled={highlightSaved || savingHighlight}
+            >
+              <Text style={styles.saveHighlightText}>
+                {highlightSaved ? '✓ 已划线' : '📌 存为划线'}
+              </Text>
+            </TouchableOpacity>
+          )}
         </View>
       )}
 
@@ -311,10 +342,17 @@ const styles = StyleSheet.create({
   styleToggleTextActive: { color: '#fff' },
 
   selectionBar: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
     backgroundColor: '#fff', paddingHorizontal: 16, paddingVertical: 10,
     borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#dde3f0',
   },
-  selectionText: { fontSize: 13, color: '#5b6478', fontStyle: 'italic' },
+  selectionText: { flex: 1, fontSize: 13, color: '#5b6478', fontStyle: 'italic' },
+  saveHighlightBtn: {
+    paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8,
+    backgroundColor: '#fff3d6',
+  },
+  saveHighlightBtnDone: { backgroundColor: '#eef3ff' },
+  saveHighlightText: { fontSize: 12, color: '#a35d00', fontWeight: '600' },
 
   messages:   { flex: 1 },
   msgContent: { padding: 16, paddingBottom: 8 },
