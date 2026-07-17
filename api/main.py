@@ -1259,14 +1259,17 @@ async def app_get_review(_=ExtAuth):
         # "最相似的另一条"，只做标注用，不合并成一条、不提供自动跳转。
         # 2026-07-18 修复：排除 selection 相同的记录——针对同一段划线连续追问
         # 好几轮，这些记录本来就是同一次对话，互相标"关联"是噪音，不是真的
-        # 发现了跨主题的联系。
-        related_rows = await conn.fetch("""
+        # 发现了跨主题的联系。用 regexp_replace 去掉开头"15. "这种章节编号前缀
+        # 再比较——同一段原文，有的记录划选时带了编号、有的没带，精确字符串
+        # 相等挡不住这种情况，规范化以后再比才行。
+        related_rows = await conn.fetch(r"""
             SELECT DISTINCT ON (a.id)
                    a.id AS item_id, bb.title AS related_book_title, b.question AS related_question
             FROM qa_history a
             JOIN books ba ON ba.id::text = a.book_id
             JOIN qa_history b ON b.id != a.id AND b.embedding IS NOT NULL AND b.user_id = $1
-                              AND b.selection != a.selection
+                              AND regexp_replace(b.selection, '^\s*\d+\.\s*', '')
+                                  != regexp_replace(a.selection, '^\s*\d+\.\s*', '')
             JOIN books bb ON bb.id::text = b.book_id
             WHERE a.user_id = $1 AND a.embedding IS NOT NULL
               AND 1 - (a.embedding <=> b.embedding) >= $2
