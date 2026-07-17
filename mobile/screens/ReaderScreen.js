@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   View, Text, TouchableOpacity, StyleSheet, SafeAreaView, ActivityIndicator, Alert,
+  Modal, FlatList,
 } from 'react-native';
 import { Reader, useReader } from '@epubjs-react-native/core';
 import { useFileSystem } from '@epubjs-react-native/expo-file-system';
@@ -23,9 +24,13 @@ const THEME_LABEL = { light: '☀️', paper: '📜', dark: '🌙' };
 const PROGRESS_DEBOUNCE_MS = 2000;
 
 function ReaderInner({ bookId, bookTitle, author, initialLocation, initialAnnotations, navigation }) {
-  const { addAnnotation, changeTheme } = useReader();
+  const { addAnnotation, changeTheme, toc, goToLocation } = useReader();
   const [themeName, setThemeName] = useState('light');
   const [currentSectionTitle, setCurrentSectionTitle] = useState('');
+  // 章节目录：epub.js 自动生成的导航页只有第一次打开书时会经过，选了某一章
+  // 之后就没有入口再回去挑别的章节——加一个常驻的目录按钮，不依赖那个只会
+  // 出现一次的自动导航页
+  const [showToc, setShowToc] = useState(false);
   // 长按原生菜单（menuItems）在拖动选区手柄调整范围后不会重新弹出——这是
   // react-native-webview 自身的已知限制，不是我们代码能修的。改用这个悬浮条
   // 兜底：只要 epub.js 报了新的选区（onSelected，拖动调整后也会正常触发），
@@ -85,6 +90,9 @@ function ReaderInner({ bookId, bookTitle, author, initialLocation, initialAnnota
         </TouchableOpacity>
         <Text style={styles.headerTitle} numberOfLines={1}>{bookTitle}</Text>
         <View style={styles.headerRight}>
+          <TouchableOpacity onPress={() => setShowToc(true)} style={styles.headerBtn}>
+            <Text style={styles.headerBtnText}>📑</Text>
+          </TouchableOpacity>
           <TouchableOpacity onPress={() => openChat()} style={styles.headerBtn}>
             <Text style={styles.headerBtnText}>💬</Text>
           </TouchableOpacity>
@@ -93,6 +101,32 @@ function ReaderInner({ bookId, bookTitle, author, initialLocation, initialAnnota
           </TouchableOpacity>
         </View>
       </View>
+
+      <Modal visible={showToc} animationType="slide" onRequestClose={() => setShowToc(false)}>
+        <SafeAreaView style={styles.tocSafe}>
+          <View style={styles.tocHeader}>
+            <Text style={styles.tocHeaderTitle}>目录</Text>
+            <TouchableOpacity onPress={() => setShowToc(false)} style={styles.tocCloseBtn}>
+              <Text style={styles.tocCloseBtnText}>完成</Text>
+            </TouchableOpacity>
+          </View>
+          <FlatList
+            data={toc}
+            keyExtractor={(item, idx) => item.id || String(idx)}
+            renderItem={({ item }) => (
+              <TouchableOpacity
+                style={styles.tocItem}
+                onPress={() => {
+                  goToLocation(item.href);
+                  setShowToc(false);
+                }}
+              >
+                <Text style={styles.tocItemText}>{item.label?.trim()}</Text>
+              </TouchableOpacity>
+            )}
+          />
+        </SafeAreaView>
+      </Modal>
 
       <Reader
         src={getBookFileUrl(bookId)}
@@ -255,4 +289,19 @@ const styles = StyleSheet.create({
   selectionBtnText: { color: '#fff', fontSize: 13, fontWeight: '600' },
   selectionCloseBtn: { paddingHorizontal: 6, paddingVertical: 7 },
   selectionCloseBtnText: { color: '#8a95b0', fontSize: 15 },
+
+  tocSafe: { flex: 1, backgroundColor: '#fff' },
+  tocHeader: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingHorizontal: 16, paddingVertical: 14,
+    borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#dde3f0',
+  },
+  tocHeaderTitle: { fontSize: 17, fontWeight: '700', color: '#1a1a2e' },
+  tocCloseBtn: { padding: 4 },
+  tocCloseBtnText: { color: BLUE, fontSize: 15, fontWeight: '600' },
+  tocItem: {
+    paddingHorizontal: 16, paddingVertical: 14,
+    borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#f0f2f7',
+  },
+  tocItemText: { fontSize: 15, color: '#1a1a2e' },
 });
