@@ -577,6 +577,18 @@ async def save_history(req: HistorySaveRequest, request: Request, _=ExtAuth):
                 req.question, req.answer, req.selection, req.cfi_location)
     return {"ok": True}
 
+@app.delete("/history/{record_id}")
+async def delete_history(record_id: int, _=ExtAuth):
+    """按 id 删一条问答记录——目前主要是开发/调试期间清理测试数据用，没有专门的
+    管理界面调这个接口，鉴权复用现有 ExtAuth。"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute("DELETE FROM qa_history WHERE id = $1", record_id)
+    deleted = result.split(" ")[-1] != "0"
+    if not deleted:
+        raise HTTPException(status_code=404, detail="记录不存在")
+    return {"ok": True}
+
 @app.get("/history")
 async def get_history(book_id: str = "", limit: int = 50, _=ExtAuth):
     pool = await get_pool()
