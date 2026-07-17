@@ -347,6 +347,8 @@ class ReviewItemOut(BaseModel):
     question: str = ""
     answer: str = ""
     cfi_location: str = ""
+    related_book_title: str = ""
+    related_question: str = ""
 
 # ── 系统 Prompt ────────────────────────────────────────────────────
 
@@ -1062,7 +1064,8 @@ async def app_update_progress(book_id: int, body: ProgressIn, _=ExtAuth):
 
 @app.get("/app/review", response_model=list[ReviewItemOut])
 async def app_get_review(_=ExtAuth):
-    """划线复盘：跨书聚合当前用户的划线 + 问答记录，按时间倒序。
+    """划线复盘：跨书聚合当前用户的划线 + 问答记录，按时间倒序，附带问答记录之间的
+    语义关联标注（阶段六新增，仅标注不合并不跳转）。
 
     qa_history 是扩展和手机端共用的表，扩展写入 /history 时不区分归属（微信读书的
     bookId 是它自己的编号）。这里靠 JOIN books 反向过滤：只有 book_id 能对上手机端
@@ -1092,4 +1095,29 @@ async def app_get_review(_=ExtAuth):
 
             ORDER BY created_at DESC
         """, APP_USER_ID)
-    return [ReviewItemOut(**dict(r)) for r in rows]
+
+        # 关联主题：问答记录两两算向量相似度（跨书也算），阈值复用 /history/related
+        # 那套已经调过的 SIMILARITY_THRESHOLD，不新造一个数字。每条最多标注一个
+        # "最相似的另一条"，只做标注用，不合并成一条、不提供自动跳转。
+        related_rows = await conn.fetch("""
+            SELECT DISTINCT ON (a.id)
+                   a.id AS item_id, bb.title AS related_book_title, b.question AS related_question
+            FROM qa_history a
+            JOIN books ba ON ba.id::text = a.book_id
+            JOIN qa_history b ON b.id != a.id AND b.embedding IS NOT NULL AND b.user_id = $1
+            JOIN books bb ON bb.id::text = b.book_id
+            WHERE a.user_id = $1 AND a.embedding IS NOT NULL
+              AND 1 - (a.embedding <=> b.embedding) >= $2
+            ORDER BY a.id, (a.embedding <=> b.embedding) ASC
+        """, APP_USER_ID, SIMILARITY_THRESHOLD)
+        related_map = {r["item_id"]: r for r in related_rows}
+
+    items = []
+    for r in rows:
+        d = dict(r)
+        related = related_map.get(d["id"]) if d["type"] == "qa" else None
+        if related:
+            d["related_book_title"] = related["related_book_title"]
+            d["related_question"] = related["related_question"]
+        items.append(ReviewItemOut(**d))
+    return items
