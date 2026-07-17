@@ -237,14 +237,25 @@ def _vec_to_str(vec: list[float]) -> str:
     """将 Python float list 转为 pgvector 接受的字符串格式。"""
     return "[" + ",".join(f"{x:.8f}" for x in vec) + "]"
 
-async def _embed(text: str, sf: OpenAI | None = None) -> list[float]:
+async def _embed(text: str, sf: OpenAI | None = None, retries: int = 3) -> list[float]:
+    """算 embedding，带重试——阶段六排查"关联主题"发现真机使用中大量 qa_history
+    行的 embedding 是空的，原来这里一次失败就直接放弃不重试，怀疑是 SiliconFlow
+    偶发抖动/限流导致的，加上重试兜一下（指数退避，0.5s/1s/2s）。"""
     c = sf or sf_client
     if not c:
         raise ValueError("SiliconFlow key not configured")
-    resp = await asyncio.to_thread(
-        lambda: c.embeddings.create(model="BAAI/bge-m3", input=text[:1000])
-    )
-    return resp.data[0].embedding
+    last_err = None
+    for attempt in range(retries):
+        try:
+            resp = await asyncio.to_thread(
+                lambda: c.embeddings.create(model="BAAI/bge-m3", input=text[:1000])
+            )
+            return resp.data[0].embedding
+        except Exception as e:
+            last_err = e
+            if attempt < retries - 1:
+                await asyncio.sleep(0.5 * (2 ** attempt))
+    raise last_err
 
 # ── FastAPI ────────────────────────────────────────────────────────
 
@@ -576,6 +587,32 @@ async def save_history(req: HistorySaveRequest, request: Request, _=ExtAuth):
             """, req.book_id, req.book_title, req.chapter_title,
                 req.question, req.answer, req.selection, req.cfi_location)
     return {"ok": True}
+
+@app.post("/history/backfill-embeddings")
+async def backfill_history_embeddings(request: Request, _=ExtAuth):
+    """一次性补算 qa_history 里 embedding 缺失的行（阶段六排查"关联主题"功能时
+    发现的历史缺口——原因不明确，猜测是 SiliconFlow 偶发失败+当时 _embed 没有重试
+    导致的，_embed 已经加了重试防止再发生，这个接口专门处理已经缺失的存量数据）。
+    没有专门的管理界面，需要手动调一次；age 数量小的时候直接跑，不用建后台任务队列。
+    """
+    sf = _make_sf(_sf_key(request))
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, question, answer FROM qa_history WHERE embedding IS NULL"
+        )
+        fixed, failed = 0, []
+        for row in rows:
+            try:
+                vec = await _embed(f"{row['question']} {row['answer']}", sf)
+                await conn.execute(
+                    "UPDATE qa_history SET embedding = $1::vector WHERE id = $2",
+                    _vec_to_str(vec), row["id"],
+                )
+                fixed += 1
+            except Exception as e:
+                failed.append({"id": row["id"], "error": str(e)})
+    return {"total_missing": len(rows), "fixed": fixed, "failed": failed}
 
 @app.delete("/history/{record_id}")
 async def delete_history(record_id: int, _=ExtAuth):
