@@ -6,9 +6,11 @@ import re
 import time
 import hmac
 import uuid
+import json
 import hashlib
 import datetime
 import asyncio
+import threading
 from collections import defaultdict
 from contextlib import asynccontextmanager
 
@@ -16,7 +18,7 @@ import asyncpg
 
 from fastapi import FastAPI, HTTPException, Request, Depends, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response, FileResponse
+from fastapi.responses import Response, FileResponse, StreamingResponse
 from pydantic import BaseModel
 from openai import OpenAI
 import edge_tts
@@ -685,8 +687,13 @@ async def free_quota(request: Request):
     ip = _get_client_ip(request)
     return {"remaining": await _get_remaining_free(ip), "limit": FREE_DAILY_LIMIT}
 
-@app.post("/ask", response_model=AskResponse)
-async def ask(req: AskRequest, request: Request, _=ExtAuth):
+SOCR_MAX_ROUNDS = 8
+
+async def _prepare_ask(req: AskRequest, request: Request):
+    """/ask 和 /ask/stream 共用的准备逻辑：鉴权+限额检查、拼上下文、按苏格拉底/
+    直接讲解两种模式组装 messages。抽出来是因为流式版本除了"最后一次性拿结果"
+    变成"边生成边推"之外，前面这一整段完全一样，不想复制一遍容易改漏。
+    """
     if len(req.question) > 2000:
         raise HTTPException(status_code=400, detail="问题太长，请控制在 2000 字以内")
 
@@ -739,8 +746,7 @@ async def ask(req: AskRequest, request: Request, _=ExtAuth):
         "story":    "\n\n【风格要求】请用讲故事的方式解释，加入具体场景、比喻或类比，让人感觉身临其境。",
     }
 
-    round_num      = len(req.history) // 2 + 1
-    SOCR_MAX_ROUNDS = 8
+    round_num = len(req.history) // 2 + 1
 
     if req.style == "socratic":
         if round_num >= SOCR_MAX_ROUNDS:
@@ -793,7 +799,25 @@ async def ask(req: AskRequest, request: Request, _=ExtAuth):
 
     max_tokens  = socr_max_tokens if req.style == "socratic" else 512
     temperature = 0.3 if req.style == "socratic" else 1.0
+    return ds, messages, max_tokens, temperature, round_num
 
+def _finalize_socratic_text(raw: str, style: str, round_num: int) -> str:
+    """苏格拉底模式的截断规则：round_num < SOCR_MAX_ROUNDS 且不是"你已经推导出来了"
+    开头的，只保留到第一个问号为止（非流式/流式提前终止两条路径共用这条规则）。"""
+    is_socr_q = (style == "socratic"
+                 and round_num < SOCR_MAX_ROUNDS
+                 and not raw.startswith("你已经推导出来了"))
+    if not is_socr_q:
+        return raw
+    for qmark in ("？", "?"):
+        idx = raw.find(qmark)
+        if idx >= 0:
+            return raw[:idx + 1].strip()
+    return raw[:40]
+
+@app.post("/ask", response_model=AskResponse)
+async def ask(req: AskRequest, request: Request, _=ExtAuth):
+    ds, messages, max_tokens, temperature, round_num = await _prepare_ask(req, request)
     try:
         resp = await asyncio.to_thread(
             lambda: ds.chat.completions.create(
@@ -806,22 +830,75 @@ async def ask(req: AskRequest, request: Request, _=ExtAuth):
         )
         raw = resp.choices[0].message.content
         print(f"[Ask] round={round_num} style={req.style} raw={repr(raw[:80])}")
-
-        is_socr_q = (req.style == "socratic"
-                     and round_num < SOCR_MAX_ROUNDS
-                     and not raw.startswith("你已经推导出来了"))
-        if is_socr_q:
-            for qmark in ("？", "?"):
-                idx = raw.find(qmark)
-                if idx >= 0:
-                    raw = raw[:idx + 1].strip()
-                    break
-            else:
-                raw = raw[:40]
-
-        return AskResponse(answer=raw)
+        return AskResponse(answer=_finalize_socratic_text(raw, req.style, round_num))
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"DeepSeek API 错误: {e}")
+
+@app.post("/ask/stream")
+async def ask_stream(req: AskRequest, request: Request, _=ExtAuth):
+    """流式版 /ask（阶段六）：DeepSeek 边生成边推给客户端，配合客户端按句切分
+    TTS，不用等完整回答生成完才开口。苏格拉底模式一旦检测到该截断的问号，
+    直接提前终止生成（不用等 max_tokens 耗尽），比非流式版本还省 token。
+
+    SSE 事件格式：`data: {"delta": "..."}` 增量文本；结束时
+    `data: {"done": true, "answer": "最终完整文本"}`；出错 `data: {"error": "..."}`。
+    """
+    ds, messages, max_tokens, temperature, round_num = await _prepare_ask(req, request)
+    is_socr_truncatable = req.style == "socratic" and round_num < SOCR_MAX_ROUNDS
+
+    async def event_gen():
+        loop  = asyncio.get_event_loop()
+        queue: asyncio.Queue = asyncio.Queue()
+        SENTINEL = object()
+
+        def produce():
+            accumulated = ""
+            try:
+                stream = ds.chat.completions.create(
+                    model="deepseek-v4-flash",
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    messages=messages,
+                    extra_body={"thinking": {"type": "disabled"}},
+                    stream=True,
+                )
+                for chunk in stream:
+                    delta = (chunk.choices[0].delta.content or "") if chunk.choices else ""
+                    if not delta:
+                        continue
+                    accumulated += delta
+                    loop.call_soon_threadsafe(queue.put_nowait, ("delta", delta))
+                    # 苏格拉底模式：一旦确认不是"你已经推导出来了"开头、又出现了
+                    # 问号，说明这句追问已经完整，提前收工，不用烧完 max_tokens
+                    if (is_socr_truncatable
+                            and not accumulated.startswith("你已经推导出来了")
+                            and len(accumulated) >= 2
+                            and ("？" in accumulated or "?" in accumulated)):
+                        break
+            except Exception as e:
+                loop.call_soon_threadsafe(queue.put_nowait, ("error", str(e)))
+                loop.call_soon_threadsafe(queue.put_nowait, SENTINEL)
+                return
+            loop.call_soon_threadsafe(queue.put_nowait, ("raw_done", accumulated))
+            loop.call_soon_threadsafe(queue.put_nowait, SENTINEL)
+
+        threading.Thread(target=produce, daemon=True).start()
+
+        while True:
+            item = await queue.get()
+            if item is SENTINEL:
+                break
+            kind, payload = item
+            if kind == "delta":
+                yield f"data: {json.dumps({'delta': payload}, ensure_ascii=False)}\n\n"
+            elif kind == "error":
+                yield f"data: {json.dumps({'error': payload}, ensure_ascii=False)}\n\n"
+            elif kind == "raw_done":
+                final_text = _finalize_socratic_text(payload, req.style, round_num)
+                print(f"[AskStream] round={round_num} style={req.style} final={repr(final_text[:80])}")
+                yield f"data: {json.dumps({'done': True, 'answer': final_text}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(event_gen(), media_type="text/event-stream")
 
 @app.post("/tts")
 async def tts(req: TTSRequest, _=ExtAuth):
