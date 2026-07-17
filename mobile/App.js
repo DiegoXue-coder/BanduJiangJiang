@@ -11,6 +11,7 @@ import BookshelfScreen from './screens/BookshelfScreen';
 import ReaderScreen from './screens/ReaderScreen';
 import BookChatScreen from './screens/BookChatScreen';
 import ReviewScreen from './screens/ReviewScreen';
+import ReviewDetailScreen from './screens/ReviewDetailScreen';
 import ProfileScreen from './screens/ProfileScreen';
 
 const BLUE = '#4f8ef7';
@@ -18,6 +19,7 @@ const TAB_ICON = { 书架: '📚', 划线复盘: '✍️', 我的: '👤' };
 
 const Tab = createBottomTabNavigator();
 const BookshelfStack = createNativeStackNavigator();
+const ReviewStack = createNativeStackNavigator();
 
 // 书架tab自己的堆栈——点书本卡片会"推入"阅读器页面，阅读器时隐藏底部tab栏
 function BookshelfStackScreen() {
@@ -30,9 +32,20 @@ function BookshelfStackScreen() {
   );
 }
 
+// 划线复盘tab同样需要自己的堆栈——点卡片"推入"详情页；"跳转到原文"从详情页
+// 跨tab导航回书架堆栈的 Reader（见 ReviewDetailScreen.js）
+function ReviewStackScreen() {
+  return (
+    <ReviewStack.Navigator screenOptions={{ headerShown: false }}>
+      <ReviewStack.Screen name="ReviewHome" component={ReviewScreen} />
+      <ReviewStack.Screen name="ReviewDetail" component={ReviewDetailScreen} />
+    </ReviewStack.Navigator>
+  );
+}
+
 function getTabBarStyle(route) {
   const focusedRoute = getFocusedRouteNameFromRoute(route) ?? 'BookshelfHome';
-  if (focusedRoute === 'Reader' || focusedRoute === 'BookChat') return { display: 'none' };
+  if (['Reader', 'BookChat', 'ReviewDetail'].includes(focusedRoute)) return { display: 'none' };
   return undefined;
 }
 
@@ -57,7 +70,11 @@ export default function App() {
               component={BookshelfStackScreen}
               options={({ route }) => ({ tabBarStyle: getTabBarStyle(route) })}
             />
-            <Tab.Screen name="划线复盘" component={ReviewScreen} />
+            <Tab.Screen
+              name="划线复盘"
+              component={ReviewStackScreen}
+              options={({ route }) => ({ tabBarStyle: getTabBarStyle(route) })}
+            />
             <Tab.Screen name="我的" component={ProfileScreen} />
           </Tab.Navigator>
         </NavigationContainer>

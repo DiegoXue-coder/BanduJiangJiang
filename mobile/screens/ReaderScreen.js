@@ -163,7 +163,9 @@ function ReaderInner({ bookId, bookTitle, author, initialLocation, initialAnnota
 }
 
 export default function ReaderScreen({ route, navigation }) {
-  const { bookId } = route.params;
+  // initialCfi：从"划线复盘"详情页"跳转到原文"过来时带的目标位置，优先于阅读
+  // 进度使用——只是这一次打开跳到这里，不会覆盖/污染保存的阅读进度
+  const { bookId, initialCfi } = route.params;
   const [ctx, setCtx] = useState(null);
   const [highlights, setHighlights] = useState(null);
   const [error, setError] = useState('');
@@ -208,7 +210,7 @@ export default function ReaderScreen({ route, navigation }) {
       bookId={bookId}
       bookTitle={ctx.title}
       author={ctx.author}
-      initialLocation={ctx.current_cfi_location}
+      initialLocation={initialCfi || ctx.current_cfi_location}
       initialAnnotations={highlights}
       navigation={navigation}
     />

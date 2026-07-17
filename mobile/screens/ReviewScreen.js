@@ -27,10 +27,10 @@ function formatTime(iso) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-function ReviewCard({ item }) {
+function ReviewCard({ item, onPress }) {
   const isQa = item.type === 'qa';
   return (
-    <View style={styles.card}>
+    <TouchableOpacity style={styles.card} onPress={onPress} activeOpacity={0.7}>
       <View style={styles.cardTop}>
         <View style={[styles.tag, isQa ? styles.tagQa : styles.tagHighlight]}>
           <Text style={[styles.tagText, isQa ? styles.tagTextQa : styles.tagTextHighlight]}>
@@ -57,11 +57,11 @@ function ReviewCard({ item }) {
       )}
 
       <Text style={styles.timeText}>{formatTime(item.created_at)}</Text>
-    </View>
+    </TouchableOpacity>
   );
 }
 
-export default function ReviewScreen() {
+export default function ReviewScreen({ navigation }) {
   const [items, setItems]     = useState(null); // null = 加载中
   const [error, setError]     = useState('');
   const [refreshing, setRefreshing] = useState(false);
@@ -150,7 +150,9 @@ export default function ReviewScreen() {
             <Text style={styles.emptyText}>{EMPTY_HINT[tab]}</Text>
           </View>
         }
-        renderItem={({ item }) => <ReviewCard item={item} />}
+        renderItem={({ item }) => (
+          <ReviewCard item={item} onPress={() => navigation.navigate('ReviewDetail', { item })} />
+        )}
       />
     </SafeAreaView>
   );
