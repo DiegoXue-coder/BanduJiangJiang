@@ -1,12 +1,33 @@
-# 内容筹备（阶段二）
+# 内容筹备（阶段二 + 阶段六）
 
-v1 首发书库，来源：[Project Gutenberg](https://www.gutenberg.org/)（公版，零版权风险）。
+v1 首发书库 4 本来源：[Project Gutenberg](https://www.gutenberg.org/)（道德经/论语/孟子/墨子，
+公版，零版权风险）。阶段六新增 3 本（庄子/大学/中庸）来源改用
+[zh.wikisource.org](https://zh.wikisource.org)（维基文库）——Gutenberg 没有这三本干净的
+原文版本，见下方"阶段六：为什么庄子/大学/中庸换了个源"。
 
 | 文件 | 说明 |
 |---|---|
-| `daodejing.epub` / `lunyu.epub` / `mengzi.epub` / `mozi.epub` | 原始下载文件，保留作为可追溯来源 |
+| `daodejing.epub` / `lunyu.epub` / `mengzi.epub` / `mozi.epub` | Gutenberg 原始下载文件，保留作为可追溯来源 |
 | `*_clean.epub` | 重新打包后的干净EPUB，**这些才是实际导入书库用的文件** |
-| `repackage_gutenberg_epub.py` | 重新打包脚本，见脚本内文档字符串了解为什么需要这一步、章节切分规则怎么定的 |
+| `repackage_gutenberg_epub.py` | Gutenberg 书重新打包脚本，见脚本内文档字符串了解为什么需要这一步、章节切分规则怎么定的 |
+| `wikisource_to_epub.py` | 维基文库抓取脚本，庄子/大学/中庸用这个，不经过 `repackage_gutenberg_epub.py` |
+
+## 阶段六：为什么庄子/大学/中庸换了个源
+
+Gutenberg 上：庄子只有英译本和一本现代人写的寓言故事集（作者二十世纪人，版权状态
+存疑，不算公版），大学/中庸完全没收录。查了两个备选：
+
+- **ctext.org**（中国哲学书电子化计划）：三篇原文都有，但网站条款明确写着"禁止
+  自动化下载工具，违者直接封禁"——没有采用，这是网站白纸黑字禁止爬虫
+- **zh.wikisource.org**（维基文库）：三篇原文都有，协议 CC BY-SA 4.0 明确允许转载
+  （转载需署名，作者字段已体现来源），而且是标准 MediaWiki 站点，直接调
+  `action=query&prop=extracts` 官方 API 取纯文本，不算爬虫，对站点友好——采用这个
+
+`wikisource_to_epub.py` 里庄子走"目录页解析子页面链接+逐页抓取"（33个独立页面对应
+33章），大学/中庸走"单页原文按自然段落切章节"（不追求复现某个后世注疏版本的章节
+编号，比如朱熹《四书章句集注》那版——那版夹杂了大量注释，不是纯原文，特意选了
+《礼记》里的原始版本）。抓取时注意限速（实测 0.5 秒间隔会被 429 限流，改成 2 秒
++ 失败退避重试）。
 
 ## 每本书的切分策略不一样（阶段六新增孟子/墨子后的教训）
 
