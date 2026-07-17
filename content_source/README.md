@@ -16,7 +16,8 @@ Gutenberg 中文公版书正文塞在同一个HTML文件里、官方目录本身
 
 ## 依赖
 
-脚本需要 `beautifulsoup4`（`pip install beautifulsoup4`），这是内容筹备阶段的一次性
+脚本需要 `beautifulsoup4` 和 `opencc-python-reimplemented`（繁体转简体，阶段六新增），
+`pip install beautifulsoup4 opencc-python-reimplemented`。这是内容筹备阶段的一次性
 工具，不是线上API运行依赖，所以没有放进 `api/requirements.txt`。
 
 ## 以后新增书目

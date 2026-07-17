@@ -876,6 +876,68 @@ async def app_import_book(file: UploadFile = File(...), _=ExtAuth):
 
     return BookOut(id=book_id, title=title, author=author, added_at=book_row["added_at"])
 
+@app.post("/app/books/{book_id}/replace", response_model=BookOut)
+async def app_replace_book(book_id: int, file: UploadFile = File(...), _=ExtAuth):
+    """原地替换一本书的源文件（比如阶段六的繁体转简体），不改变 book_id/chapter_id。
+
+    章节数量必须和原书一致，按 order_index 一一对应更新标题——这样已有的划线
+    （引用 chapter_id）和问答记录（qa_history.book_id 存的是这个书的 id）都不受
+    影响，不会被 CASCADE 删除，不用做数据迁移。数量对不上就拒绝，防止打乱现有
+    chapter_id 的引用关系。
+    """
+    if not (file.filename or "").lower().endswith(".epub"):
+        raise HTTPException(status_code=400, detail="只支持 .epub 文件")
+
+    raw = await file.read()
+    if len(raw) > MAX_EPUB_BYTES:
+        raise HTTPException(status_code=413, detail="文件过大，请控制在 50MB 以内")
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        book = await conn.fetchrow(
+            "SELECT file_path FROM books WHERE id = $1 AND user_id = $2", book_id, APP_USER_ID
+        )
+        if not book:
+            raise HTTPException(status_code=404, detail="书本不存在")
+        existing_chapters = await conn.fetch(
+            "SELECT id, order_index FROM chapters WHERE book_id = $1 ORDER BY order_index", book_id
+        )
+
+    tmp_path = os.path.join(EPUB_STORAGE_DIR, f"{uuid.uuid4().hex}.epub")
+    with open(tmp_path, "wb") as f:
+        f.write(raw)
+
+    try:
+        book_epub = epub.read_epub(tmp_path)
+        title  = (book_epub.get_metadata("DC", "title")   or [("", {})])[0][0] or file.filename
+        author = (book_epub.get_metadata("DC", "creator") or [("", {})])[0][0] or ""
+        chapter_titles = _extract_chapter_titles(book_epub)
+    except Exception as e:
+        os.remove(tmp_path)
+        raise HTTPException(status_code=400, detail=f"EPUB 解析失败: {e}")
+
+    if len(chapter_titles) != len(existing_chapters):
+        os.remove(tmp_path)
+        raise HTTPException(
+            status_code=400,
+            detail=f"新文件章节数({len(chapter_titles)})与原书({len(existing_chapters)})不一致，拒绝替换"
+        )
+
+    os.replace(tmp_path, book["file_path"])
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            updated = await conn.fetchrow(
+                "UPDATE books SET title = $1, author = $2 WHERE id = $3 RETURNING added_at",
+                title, author, book_id
+            )
+            for chapter, new_title in zip(existing_chapters, chapter_titles):
+                await conn.execute(
+                    "UPDATE chapters SET title = $1 WHERE id = $2", new_title, chapter["id"]
+                )
+
+    return BookOut(id=book_id, title=title, author=author, added_at=updated["added_at"])
+
 @app.get("/app/books", response_model=list[BookOut])
 async def app_get_library(_=ExtAuth):
     """书架：返回当前用户的所有书本，附带各自的阅读进度。"""
