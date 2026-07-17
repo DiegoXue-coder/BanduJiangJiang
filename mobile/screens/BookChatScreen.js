@@ -43,7 +43,7 @@ function TypingBubble() {
 }
 
 export default function BookChatScreen({ route, navigation }) {
-  const { bookId, bookTitle, author, chapterTitle, selection = '' } = route.params;
+  const { bookId, bookTitle, author, chapterTitle, selection = '', cfiRange = '' } = route.params;
 
   const [messages, setMessages]     = useState([]);
   const [input, setInput]           = useState('');
@@ -146,7 +146,7 @@ export default function BookChatScreen({ route, navigation }) {
       });
       addMsg('assistant', answer);
       speakText(answer);
-      saveQaHistory({ bookId, bookTitle, chapterTitle, question: q, answer, selection }).catch(() => {});
+      saveQaHistory({ bookId, bookTitle, chapterTitle, question: q, answer, selection, cfiRange }).catch(() => {});
     } catch (e) {
       setStatus(`提问失败：${e.message}`);
     } finally {

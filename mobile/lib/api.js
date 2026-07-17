@@ -112,7 +112,7 @@ export async function transcribeAudio(fileUri, uploadAsync, FileSystemUploadType
   return JSON.parse(result.body).text;
 }
 
-export async function saveQaHistory({ bookId, bookTitle, chapterTitle, question, answer, selection = '' }) {
+export async function saveQaHistory({ bookId, bookTitle, chapterTitle, question, answer, selection = '', cfiRange = '' }) {
   return appFetch('/history', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -123,6 +123,7 @@ export async function saveQaHistory({ bookId, bookTitle, chapterTitle, question,
       question,
       answer,
       selection,
+      cfi_location: cfiRange,
     }),
   });
 }

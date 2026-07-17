@@ -63,6 +63,11 @@ async def init_db():
         await conn.execute(
             "ALTER TABLE qa_history ADD COLUMN IF NOT EXISTS user_id BIGINT NOT NULL DEFAULT 1"
         )
+        # 阶段六：复盘详情页"跳转到原文"要用，提问那一刻顺手存下 CFI 位置；
+        # 老数据这个字段是空字符串，跳转会退化成只打开书不定位，不算 bug
+        await conn.execute(
+            "ALTER TABLE qa_history ADD COLUMN IF NOT EXISTS cfi_location TEXT NOT NULL DEFAULT ''"
+        )
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS daily_usage (
                 ip    TEXT    NOT NULL,
@@ -292,6 +297,7 @@ class HistorySaveRequest(BaseModel):
     question: str
     answer: str
     selection: str = ""
+    cfi_location: str = ""
 
 # ── 手机端 App 请求/响应模型（WBS 阶段一骨架）──────────────────────
 
@@ -340,6 +346,7 @@ class ReviewItemOut(BaseModel):
     text: str
     question: str = ""
     answer: str = ""
+    cfi_location: str = ""
 
 # ── 系统 Prompt ────────────────────────────────────────────────────
 
@@ -555,17 +562,17 @@ async def save_history(req: HistorySaveRequest, request: Request, _=ExtAuth):
         if emb_str:
             await conn.execute("""
                 INSERT INTO qa_history
-                    (book_id, book_title, chapter_title, question, answer, selection, embedding)
-                VALUES ($1,$2,$3,$4,$5,$6,$7::vector)
+                    (book_id, book_title, chapter_title, question, answer, selection, cfi_location, embedding)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8::vector)
             """, req.book_id, req.book_title, req.chapter_title,
-                req.question, req.answer, req.selection, emb_str)
+                req.question, req.answer, req.selection, req.cfi_location, emb_str)
         else:
             await conn.execute("""
                 INSERT INTO qa_history
-                    (book_id, book_title, chapter_title, question, answer, selection)
-                VALUES ($1,$2,$3,$4,$5,$6)
+                    (book_id, book_title, chapter_title, question, answer, selection, cfi_location)
+                VALUES ($1,$2,$3,$4,$5,$6,$7)
             """, req.book_id, req.book_title, req.chapter_title,
-                req.question, req.answer, req.selection)
+                req.question, req.answer, req.selection, req.cfi_location)
     return {"ok": True}
 
 @app.get("/history")
@@ -1067,7 +1074,8 @@ async def app_get_review(_=ExtAuth):
         rows = await conn.fetch("""
             SELECT 'highlight' AS type, h.id, h.created_at,
                    b.id AS book_id, b.title AS book_title,
-                   h.highlighted_text AS text, '' AS question, '' AS answer
+                   h.highlighted_text AS text, '' AS question, '' AS answer,
+                   h.cfi_location AS cfi_location
             FROM highlights h
             JOIN books b ON b.id = h.book_id
             WHERE h.user_id = $1
@@ -1076,7 +1084,8 @@ async def app_get_review(_=ExtAuth):
 
             SELECT 'qa' AS type, q.id, q.created_at,
                    b.id AS book_id, b.title AS book_title,
-                   q.selection AS text, q.question, q.answer
+                   q.selection AS text, q.question, q.answer,
+                   q.cfi_location AS cfi_location
             FROM qa_history q
             JOIN books b ON b.id::text = q.book_id
             WHERE q.user_id = $1

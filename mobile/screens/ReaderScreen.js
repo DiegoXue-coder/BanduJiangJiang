@@ -64,9 +64,10 @@ function ReaderInner({ bookId, bookTitle, author, initialLocation, initialAnnota
     return false; // 保留选区高亮，不清除
   }
 
-  function openChat(selectionText = '') {
+  function openChat(selectionText = '', cfiRange = '') {
     navigation.navigate('BookChat', {
-      bookId, bookTitle, author, chapterTitle: currentSectionTitle, selection: selectionText,
+      bookId, bookTitle, author, chapterTitle: currentSectionTitle,
+      selection: selectionText, cfiRange,
     });
   }
 
@@ -114,8 +115,8 @@ function ReaderInner({ bookId, bookTitle, author, initialLocation, initialAnnota
           },
           {
             label: '问AI',
-            action: (_cfiRange, text) => {
-              openChat(text);
+            action: (cfiRange, text) => {
+              openChat(text, cfiRange);
               return false;
             },
           },
@@ -144,9 +145,9 @@ function ReaderInner({ bookId, bookTitle, author, initialLocation, initialAnnota
             <TouchableOpacity
               style={styles.selectionBtn}
               onPress={() => {
-                const text = selection.text;
+                const { text, cfiRange } = selection;
                 setSelection(null);
-                openChat(text);
+                openChat(text, cfiRange);
               }}
             >
               <Text style={styles.selectionBtnText}>问AI</Text>
