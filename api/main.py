@@ -361,7 +361,7 @@ class ReviewItemOut(BaseModel):
     answer: str = ""
     cfi_location: str = ""
     related_book_title: str = ""
-    related_question: str = ""
+    related_text: str = ""
 
 # ── 系统 Prompt ────────────────────────────────────────────────────
 
@@ -1262,9 +1262,14 @@ async def app_get_review(_=ExtAuth):
         # 发现了跨主题的联系。用 regexp_replace 去掉开头"15. "这种章节编号前缀
         # 再比较——同一段原文，有的记录划选时带了编号、有的没带，精确字符串
         # 相等挡不住这种情况，规范化以后再比才行。
+        # 2026-07-18 再修：标注文字改成显示对方那条记录的划线原文
+        # （related_text = b.selection），不是它的提问内容——提问经常很笼统
+        # （"你好"、"这个什么意思"），就算匹配本身是对的，显示提问也让用户看不出
+        # "关联"具体指什么；显示原文用户才能一眼看出两条记录是因为都涉及同一段
+        # /相邻内容才关联上的。
         related_rows = await conn.fetch(r"""
             SELECT DISTINCT ON (a.id)
-                   a.id AS item_id, bb.title AS related_book_title, b.question AS related_question
+                   a.id AS item_id, bb.title AS related_book_title, b.selection AS related_text
             FROM qa_history a
             JOIN books ba ON ba.id::text = a.book_id
             JOIN qa_history b ON b.id != a.id AND b.embedding IS NOT NULL AND b.user_id = $1
@@ -1283,7 +1288,10 @@ async def app_get_review(_=ExtAuth):
         related = related_map.get(d["id"]) if d["type"] == "qa" else None
         if related:
             d["related_book_title"] = related["related_book_title"]
-            d["related_question"] = related["related_question"]
+            # 原文可能是一整段，标注只是个小标签，截断到一行差不多的长度就够，
+            # 不需要把整段话塞进去
+            text = related["related_text"] or ""
+            d["related_text"] = text if len(text) <= 30 else text[:30] + "…"
         items.append(ReviewItemOut(**d))
     return items
 

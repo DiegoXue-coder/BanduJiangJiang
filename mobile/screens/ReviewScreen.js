@@ -48,10 +48,10 @@ function ReviewCard({ item, onPress }) {
         </View>
       )}
 
-      {!!item.related_question && (
+      {!!item.related_text && (
         <View style={styles.relatedBox}>
           <Text style={styles.relatedText} numberOfLines={2}>
-            🔗 与《{item.related_book_title}》里的"{item.related_question}"相关
+            🔗 与《{item.related_book_title}》里的"{item.related_text}"相关
           </Text>
         </View>
       )}
@@ -86,7 +86,7 @@ export default function ReviewScreen({ navigation }) {
     if (!items) return [];
     if (tab === 'highlight') return items.filter((i) => i.type === 'highlight');
     if (tab === 'qa') return items.filter((i) => i.type === 'qa');
-    return items.filter((i) => i.type === 'qa' && !!i.related_question);
+    return items.filter((i) => i.type === 'qa' && !!i.related_text);
   }, [items, tab]);
 
   const tabBar = (
