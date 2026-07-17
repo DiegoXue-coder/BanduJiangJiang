@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import {
   View, Text, FlatList, StyleSheet,
   ActivityIndicator, RefreshControl, SafeAreaView, TouchableOpacity,
@@ -8,6 +8,18 @@ import { getReview } from '../lib/api';
 
 const BLUE = '#4f8ef7';
 const AMBER = '#e0952f';
+
+const TABS = [
+  { key: 'highlight', label: '划线' },
+  { key: 'qa', label: '问答' },
+  { key: 'related', label: '关联主题' },
+];
+
+const EMPTY_HINT = {
+  highlight: '还没有划线\n去书架翻开一本书试试吧',
+  qa: '还没有提问记录\n去书架翻开一本书试试吧',
+  related: '暂时没有检测到关联的问答\n多问几个问题，AI 会帮你留意呼应的地方',
+};
 
 function formatTime(iso) {
   const d = new Date(iso);
@@ -36,6 +48,14 @@ function ReviewCard({ item }) {
         </View>
       )}
 
+      {!!item.related_question && (
+        <View style={styles.relatedBox}>
+          <Text style={styles.relatedText} numberOfLines={2}>
+            🔗 与《{item.related_book_title}》里的"{item.related_question}"相关
+          </Text>
+        </View>
+      )}
+
       <Text style={styles.timeText}>{formatTime(item.created_at)}</Text>
     </View>
   );
@@ -45,6 +65,7 @@ export default function ReviewScreen() {
   const [items, setItems]     = useState(null); // null = 加载中
   const [error, setError]     = useState('');
   const [refreshing, setRefreshing] = useState(false);
+  const [tab, setTab]         = useState('highlight');
 
   const load = useCallback(async (isRefresh = false) => {
     if (isRefresh) setRefreshing(true);
@@ -60,6 +81,27 @@ export default function ReviewScreen() {
   }, []);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
+
+  const filtered = useMemo(() => {
+    if (!items) return [];
+    if (tab === 'highlight') return items.filter((i) => i.type === 'highlight');
+    if (tab === 'qa') return items.filter((i) => i.type === 'qa');
+    return items.filter((i) => i.type === 'qa' && !!i.related_question);
+  }, [items, tab]);
+
+  const tabBar = (
+    <View style={styles.tabRow}>
+      {TABS.map((t) => (
+        <TouchableOpacity
+          key={t.key}
+          style={[styles.tabBtn, tab === t.key && styles.tabBtnActive]}
+          onPress={() => setTab(t.key)}
+        >
+          <Text style={[styles.tabText, tab === t.key && styles.tabTextActive]}>{t.label}</Text>
+        </TouchableOpacity>
+      ))}
+    </View>
+  );
 
   if (items === null && !error) {
     return (
@@ -95,8 +137,9 @@ export default function ReviewScreen() {
       <View style={styles.header}>
         <Text style={styles.headerTitle}>划线复盘</Text>
       </View>
+      {tabBar}
       <FlatList
-        data={items}
+        data={filtered}
         keyExtractor={(item) => `${item.type}-${item.id}`}
         contentContainerStyle={styles.listContent}
         refreshControl={
@@ -104,7 +147,7 @@ export default function ReviewScreen() {
         }
         ListEmptyComponent={
           <View style={styles.centerBox}>
-            <Text style={styles.emptyText}>还没有划线或提问{'\n'}去书架翻开一本书试试吧</Text>
+            <Text style={styles.emptyText}>{EMPTY_HINT[tab]}</Text>
           </View>
         }
         renderItem={({ item }) => <ReviewCard item={item} />}
@@ -117,6 +160,20 @@ const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: '#f4f6fb' },
   header: { paddingHorizontal: 16, paddingVertical: 14, backgroundColor: BLUE },
   headerTitle: { color: '#fff', fontSize: 20, fontWeight: '700' },
+
+  tabRow: {
+    flexDirection: 'row', gap: 8,
+    paddingHorizontal: 16, paddingVertical: 10,
+    backgroundColor: '#fff',
+    borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#dde3f0',
+  },
+  tabBtn: {
+    paddingHorizontal: 14, paddingVertical: 6, borderRadius: 16,
+    backgroundColor: '#f4f6fb', borderWidth: 1, borderColor: '#dde3f0',
+  },
+  tabBtnActive: { backgroundColor: BLUE, borderColor: BLUE },
+  tabText: { fontSize: 13, color: '#5b6478', fontWeight: '600' },
+  tabTextActive: { color: '#fff' },
 
   listContent: { padding: 16, flexGrow: 1 },
 
@@ -140,6 +197,11 @@ const styles = StyleSheet.create({
     marginTop: 8, paddingTop: 8, borderTopWidth: 1, borderTopColor: '#f0f2f7',
   },
   answerText: { fontSize: 13, color: '#5b6478', lineHeight: 19 },
+
+  relatedBox: {
+    marginTop: 8, padding: 8, borderRadius: 8, backgroundColor: '#f2effa',
+  },
+  relatedText: { fontSize: 12, color: '#7a5fb0', lineHeight: 17 },
 
   timeText: { fontSize: 11, color: '#c0c6d6', marginTop: 8 },
 
