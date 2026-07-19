@@ -18,10 +18,16 @@ export default function ReviewDetailScreen({ route, navigation }) {
 
   function jumpToOriginal() {
     // 老数据没有 cfi_location 时，只能打开书、不能精确定位到那一段——
-    // 不算 bug，是阶段五之前存的记录本来就没留这个字段
+    // 不算 bug，是阶段五之前存的记录本来就没留这个字段。
+    // jumpNonce 每次点击都不一样（哪怕连续点同一张卡片两次），确保 ReaderScreen
+    // 那边的 goToLocation 真的会被触发，不会因为"跟上次的值一样"被 effect 跳过。
     navigation.navigate('书架', {
       screen: 'Reader',
-      params: { bookId: item.book_id, initialCfi: item.cfi_location || undefined },
+      params: {
+        bookId: item.book_id,
+        initialCfi: item.cfi_location || undefined,
+        jumpNonce: Date.now(),
+      },
     });
   }
 

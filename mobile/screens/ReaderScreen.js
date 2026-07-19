@@ -23,10 +23,14 @@ const THEME_LABEL = { light: '☀️', paper: '📜', dark: '🌙' };
 // 进度上报节流：翻页很频繁，没必要每次都请求后端
 const PROGRESS_DEBOUNCE_MS = 2000;
 
-function ReaderInner({ bookId, bookTitle, author, initialLocation, initialAnnotations, navigation }) {
+function ReaderInner({
+  bookId, bookTitle, author, initialLocation, initialAnnotations, navigation,
+  jumpToCfi, jumpNonce,
+}) {
   const { addAnnotation, changeTheme, toc, goToLocation } = useReader();
   const [themeName, setThemeName] = useState('light');
   const [currentSectionTitle, setCurrentSectionTitle] = useState('');
+  const [isReady, setIsReady] = useState(false);
   // 章节目录：epub.js 自动生成的导航页只有第一次打开书时会经过，选了某一章
   // 之后就没有入口再回去挑别的章节——加一个常驻的目录按钮，不依赖那个只会
   // 出现一次的自动导航页
@@ -42,12 +46,25 @@ function ReaderInner({ bookId, bookTitle, author, initialLocation, initialAnnota
   // initialAnnotations 要等 Reader 的 onReady 触发（book 真正渲染完成）才能加，
   // 提前调用 addAnnotation 会静默失效，所以不能放进 mount 时的 effect 里。
   function handleReady() {
+    setIsReady(true);
     if (annotationsRestored.current) return;
     annotationsRestored.current = true;
     for (const h of initialAnnotations) {
       addAnnotation('highlight', h.cfi_location, { id: h.id }, { color: '#ffd54f' });
     }
   }
+
+  // "跳转到原文位置"从划线复盘详情页过来——如果这本书已经打开过（Reader 还
+  // 挂载在书架堆栈里），只传 initialLocation 不会生效，那个属性很多阅读器
+  // 组件只在"第一次挂载"时读一次。用 goToLocation 主动跳转才能保证不管书
+  // 是不是已经开着，跳转都能生效。jumpNonce 保证哪怕连续两次跳同一个位置，
+  // 每次点击都会真正触发一次（不然同样的字符串值不会重新触发 effect）。
+  useEffect(() => {
+    if (isReady && jumpToCfi) {
+      goToLocation(jumpToCfi);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isReady, jumpToCfi, jumpNonce]);
 
   function handleLocationChange(_total, currentLocation, _progress, currentSection) {
     const cfi = currentLocation?.start?.cfi;
@@ -197,9 +214,12 @@ function ReaderInner({ bookId, bookTitle, author, initialLocation, initialAnnota
 }
 
 export default function ReaderScreen({ route, navigation }) {
-  // initialCfi：从"划线复盘"详情页"跳转到原文"过来时带的目标位置，优先于阅读
-  // 进度使用——只是这一次打开跳到这里，不会覆盖/污染保存的阅读进度
-  const { bookId, initialCfi } = route.params;
+  // initialCfi：从"划线复盘"详情页"跳转到原文"过来时带的目标位置。用来做两件事：
+  // 首次打开这本书时当 initialLocation 用（优先于阅读进度，只是这一次跳到这里，
+  // 不会覆盖保存的阅读进度）；书已经开着的情况下靠 ReaderInner 里的 goToLocation
+  // 主动跳转（initialLocation 那套只在首次挂载时生效）。jumpNonce 每次点击"跳转
+  // 到原文位置"都会变，保证哪怕连续两次跳同一个位置也真的会触发。
+  const { bookId, initialCfi, jumpNonce } = route.params;
   const [ctx, setCtx] = useState(null);
   const [highlights, setHighlights] = useState(null);
   const [error, setError] = useState('');
@@ -245,6 +265,8 @@ export default function ReaderScreen({ route, navigation }) {
       bookTitle={ctx.title}
       author={ctx.author}
       initialLocation={initialCfi || ctx.current_cfi_location}
+      jumpToCfi={initialCfi}
+      jumpNonce={jumpNonce}
       initialAnnotations={highlights}
       navigation={navigation}
     />
