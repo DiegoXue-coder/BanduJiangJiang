@@ -60,6 +60,7 @@ function ReaderInner({
   // 是不是已经开着，跳转都能生效。jumpNonce 保证哪怕连续两次跳同一个位置，
   // 每次点击都会真正触发一次（不然同样的字符串值不会重新触发 effect）。
   useEffect(() => {
+    console.log('[DEBUG jump] isReady=', isReady, 'jumpToCfi=', jumpToCfi, 'jumpNonce=', jumpNonce);
     if (isReady && jumpToCfi) {
       goToLocation(jumpToCfi);
     }
@@ -107,7 +108,13 @@ function ReaderInner({
         </TouchableOpacity>
         <Text style={styles.headerTitle} numberOfLines={1}>{bookTitle}</Text>
         <View style={styles.headerRight}>
-          <TouchableOpacity onPress={() => setShowToc(true)} style={styles.headerBtn}>
+          <TouchableOpacity
+            onPress={() => {
+              console.log('[DEBUG toc] 打开目录，toc条目数=', toc?.length, '第一条=', JSON.stringify(toc?.[0]));
+              setShowToc(true);
+            }}
+            style={styles.headerBtn}
+          >
             <Text style={styles.headerBtnText}>📑</Text>
           </TouchableOpacity>
           <TouchableOpacity onPress={() => openChat()} style={styles.headerBtn}>
@@ -134,6 +141,7 @@ function ReaderInner({
               <TouchableOpacity
                 style={styles.tocItem}
                 onPress={() => {
+                  console.log('[DEBUG toc] 点击章节, href=', item.href, 'label=', item.label);
                   goToLocation(item.href);
                   setShowToc(false);
                 }}
