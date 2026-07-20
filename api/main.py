@@ -1207,6 +1207,21 @@ async def app_save_highlight(book_id: int, body: HighlightIn, _=ExtAuth):
 
     return HighlightOut(**dict(row))
 
+@app.delete("/app/books/{book_id}/highlights/{highlight_id}")
+async def app_delete_highlight(book_id: int, highlight_id: int, _=ExtAuth):
+    """删除一条划线（阶段七新增）。只按 user_id+book_id+highlight_id 三重匹配删，
+    删不到（比如id对不上或者不是自己的书）不当错误，返回结果里如实说明。"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM highlights WHERE id = $1 AND book_id = $2 AND user_id = $3",
+            highlight_id, book_id, APP_USER_ID
+        )
+    deleted = result.endswith(" 1")
+    if not deleted:
+        raise HTTPException(status_code=404, detail="划线不存在")
+    return {"ok": True}
+
 @app.post("/app/books/{book_id}/progress")
 async def app_update_progress(book_id: int, body: ProgressIn, _=ExtAuth):
     """更新阅读进度（当前 CFI 位置），用于下次打开这本书时恢复到原位。"""

@@ -66,6 +66,10 @@ export async function saveHighlight(bookId, { cfiLocation, highlightedText, note
   });
 }
 
+export async function deleteHighlight(bookId, highlightId) {
+  return appFetch(`/app/books/${bookId}/highlights/${highlightId}`, { method: 'DELETE' });
+}
+
 export async function updateProgress(bookId, cfiLocation) {
   return appFetch(`/app/books/${bookId}/progress`, {
     method: 'POST',

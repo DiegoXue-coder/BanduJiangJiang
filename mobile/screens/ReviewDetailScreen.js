@@ -1,7 +1,8 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
-  View, Text, ScrollView, TouchableOpacity, StyleSheet, SafeAreaView,
+  View, Text, ScrollView, TouchableOpacity, StyleSheet, SafeAreaView, Alert,
 } from 'react-native';
+import { deleteHighlight } from '../lib/api';
 
 const BLUE = '#4f8ef7';
 const AMBER = '#e0952f';
@@ -15,6 +16,26 @@ function formatTime(iso) {
 export default function ReviewDetailScreen({ route, navigation }) {
   const { item } = route.params;
   const isQa = item.type === 'qa';
+  const [deleting, setDeleting] = useState(false);
+
+  function confirmDelete() {
+    Alert.alert('删除这条划线？', '删除后无法恢复', [
+      { text: '取消', style: 'cancel' },
+      {
+        text: '删除', style: 'destructive',
+        onPress: async () => {
+          setDeleting(true);
+          try {
+            await deleteHighlight(item.book_id, item.id);
+            navigation.goBack();
+          } catch (e) {
+            setDeleting(false);
+            Alert.alert('删除失败', e.message || '请稍后重试');
+          }
+        },
+      },
+    ]);
+  }
 
   function jumpToOriginal() {
     // 老数据没有 cfi_location 时，只能打开书、不能精确定位到那一段——
@@ -74,6 +95,16 @@ export default function ReviewDetailScreen({ route, navigation }) {
             {item.cfi_location ? '📖 跳转到原文位置' : '📖 打开这本书（无法精确定位到原段落）'}
           </Text>
         </TouchableOpacity>
+
+        {!isQa && (
+          <TouchableOpacity
+            style={[styles.deleteBtn, deleting && styles.deleteBtnOff]}
+            onPress={confirmDelete}
+            disabled={deleting}
+          >
+            <Text style={styles.deleteBtnText}>{deleting ? '删除中…' : '🗑 删除这条划线'}</Text>
+          </TouchableOpacity>
+        )}
       </ScrollView>
     </SafeAreaView>
   );
@@ -119,4 +150,12 @@ const styles = StyleSheet.create({
     backgroundColor: BLUE, alignItems: 'center',
   },
   jumpBtnText: { color: '#fff', fontSize: 14, fontWeight: '700' },
+
+  deleteBtn: {
+    marginTop: 12, paddingVertical: 14, borderRadius: 12,
+    backgroundColor: '#fff', alignItems: 'center',
+    borderWidth: 1.5, borderColor: '#f7564f',
+  },
+  deleteBtnOff: { opacity: 0.5 },
+  deleteBtnText: { color: '#f7564f', fontSize: 14, fontWeight: '700' },
 });
