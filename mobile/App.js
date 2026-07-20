@@ -73,7 +73,13 @@ export default function App() {
             <Tab.Screen
               name="划线复盘"
               component={ReviewStackScreen}
-              options={({ route }) => ({ tabBarStyle: getTabBarStyle(route) })}
+              options={({ route }) => ({
+                tabBarStyle: getTabBarStyle(route),
+                // 切到别的tab再切回来，要回到总览列表，不能停在上次看的详情页——
+                // unmountOnBlur 让离开这个tab时把整个堆栈（含 ReviewDetail）
+                // 卸载掉，回来时从堆栈的第一个页面（ReviewHome）重新挂载
+                unmountOnBlur: true,
+              })}
             />
             <Tab.Screen name="我的" component={ProfileScreen} />
           </Tab.Navigator>
