@@ -322,7 +322,17 @@ export default function BookChatScreen({ route, navigation }) {
         </TouchableOpacity>
         <TouchableOpacity
           style={[styles.styleToggleBtn, style === 'socratic' && styles.styleToggleBtnActive]}
-          onPress={() => setStyle('socratic')}
+          onPress={() => {
+            setStyle('socratic');
+            // 划线之后切到苏格拉底模式，输入框预填"讲解"方便直接点发送——
+            // 第一轮苏格拉底本来就不看用户输的具体文字（用的是划线原文），
+            // 这个词只是给用户一个能直接发送的默认值，不用自己想第一句话说啥。
+            // 只在"对话刚开始+确实是从划线进来的+输入框还是空的"这个场景下
+            // 才预填，已经聊了几轮或者没有划线原文的时候不动输入框。
+            if (!input.trim() && messages.length === 0 && selection) {
+              setInput('讲解');
+            }
+          }}
         >
           <Text style={[styles.styleToggleText, style === 'socratic' && styles.styleToggleTextActive]}>苏格拉底</Text>
         </TouchableOpacity>
