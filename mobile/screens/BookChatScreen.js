@@ -57,6 +57,10 @@ export default function BookChatScreen({ route, navigation }) {
   // 不是两个同时显示
   const [streamingId, setStreamingId] = useState(null);
   const [isRecording, setRecording] = useState(false);
+  // isSpeaking 是给 UI 用的（要不要显示"打断"按钮）；ttsPlayingRef 是给
+  // playNextInQueue 内部判断"现在能不能开始播下一句"用的，两个都要维护，
+  // 一个是 state 一个是 ref，职责不一样，不能只留一个
+  const [isSpeaking, setIsSpeaking] = useState(false);
   const [ttsOn, setTtsOn]           = useState(true);
   const [style, setStyle]           = useState('simple'); // 'simple' 讲解 / 'socratic' 苏格拉底
   const [userHighlights, setUserHighlights] = useState([]);
@@ -105,6 +109,7 @@ export default function BookChatScreen({ route, navigation }) {
   async function stopAudio() {
     ttsQueueRef.current = [];
     ttsPlayingRef.current = false;
+    setIsSpeaking(false);
     if (soundRef.current) {
       await soundRef.current.stopAsync().catch(() => {});
       await soundRef.current.unloadAsync().catch(() => {});
@@ -149,8 +154,9 @@ export default function BookChatScreen({ route, navigation }) {
   async function playNextInQueue() {
     if (ttsPlayingRef.current) return;
     const next = ttsQueueRef.current.shift();
-    if (!next) return;
+    if (!next) { setIsSpeaking(false); return; }
     ttsPlayingRef.current = true;
+    setIsSpeaking(true);
     try {
       const { sound } = await Audio.Sound.createAsync(
         { uri: getTtsPlayUrl(next) },
@@ -249,6 +255,18 @@ export default function BookChatScreen({ route, navigation }) {
   }
 
   useEffect(() => () => abortStreamRef.current?.(), []); // 离开页面时中断还没结束的流式请求
+
+  // 手动打断：不管是还在流式生成文字、还是在放语音，点一下都立刻停，
+  // 输入框/麦克风马上恢复可用，用户可以立刻打字或者录下一句话——不是
+  // VAD 那种自动检测打断，是用户主动点按钮的"手动"打断。
+  function handleInterrupt() {
+    abortStreamRef.current?.();
+    abortStreamRef.current = null;
+    stopAudio();
+    setThinking(false);
+    setStreamingId(null);
+    setStatus('');
+  }
 
   async function toggleRecording() {
     console.log('[DEBUG] toggleRecording called, isRecording=', isRecording);
@@ -367,6 +385,14 @@ export default function BookChatScreen({ route, navigation }) {
 
       {!!status && <Text style={styles.status} numberOfLines={2}>{status}</Text>}
 
+      {(isThinking || isSpeaking) && (
+        <TouchableOpacity style={styles.interruptBar} onPress={handleInterrupt}>
+          <Text style={styles.interruptBarText}>
+            ⏹ {isThinking ? '打断生成' : '打断播放'}，说点别的
+          </Text>
+        </TouchableOpacity>
+      )}
+
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         <View style={styles.inputRow}>
           <TouchableOpacity
@@ -465,6 +491,13 @@ const styles = StyleSheet.create({
     textAlign: 'center', fontSize: 12, color: '#8a95b0',
     paddingHorizontal: 16, paddingVertical: 5,
   },
+
+  interruptBar: {
+    marginHorizontal: 16, marginBottom: 8, paddingVertical: 10,
+    borderRadius: 10, backgroundColor: '#fff0ee',
+    borderWidth: 1, borderColor: RED, alignItems: 'center',
+  },
+  interruptBarText: { color: RED, fontSize: 13, fontWeight: '600' },
 
   inputRow: {
     flexDirection: 'row', alignItems: 'center',
