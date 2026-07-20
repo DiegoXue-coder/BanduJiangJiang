@@ -75,10 +75,14 @@ export default function App() {
               component={ReviewStackScreen}
               options={({ route }) => ({
                 tabBarStyle: getTabBarStyle(route),
-                // 切到别的tab再切回来，要回到总览列表，不能停在上次看的详情页——
-                // unmountOnBlur 让离开这个tab时把整个堆栈（含 ReviewDetail）
-                // 卸载掉，回来时从堆栈的第一个页面（ReviewHome）重新挂载
-                unmountOnBlur: true,
+                // 切到别的tab再切回来，要回到总览列表，不能停在上次看的详情页。
+                // 上一版用的 unmountOnBlur 在装的这个 react-navigation 版本里
+                // 根本不存在（凭记忆写的，没查证，等于没修）——查了源码
+                // （@react-navigation/bottom-tabs 的 BottomTabView.js）确认
+                // popToTopOnBlur 才是这个版本真正支持、专门给"tab下面挂了个
+                // stack 导航"这种场景设计的选项：离开这个tab时把嵌套的 stack
+                // pop 回第一页（ReviewHome）。
+                popToTopOnBlur: true,
               })}
             />
             <Tab.Screen name="我的" component={ProfileScreen} />
