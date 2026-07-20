@@ -43,7 +43,13 @@ function ReaderInner({
           var parts = href.split('#');
           var baseHref = parts[0];
           var id = parts[1];
-          var section = book.spine.get(baseHref);
+          // 跟库内部 getCfiFromHref 一模一样的三段式兜底匹配——直接传 baseHref
+          // 匹配不上时，试试"按/分割取第二段"（形如"OEBPS/xxx.xhtml"这种路径）、
+          // 再试去掉第一段——我上一版只试了第一种，路径匹配不上就直接放弃，
+          // 这次补全三种都试。
+          var section = book.spine.get(baseHref.split('/')[1])
+            || book.spine.get(baseHref)
+            || book.spine.get(baseHref.split('/').slice(1).join('/'));
           if (!section) { rendition.display(href); return true; }
           section.load(book.load.bind(book)).then(function() {
             var el = id ? section.document.getElementById(id) : section.document.body;
