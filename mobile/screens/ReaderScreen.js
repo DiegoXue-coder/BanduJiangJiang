@@ -27,7 +27,34 @@ function ReaderInner({
   bookId, bookTitle, author, initialLocation, initialAnnotations, navigation,
   jumpToCfi, jumpNonce,
 }) {
-  const { addAnnotation, changeTheme, toc, goToLocation } = useReader();
+  const { addAnnotation, changeTheme, toc, goToLocation, injectJavascript } = useReader();
+
+  // 目录跳转不能直接把 toc 里的 href（形如"chap_005.xhtml"）丢给 goToLocation——
+  // 那个函数最终是调 epub.js 的 rendition.display(target)，虽然理论上支持
+  // href，但翻源码（@epubjs-react-native/core 的 template.js）发现库自己内部
+  // 处理"章节链接→跳转"时用的是专门的转换函数，先把 href 解析定位到具体的
+  // CFI，再显示——照抄同样的做法，不直接信任 rendition.display(href) 能自己
+  // 解析好。
+  function goToTocItem(href) {
+    injectJavascript(`
+      (function() {
+        try {
+          var href = ${JSON.stringify(href)};
+          var parts = href.split('#');
+          var baseHref = parts[0];
+          var id = parts[1];
+          var section = book.spine.get(baseHref);
+          if (!section) { rendition.display(href); return true; }
+          section.load(book.load.bind(book)).then(function() {
+            var el = id ? section.document.getElementById(id) : section.document.body;
+            var cfi = section.cfiFromElement(el);
+            rendition.display(cfi);
+          }).catch(function() { rendition.display(href); });
+        } catch (e) {}
+      })();
+      true;
+    `);
+  }
   const [themeName, setThemeName] = useState('light');
   const [currentSectionTitle, setCurrentSectionTitle] = useState('');
   const [isReady, setIsReady] = useState(false);
@@ -59,11 +86,14 @@ function ReaderInner({
   // 组件只在"第一次挂载"时读一次。用 goToLocation 主动跳转才能保证不管书
   // 是不是已经开着，跳转都能生效。jumpNonce 保证哪怕连续两次跳同一个位置，
   // 每次点击都会真正触发一次（不然同样的字符串值不会重新触发 effect）。
+  // 加了个短延迟：onReady 触发的那一刻，epub.js 内部默认的 rendition.display()
+  // （渲染上次退出的位置/第一页）可能还没真正跑完，这时候立刻再发一次
+  // display() 指令，两次调用抢着执行，就是真机反馈"跳转有时候不生效"的
+  // 表现——等一小段时间错开，不是根治，是实用的规避办法。
   useEffect(() => {
-    console.log('[DEBUG jump] isReady=', isReady, 'jumpToCfi=', jumpToCfi, 'jumpNonce=', jumpNonce);
-    if (isReady && jumpToCfi) {
-      goToLocation(jumpToCfi);
-    }
+    if (!(isReady && jumpToCfi)) return;
+    const t = setTimeout(() => goToLocation(jumpToCfi), 400);
+    return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isReady, jumpToCfi, jumpNonce]);
 
@@ -108,13 +138,7 @@ function ReaderInner({
         </TouchableOpacity>
         <Text style={styles.headerTitle} numberOfLines={1}>{bookTitle}</Text>
         <View style={styles.headerRight}>
-          <TouchableOpacity
-            onPress={() => {
-              console.log('[DEBUG toc] 打开目录，toc条目数=', toc?.length, '第一条=', JSON.stringify(toc?.[0]));
-              setShowToc(true);
-            }}
-            style={styles.headerBtn}
-          >
+          <TouchableOpacity onPress={() => setShowToc(true)} style={styles.headerBtn}>
             <Text style={styles.headerBtnText}>📑</Text>
           </TouchableOpacity>
           <TouchableOpacity onPress={() => openChat()} style={styles.headerBtn}>
@@ -141,8 +165,7 @@ function ReaderInner({
               <TouchableOpacity
                 style={styles.tocItem}
                 onPress={() => {
-                  console.log('[DEBUG toc] 点击章节, href=', item.href, 'label=', item.label);
-                  goToLocation(item.href);
+                  goToTocItem(item.href);
                   setShowToc(false);
                 }}
               >
