@@ -695,6 +695,118 @@ async def free_quota(request: Request):
 
 SOCR_MAX_ROUNDS = 8
 
+STYLE_SUFFIX = {
+    "academic": "\n\n【风格要求】请用严谨的学术语言，引用相关理论或概念，可以适当使用专业术语并解释。",
+    "story":    "\n\n【风格要求】请用讲故事的方式解释，加入具体场景、比喻或类比，让人感觉身临其境。",
+}
+
+# 真机测试实锤：round2/round3+ 原来枚举"不懂/看不懂/什么意思/不知道"这几个
+# 词，用户实测用了没枚举到的措辞（"我不明白"）、直接的定义请求（"什么是X"）、
+# 生词报告（"我不认识这个字"）、不耐烦的直接要求（"你就不能先给我讲人话么"），
+# 结果 AI 反复用"你卡在字词上""你需要的不是字词解释"这类反问/指责代替解释，
+# 拒绝到用户第三次第四次明确求助依然不给答案。改成一条语义规则、举例但不枚举
+# 穷尽，并且明确"求助优先级高于苏格拉底教学法"这条硬性前提，round2/round3+
+# 共用同一段文字，不再各写一份、容易漏改。
+_STUCK_SIGNAL_RULE = (
+    '判断标准：用户最新这句话是不是在表达"我理解不了/答不出来，需要你直接说明"——'
+    '不管用什么措辞都算，比如"不懂""不明白""看不懂""没听懂"这类自认卡住的说法，'
+    '"什么意思""什么是XX""XX是什么"这类直接的定义请求，"这个字/词不认识"这类'
+    '生词报告，"你倒是说啊""能不能讲人话"这类不耐烦的直接要求——以上只是举例，'
+    '不要求一字不差匹配，符合这个意思就算命中。\n'
+    '命中就必须以"先说清楚——"开头，接2-3句大白话讲清楚这个概念或原文到底在说'
+    '什么，给出真正有信息量的解释。用户已经明确求助时，直接解释的优先级高于'
+    '苏格拉底教学法本身：不要用反问、追问、或"你卡在字词上""你需要的不是字词'
+    '解释"这类指出用户"不该问这个"的话来代替解释、代替回避，也不要说"不知道也'
+    '是一种收获"之类听起来有道理但没有实际内容的空话搪塞——不能以"苏格拉底式'
+    '教学不该直接给答案"为理由拒绝回应用户的明确求助。'
+)
+
+# 真机测试第二批发现的独立缺陷（《大学》案例）：用户抱怨"这段话这么多内容，你
+# 怎么就给我讲第一句"、"是你忽略了，不是我忽略了"——这不是在追问原文内容，是
+# 在评论对话本身（吐槽覆盖面/推卸责任），AI 却当成内容延续继续苏格拉底式反问，
+# 没有正面回应。跟 _STUCK_SIGNAL_RULE 是两类不同的用户信号（一个是"我看不懂
+# 内容"，一个是"这个对话哪里有问题"），所以单独一条规则，在两个分支的判断之前
+# 先检查。
+_META_COMPLAINT_RULE = (
+    '在按下面的分支判断之前，先检查一件事：如果用户最新这句话不是在回答或追问'
+    '原文内容，而是在评论这场对话本身——比如说你只讲了原文的一部分、还有很多'
+    '没讲、你理解错了、这是你的问题不是我的问题——那就不按下面的分支输出，而是：'
+    '先用一句话正面承认用户说得对，不要反问、不要辩解、不要把责任推回给用户；'
+    '如果用户是在说"你只讲了一部分"，紧接着要转向原文里还没讨论到的下一部分'
+    '内容，针对新内容提一个新问题；如果只是单纯的情绪化抱怨，正面回应完这一句'
+    '就够，不用再追问。'
+)
+
+def _socratic_system_prompt(round_num: int) -> tuple[str, int]:
+    """按 round_num 挑苏格拉底模式的 system_prompt + max_tokens。"""
+    if round_num >= SOCR_MAX_ROUNDS:
+        return '你是阅读导师，必须以"你已经推导出来了——"开头给出核心洞见，2-3句话结束对话。', 300
+    if round_num >= 3:
+        return (
+            '你是苏格拉底式阅读导师。'
+            f'{_META_COMPLAINT_RULE}\n\n'
+            '如果不属于上面这种情况，再根据用户的回答，从以下三条路选一条输出：\n\n'
+            '路A——用户已触及核心：以"你已经推导出来了——"开头，接2-3句话揭示洞见。\n\n'
+            f'路B——用户在明确求助（卡住了，不是在试探性回答）：{_STUCK_SIGNAL_RULE}\n\n'
+            '路C——用户还未到位，但没有明确求助：先写一句拨正方向（15字内），接一个'
+            '追问（20字内，问号结尾），中间用句号隔开。\n\n'
+            '只输出对应情况的实际内容本身，不要用方括号或任何占位符号，不要把上面的'
+            '格式说明抄进回复里。'
+        ), 350
+    if round_num == 2:
+        return (
+            '你是苏格拉底式阅读导师。'
+            f'{_META_COMPLAINT_RULE}\n\n'
+            '如果不属于上面这种情况，再判断用户刚才这句回答：\n\n'
+            f'情况一——用户在明确求助（卡住了，不是在试探性回答）：{_STUCK_SIGNAL_RULE}'
+            '不要在这句里再追问。\n\n'
+            '情况二——其他情况：先写一句对用户回答的点评或轻微拨正（15字内），接一个'
+            '追问（20字内，问号结尾），中间用句号隔开。\n\n'
+            '只输出对应情况的实际内容本身，不要用方括号或任何占位符号，不要把上面的'
+            '格式说明抄进回复里。'
+        ), 250
+    return (
+        '你是苏格拉底式阅读导师。先用一两句大白话讲清楚原文里的关键词或核心概念'
+        '（35字内），再针对讲清楚后的内容提一个问题（20字内，问号结尾），中间用'
+        '句号隔开。如果原文里出现不止一个需要解释的概念（比如"义"和"利"这种成对'
+        '出现、互相对照的概念），要把每一个都讲到，不能只解释其中一个就去提问。'
+        '这句解释必须有真实信息量，不能只是把关键词换成一个近义词敷衍（比如原文是'
+        '"义"，解释写成"义就是道义"这种同义反复不算解释，要说清楚这个概念具体指'
+        '什么）。\n\n'
+        '只输出解释和问句的实际内容本身，不要用方括号或任何占位符号，不要把上面的'
+        '格式说明抄进回复里。'
+    ), 130
+
+def _history_messages(history: list[dict]) -> list[dict]:
+    out = []
+    for turn in history:
+        role    = turn.get("role", "user")
+        content = str(turn.get("content", ""))[:1000]
+        if role in ("user", "assistant"):
+            out.append({"role": role, "content": content})
+    return out
+
+def _build_ask_messages(
+    style: str, round_num: int, history: list[dict],
+    question: str, user_message: str, selection: str,
+) -> tuple[list[dict], int, float]:
+    """纯函数：给定已解析好的输入，组装最终发给 LLM 的 messages + 采样参数。不碰
+    鉴权/限额/DB记忆检索——那些留在 _prepare_ask 里处理。抽出来是为了让苏格拉底/
+    直接讲解这两种模式的提示词能被 api/eval/ 下的离线回归测试直接复用，不用起
+    服务器、不用连 DB，也不会出现测试脚本另抄一份提示词、后续跟正式代码各自
+    漂移的问题。"""
+    if style == "socratic":
+        system_prompt, max_tokens = _socratic_system_prompt(round_num)
+        socr_user = selection if (not history and selection) else question
+        messages  = [{"role": "system", "content": system_prompt}] + _history_messages(history)
+        messages.append({"role": "user", "content": socr_user})
+        return messages, max_tokens, 0.3
+    else:
+        system_prompt = SYSTEM_PROMPT + STYLE_SUFFIX.get(style, "")
+        messages = [{"role": "system", "content": system_prompt}] + _history_messages(history)
+        messages.append({"role": "user", "content": user_message})
+        return messages, 512, 1.0
+
 async def _prepare_ask(req: AskRequest, request: Request):
     """/ask 和 /ask/stream 共用的准备逻辑：鉴权+限额检查、拼上下文、按苏格拉底/
     直接讲解两种模式组装 messages。抽出来是因为流式版本除了"最后一次性拿结果"
@@ -746,73 +858,23 @@ async def _prepare_ask(req: AskRequest, request: Request):
         context_block += memory
 
     user_message = (context_block + f"\n用户问题：{req.question}") if context_block else req.question
-
-    STYLE_SUFFIX = {
-        "academic": "\n\n【风格要求】请用严谨的学术语言，引用相关理论或概念，可以适当使用专业术语并解释。",
-        "story":    "\n\n【风格要求】请用讲故事的方式解释，加入具体场景、比喻或类比，让人感觉身临其境。",
-    }
-
     round_num = len(req.history) // 2 + 1
-
-    if req.style == "socratic":
-        if round_num >= SOCR_MAX_ROUNDS:
-            system_prompt    = '你是阅读导师，必须以"你已经推导出来了——"开头给出核心洞见，2-3句话结束对话。'
-            socr_max_tokens  = 300
-        elif round_num >= 3:
-            system_prompt = (
-                '你是苏格拉底式阅读导师。根据用户的回答，从以下两条路选一条输出：\n\n'
-                '路A——用户已触及核心，输出：\n'
-                '你已经推导出来了——[用2-3句揭示洞见]\n\n'
-                '路B——用户还未到位，输出：\n'
-                '[一句拨正方向，15字内]。[一个追问，20字内，问号结尾]\n\n'
-                '只输出以上格式的内容，不加任何其他文字。'
-            )
-            socr_max_tokens = 300
-        elif round_num == 2:
-            system_prompt = (
-                '你是苏格拉底式阅读导师。按以下格式输出两句话，不多不少：\n\n'
-                '[对用户回答的一句点评或轻微拨正，15字内]。[一个追问，20字内，问号结尾]\n\n'
-                '只输出这两句，不加解释、不给答案、不加任何其他内容。'
-            )
-            socr_max_tokens = 100
-        else:
-            system_prompt = (
-                '你是苏格拉底式阅读导师。针对用户提供的文字，直接输出一个问句。\n\n'
-                '格式：[问句，20字内，问号结尾]\n\n'
-                '只输出问句本身，不加任何解释、引导语或前缀。'
-            )
-            socr_max_tokens = 50
-
-        socr_user = ctx.selection if (not req.history and ctx.selection) else req.question
-        messages  = [{"role": "system", "content": system_prompt}]
-        for turn in req.history:
-            role    = turn.get("role", "user")
-            content = str(turn.get("content", ""))[:1000]
-            if role in ("user", "assistant"):
-                messages.append({"role": role, "content": content})
-        messages.append({"role": "user", "content": socr_user})
-    else:
-        # 验收标准要求"追问时上下文连贯"，非苏格拉底模式原来没带历史轮次，
-        # 补上（跟苏格拉底分支同样的处理方式），history 为空时行为不变。
-        system_prompt = SYSTEM_PROMPT + STYLE_SUFFIX.get(req.style, "")
-        messages = [{"role": "system", "content": system_prompt}]
-        for turn in req.history:
-            role    = turn.get("role", "user")
-            content = str(turn.get("content", ""))[:1000]
-            if role in ("user", "assistant"):
-                messages.append({"role": role, "content": content})
-        messages.append({"role": "user", "content": user_message})
-
-    max_tokens  = socr_max_tokens if req.style == "socratic" else 512
-    temperature = 0.3 if req.style == "socratic" else 1.0
+    # 验收标准要求"追问时上下文连贯"，非苏格拉底模式原来没带历史轮次，补上
+    # （跟苏格拉底分支同样的处理方式），history 为空时行为不变。
+    messages, max_tokens, temperature = _build_ask_messages(
+        req.style, round_num, req.history, req.question, user_message, ctx.selection
+    )
     return ds, messages, max_tokens, temperature, round_num
 
 def _finalize_socratic_text(raw: str, style: str, round_num: int) -> str:
-    """苏格拉底模式的截断规则：round_num < SOCR_MAX_ROUNDS 且不是"你已经推导出来了"
-    开头的，只保留到第一个问号为止（非流式/流式提前终止两条路径共用这条规则）。"""
+    """苏格拉底模式的截断规则：round_num < SOCR_MAX_ROUNDS 且不是"你已经推导出来了"/
+    "先说清楚——"开头的，只保留到第一个问号为止（非流式/流式提前终止两条路径共用这条
+    规则）。后者是"用户卡住直接求助"路径专用前缀，标记这条回复是纯解释，没有追问的
+    问号也不该被当成没说完然后截到 40 字。"""
     is_socr_q = (style == "socratic"
                  and round_num < SOCR_MAX_ROUNDS
-                 and not raw.startswith("你已经推导出来了"))
+                 and not raw.startswith("你已经推导出来了")
+                 and not raw.startswith("先说清楚——"))
     if not is_socr_q:
         return raw
     for qmark in ("？", "?"):
@@ -889,10 +951,12 @@ async def ask_stream(req: AskRequest, request: Request, _=ExtAuth):
                         continue
                     accumulated += delta
                     loop.call_soon_threadsafe(queue.put_nowait, ("delta", delta))
-                    # 苏格拉底模式：一旦确认不是"你已经推导出来了"开头、又出现了
-                    # 问号，说明这句追问已经完整，提前收工，不用烧完 max_tokens
+                    # 苏格拉底模式：一旦确认不是"你已经推导出来了"/"先说清楚——"这两种
+                    # 纯解释开头、又出现了问号，说明这句追问已经完整，提前收工，不用烧
+                    # 完 max_tokens；这两种开头是完整解释，中途出现的问号不代表说完了
                     if (is_socr_truncatable
                             and not accumulated.startswith("你已经推导出来了")
+                            and not accumulated.startswith("先说清楚——")
                             and len(accumulated) >= 2
                             and ("？" in accumulated or "?" in accumulated)):
                         break
