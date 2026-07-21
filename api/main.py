@@ -184,7 +184,7 @@ def _make_sf(key: str) -> OpenAI | None:
 
 # ── 免费额度（按 IP + 日期，每天自动重置）─────────────────────────
 
-FREE_DAILY_LIMIT = 20
+FREE_DAILY_LIMIT = 100  # 2026-07-21临时调高：苏格拉底模式真机回归测试期间够用，测完再评估要不要调回20
 
 def _get_client_ip(request: Request) -> str:
     forwarded = request.headers.get("x-forwarded-for", "")
