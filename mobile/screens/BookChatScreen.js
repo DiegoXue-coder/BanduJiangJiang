@@ -74,6 +74,7 @@ export default function BookChatScreen({ route, navigation }) {
   const scrollRef      = useRef(null);
   const ttsQueueRef    = useRef([]);   // 按句切好、还没开始处理的文字队列
   const preparedRef    = useRef(null); // { text, sound } 提前加载好、还没播放的下一句
+  const preparingRef   = useRef(false); // 正在预取的锁，防止并发重复预取
   const ttsPlayingRef  = useRef(false);
   const abortStreamRef = useRef(null); // streamAsk() 返回的取消函数
 
@@ -171,9 +172,17 @@ export default function BookChatScreen({ route, navigation }) {
 
   // 提前把队列里下一句的音频加载好（只加载，不播放）。preparedRef 同一时间
   // 只准备一句——够用，队列纵深超过1句的情况很少见，没必要做成多级预取。
+  //
+  // preparingRef 是在这里补的锁：跟 playNextInQueue 同一个坑——"占位"必须在
+  // await 之前同步完成，不然 flushSentences 一次性攒出好几句、连续同步调用
+  // 好几次 enqueueTts 时，第二次调用会在第一次的 createAsync 还没返回、
+  // preparedRef.current 还是空的这个窗口期里，误判"还没人在预取"，又并发
+  // 发起一次加载，两次预取都往同一个 preparedRef 写，导致其中一句音频被
+  // 静默吞掉、白白 shift 出队列却再也没人播放它。
   async function prefetchNext() {
-    if (preparedRef.current || ttsQueueRef.current.length === 0) return;
+    if (preparedRef.current || preparingRef.current || ttsQueueRef.current.length === 0) return;
     const text = ttsQueueRef.current.shift();
+    preparingRef.current = true; // 占住位置，必须在下面的 await 之前
     try {
       const { sound } = await Audio.Sound.createAsync(
         { uri: getTtsPlayUrl(text) },
@@ -182,38 +191,51 @@ export default function BookChatScreen({ route, navigation }) {
       preparedRef.current = { text, sound };
     } catch (e) {
       console.warn('[TTS 预取]', e.message); // 预取失败就跳过这一句，不影响后面排队的句子
+    } finally {
+      preparingRef.current = false;
     }
   }
 
   async function playNextInQueue() {
     if (ttsPlayingRef.current) return;
 
-    let sound;
+    // 先同步把要播的这一句"占"下来（要么拿走 preparedRef，要么从队列里
+    // shift），紧接着立刻上锁 ttsPlayingRef——这两步中间不能插入任何
+    // await。上一版的坑就在这：锁是在 await 加载完之后才上的，等待加载
+    // 的这段时间里，如果 flushSentences 连续同步调用了好几次
+    // enqueueTts，每次都会看到"还没在播"，各自都触发一次播放，好几句
+    // 音频就这样同时播了出来（多个声音重叠的真正原因）。
+    let pendingText, pendingSound = null;
     if (preparedRef.current) {
-      sound = preparedRef.current.sound;
+      ({ text: pendingText, sound: pendingSound } = preparedRef.current);
       preparedRef.current = null;
     } else if (ttsQueueRef.current.length > 0) {
-      // 没有提前加载好的（比如第一句，或者上一句放得比预取还快），现场
-      // 加载——退化成跟原来一样的行为，不会卡死
-      const text = ttsQueueRef.current.shift();
-      try {
-        ({ sound } = await Audio.Sound.createAsync(
-          { uri: getTtsPlayUrl(text) },
-          { shouldPlay: false },
-        ));
-      } catch (e) {
-        console.warn('[TTS]', e.message);
-        playNextInQueue(); // 这一句加载失败就跳过，接着处理队列里下一句
-        return;
-      }
+      pendingText = ttsQueueRef.current.shift();
     } else {
       setIsSpeaking(false);
       return;
     }
+    ttsPlayingRef.current = true; // 锁必须在这里、在任何 await 之前
+    setIsSpeaking(true);
+
+    let sound = pendingSound;
+    if (!sound) {
+      // 没有提前加载好的（比如第一句，或者上一句放得比预取还快），现场
+      // 加载——退化成跟原来一样的行为，不会卡死
+      try {
+        ({ sound } = await Audio.Sound.createAsync(
+          { uri: getTtsPlayUrl(pendingText) },
+          { shouldPlay: false },
+        ));
+      } catch (e) {
+        console.warn('[TTS]', e.message);
+        ttsPlayingRef.current = false;
+        playNextInQueue(); // 这一句加载失败就跳过，接着处理队列里下一句
+        return;
+      }
+    }
 
     soundRef.current = sound;
-    ttsPlayingRef.current = true;
-    setIsSpeaking(true);
     sound.setOnPlaybackStatusUpdate(s => {
       if (s.didJustFinish) {
         sound.unloadAsync();
