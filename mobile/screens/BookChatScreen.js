@@ -329,7 +329,10 @@ export default function BookChatScreen({ route, navigation }) {
     );
   }
 
-  useEffect(() => () => abortStreamRef.current?.(), []); // 离开页面时中断还没结束的流式请求
+  // 离开页面时中断还没结束的流式请求，顺带把还在播/还在排队的语音也停掉——
+  // 之前只清了流式请求，没清音频，导致退出对话页之后 TTS 还在后台自己接
+  // 着放完排队里剩下的句子，用户已经回到书架了耳朵里还在出声。
+  useEffect(() => () => { abortStreamRef.current?.(); stopAudio(); }, []);
 
   // 手动打断：不管是还在流式生成文字、还是在放语音，点一下都立刻停，
   // 输入框/麦克风马上恢复可用，用户可以立刻打字或者录下一句话——不是
