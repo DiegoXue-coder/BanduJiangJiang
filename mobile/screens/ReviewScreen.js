@@ -48,6 +48,10 @@ function ReviewCard({ item, onPress }) {
         </View>
       )}
 
+      {isQa && item.turns && item.turns.length > 1 && (
+        <Text style={styles.turnCountText}>共 {item.turns.length} 轮对话</Text>
+      )}
+
       {!!item.related_text && (
         <View style={styles.relatedBox}>
           <Text style={styles.relatedText} numberOfLines={2}>
@@ -199,6 +203,7 @@ const styles = StyleSheet.create({
     marginTop: 8, paddingTop: 8, borderTopWidth: 1, borderTopColor: '#f0f2f7',
   },
   answerText: { fontSize: 13, color: '#5b6478', lineHeight: 19 },
+  turnCountText: { fontSize: 11, color: '#8a95b0', marginTop: 6, fontWeight: '600' },
 
   relatedBox: {
     marginTop: 8, padding: 8, borderRadius: 8, backgroundColor: '#f2effa',

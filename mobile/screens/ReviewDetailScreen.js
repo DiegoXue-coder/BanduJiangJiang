@@ -71,14 +71,14 @@ export default function ReviewDetailScreen({ route, navigation }) {
 
         <Text style={styles.quoteText}>“{item.text}”</Text>
 
-        {isQa && (
-          <>
-            <Text style={styles.sectionLabel}>提问</Text>
-            <Text style={styles.bodyText}>{item.question}</Text>
+        {isQa && (item.turns || []).map((turn, idx) => (
+          <View key={turn.id} style={idx > 0 ? styles.turnDivider : null}>
+            <Text style={styles.sectionLabel}>第{idx + 1}轮 · 提问</Text>
+            <Text style={styles.bodyText}>{turn.question}</Text>
             <Text style={styles.sectionLabel}>回答</Text>
-            <Text style={styles.bodyText}>{item.answer}</Text>
-          </>
-        )}
+            <Text style={styles.bodyText}>{turn.answer}</Text>
+          </View>
+        ))}
 
         {!!item.related_text && (
           <View style={styles.relatedBox}>
@@ -136,6 +136,7 @@ const styles = StyleSheet.create({
   },
 
   sectionLabel: { fontSize: 12, color: '#8a95b0', fontWeight: '700', marginBottom: 6, marginTop: 12 },
+  turnDivider: { marginTop: 16, paddingTop: 16, borderTopWidth: 1, borderTopColor: '#f0f2f7' },
   bodyText: { fontSize: 15, color: '#1a1a2e', lineHeight: 24 },
 
   relatedBox: {

@@ -350,6 +350,12 @@ class HighlightOut(BaseModel):
 class ProgressIn(BaseModel):
     cfi_location: str
 
+class QaTurnOut(BaseModel):
+    id: int
+    created_at: datetime.datetime
+    question: str
+    answer: str
+
 class ReviewItemOut(BaseModel):
     type: str
     id: int
@@ -362,6 +368,7 @@ class ReviewItemOut(BaseModel):
     cfi_location: str = ""
     related_book_title: str = ""
     related_text: str = ""
+    turns: list[QaTurnOut] = []
 
 # ── 系统 Prompt ────────────────────────────────────────────────────
 
@@ -1333,7 +1340,7 @@ async def app_get_review(_=ExtAuth):
             ORDER BY created_at DESC
         """, APP_USER_ID)
 
-        # 关联主题：问答记录两两算向量相似度（跨书也算），阈值复用 /history/related
+        # 关联主题：问答记录两两算向量相似度，阈值复用 /history/related
         # 那套已经调过的 SIMILARITY_THRESHOLD，不新造一个数字。每条最多标注一个
         # "最相似的另一条"，只做标注用，不合并成一条、不提供自动跳转。
         # 2026-07-18 修复：排除 selection 相同的记录——针对同一段划线连续追问
@@ -1357,21 +1364,65 @@ async def app_get_review(_=ExtAuth):
             JOIN books bb ON bb.id::text = b.book_id
             WHERE a.user_id = $1 AND a.embedding IS NOT NULL
               AND 1 - (a.embedding <=> b.embedding) >= $2
+              -- 2026-07-22 收窄范围：只保留跨书关联，同书内的相似度判断逻辑还在
+              -- （上面的 selection 去重那段），只是加这条 book_id 不同的过滤条件
+              -- 不让它进最终结果——不是删掉同书检测能力，以后想放开随时去掉这行。
+              AND ba.id != bb.id
             ORDER BY a.id, (a.embedding <=> b.embedding) ASC
         """, APP_USER_ID, SIMILARITY_THRESHOLD)
         related_map = {r["item_id"]: r for r in related_rows}
 
-    items = []
-    for r in rows:
-        d = dict(r)
-        related = related_map.get(d["id"]) if d["type"] == "qa" else None
-        if related:
-            d["related_book_title"] = related["related_book_title"]
-            # 原文可能是一整段，标注只是个小标签，截断到一行差不多的长度就够，
-            # 不需要把整段话塞进去
-            text = related["related_text"] or ""
-            d["related_text"] = text if len(text) <= 30 else text[:30] + "…"
-        items.append(ReviewItemOut(**d))
+        # 2026-07-22：同一次划线连续问了几轮，原来每轮都是独立一张卡片，改成
+        # 按（book_id, 规范化后的selection）分组合并成一张——用的是跟上面"排除
+        # 同一段划线互相标关联"同一条归一化规则（去掉章节编号前缀），本来就是
+        # 判断"是不是同一次对话"的标准。归并只影响卡片怎么摆，不影响关联检测
+        # 那段查询——那段还是按每一行单独算相似度，这里只是拿到结果后再合并。
+        def _norm_selection(text: str) -> str:
+            return re.sub(r'^\s*\d+\.\s*', '', text or '')
+
+        highlight_items = [ReviewItemOut(**dict(r)) for r in rows if r["type"] == "highlight"]
+
+        qa_groups: dict[tuple, list] = {}
+        qa_group_order: list[tuple] = []
+        for r in rows:
+            if r["type"] != "qa":
+                continue
+            key = (r["book_id"], _norm_selection(r["text"]))
+            if key not in qa_groups:
+                qa_groups[key] = []
+                qa_group_order.append(key)
+            qa_groups[key].append(dict(r))
+
+        qa_items = []
+        for key in qa_group_order:
+            turns = qa_groups[key]  # rows 本来按 created_at DESC 排，组内也是 DESC
+            latest = turns[0]
+            related = related_map.get(latest["id"])
+            d = {
+                "type": "qa",
+                "id": latest["id"],
+                "created_at": latest["created_at"],
+                "book_id": latest["book_id"],
+                "book_title": latest["book_title"],
+                "text": latest["text"],
+                "question": latest["question"],
+                "answer": latest["answer"],
+                "cfi_location": latest["cfi_location"],
+                # 详情页要按对话正常阅读顺序（先问的在前），组内是 DESC，反转一下
+                "turns": [
+                    {"id": t["id"], "created_at": t["created_at"],
+                     "question": t["question"], "answer": t["answer"]}
+                    for t in reversed(turns)
+                ],
+            }
+            if related:
+                d["related_book_title"] = related["related_book_title"]
+                text = related["related_text"] or ""
+                d["related_text"] = text if len(text) <= 30 else text[:30] + "…"
+            qa_items.append(ReviewItemOut(**d))
+
+    items = highlight_items + qa_items
+    items.sort(key=lambda it: it.created_at, reverse=True)
     return items
 
 @app.post("/app/backfill-embeddings")
