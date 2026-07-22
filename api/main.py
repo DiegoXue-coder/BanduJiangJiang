@@ -1049,13 +1049,20 @@ async def transcribe(request: Request, _=ExtAuth):
         import time as _time
         t0       = _time.time()
         wav_bytes = await asyncio.to_thread(_webm_to_wav, audio_bytes)
-        result    = sf.audio.transcriptions.create(
+        t1 = _time.time()
+        # SiliconFlow SDK 调用是同步阻塞的，不包一层 to_thread 会卡住整个事件
+        # 循环，拖慢其他并发请求（不影响这一次请求本身的耗时，但影响并发吞吐）
+        result = await asyncio.to_thread(
+            sf.audio.transcriptions.create,
             model="FunAudioLLM/SenseVoiceSmall",
             file=("audio.wav", io.BytesIO(wav_bytes), "audio/wav"),
             language="zh",
         )
         text = re.sub(r"<\|[^|]+\|>", "", result.text).strip()
-        print(f"[转录] 耗时 {_time.time()-t0:.2f}s → {repr(text)}")
+        # 拆开打日志：转码 vs SiliconFlow API 本身，方便以后排查延迟时一眼看出
+        # 瓶颈在哪一层（2026-07-22 实测过 SiliconFlow 有明显冷启动，首次调用
+        # ~8s、热身后 1.3-1.6s，转码耗时可忽略不计，瓶颈几乎全在 SiliconFlow 那边）
+        print(f"[转录] 转码={t1-t0:.2f}s SiliconFlow={_time.time()-t1:.2f}s 总计={_time.time()-t0:.2f}s → {repr(text)}")
     except Exception as e:
         print(f"[转录] 错误: {e}")
         raise HTTPException(status_code=502, detail=f"SenseVoice 错误: {e}")
