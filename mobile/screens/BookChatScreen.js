@@ -72,7 +72,8 @@ export default function BookChatScreen({ route, navigation }) {
   const recordingRef   = useRef(null);
   const soundRef       = useRef(null);
   const scrollRef      = useRef(null);
-  const ttsQueueRef    = useRef([]);   // 按句切好、等着播放的文字队列
+  const ttsQueueRef    = useRef([]);   // 按句切好、还没开始处理的文字队列
+  const preparedRef    = useRef(null); // { text, sound } 提前加载好、还没播放的下一句
   const ttsPlayingRef  = useRef(false);
   const abortStreamRef = useRef(null); // streamAsk() 返回的取消函数
 
@@ -115,6 +116,12 @@ export default function BookChatScreen({ route, navigation }) {
       await soundRef.current.unloadAsync().catch(() => {});
       soundRef.current = null;
     }
+    // 提前加载好但还没播放的下一句音频也要一并释放，不然打断之后这份
+    // 已经下载好的音频资源没人管，白占着
+    if (preparedRef.current) {
+      preparedRef.current.sound.unloadAsync().catch(() => {});
+      preparedRef.current = null;
+    }
   }
 
   // 静音不等于停止——静音是暂停（保留播放位置），取消静音要能从暂停的地方继续，
@@ -145,37 +152,83 @@ export default function BookChatScreen({ route, navigation }) {
 
   // 流式回答按句切出来的每一句都过这里排队——上一句还没放完，新句子先进
   // 队列，不会互相打断；播完一句自动接下一句，直到队列清空。
+  //
+  // 2026-07-22：原来是"播完当前句才开始请求下一句"，请求+服务端合成+下载
+  // 这段耗时全部发生在两句之间，听起来就是句子中间有停顿。改成"当前句一
+  // 开始播放，就立刻在后台把下一句加载好（不播放）"——prefetchNext() 让
+  // 下一句的加载时间跟当前句的播放时间重叠，播完直接无缝接上已经准备好的
+  // 音频，不用现场再等一次网络请求。
   function enqueueTts(text) {
     if (!ttsOn || !text.trim()) return;
     ttsQueueRef.current.push(text.trim());
-    playNextInQueue();
+    if (ttsPlayingRef.current) {
+      // 已经在放别的句子，趁这个空档把这句提前加载好
+      prefetchNext();
+    } else {
+      playNextInQueue();
+    }
+  }
+
+  // 提前把队列里下一句的音频加载好（只加载，不播放）。preparedRef 同一时间
+  // 只准备一句——够用，队列纵深超过1句的情况很少见，没必要做成多级预取。
+  async function prefetchNext() {
+    if (preparedRef.current || ttsQueueRef.current.length === 0) return;
+    const text = ttsQueueRef.current.shift();
+    try {
+      const { sound } = await Audio.Sound.createAsync(
+        { uri: getTtsPlayUrl(text) },
+        { shouldPlay: false },
+      );
+      preparedRef.current = { text, sound };
+    } catch (e) {
+      console.warn('[TTS 预取]', e.message); // 预取失败就跳过这一句，不影响后面排队的句子
+    }
   }
 
   async function playNextInQueue() {
     if (ttsPlayingRef.current) return;
-    const next = ttsQueueRef.current.shift();
-    if (!next) { setIsSpeaking(false); return; }
+
+    let sound;
+    if (preparedRef.current) {
+      sound = preparedRef.current.sound;
+      preparedRef.current = null;
+    } else if (ttsQueueRef.current.length > 0) {
+      // 没有提前加载好的（比如第一句，或者上一句放得比预取还快），现场
+      // 加载——退化成跟原来一样的行为，不会卡死
+      const text = ttsQueueRef.current.shift();
+      try {
+        ({ sound } = await Audio.Sound.createAsync(
+          { uri: getTtsPlayUrl(text) },
+          { shouldPlay: false },
+        ));
+      } catch (e) {
+        console.warn('[TTS]', e.message);
+        playNextInQueue(); // 这一句加载失败就跳过，接着处理队列里下一句
+        return;
+      }
+    } else {
+      setIsSpeaking(false);
+      return;
+    }
+
+    soundRef.current = sound;
     ttsPlayingRef.current = true;
     setIsSpeaking(true);
-    try {
-      const { sound } = await Audio.Sound.createAsync(
-        { uri: getTtsPlayUrl(next) },
-        { shouldPlay: true },
-      );
-      soundRef.current = sound;
-      sound.setOnPlaybackStatusUpdate(s => {
-        if (s.didJustFinish) {
-          sound.unloadAsync();
-          soundRef.current = null;
-          ttsPlayingRef.current = false;
-          playNextInQueue();
-        }
-      });
-    } catch (e) {
-      console.warn('[TTS]', e.message);
+    sound.setOnPlaybackStatusUpdate(s => {
+      if (s.didJustFinish) {
+        sound.unloadAsync();
+        soundRef.current = null;
+        ttsPlayingRef.current = false;
+        playNextInQueue();
+      }
+    });
+    sound.playAsync().catch(e => {
+      console.warn('[TTS 播放]', e.message);
       ttsPlayingRef.current = false;
-      playNextInQueue(); // 这一句播放失败就跳过，不卡住后面排队的句子
-    }
+      playNextInQueue();
+    });
+    // 不等 playAsync 完成就着手预取下一句，让加载尽早跟播放重叠
+    prefetchNext();
   }
 
   function handleSend(question) {
