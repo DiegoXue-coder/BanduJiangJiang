@@ -5,9 +5,9 @@ import {
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { getReview } from '../lib/api';
+import { ReviewCard, formatTime } from '../components/ReviewCard';
 
 const BLUE = '#4f8ef7';
-const AMBER = '#e0952f';
 
 const TABS = [
   { key: 'highlight', label: '划线' },
@@ -21,46 +21,35 @@ const EMPTY_HINT = {
   related: '暂时没有检测到关联的问答\n多问几个问题，AI 会帮你留意呼应的地方',
 };
 
-function formatTime(iso) {
-  const d = new Date(iso);
-  const pad = (n) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+// 阶段八：划线/问答两个板块从扁平列表改成按书分卡片——把 items 按 book_id
+// 分组。items 本来就是 created_at DESC 排好的，按遇到的先后顺序分组，
+// 组内顺序、组之间的顺序（哪本书最近有活动排前面）都天然正确，不用再排序。
+function groupByBook(items, type) {
+  const groups = [];
+  const indexByBook = new Map();
+  for (const it of items) {
+    if (it.type !== type) continue;
+    let g = indexByBook.get(it.book_id);
+    if (!g) {
+      g = { book_id: it.book_id, book_title: it.book_title, items: [] };
+      indexByBook.set(it.book_id, g);
+      groups.push(g);
+    }
+    g.items.push(it);
+  }
+  return groups;
 }
 
-function ReviewCard({ item, onPress }) {
-  const isQa = item.type === 'qa';
+function BookCard({ group, onPress }) {
   return (
-    <TouchableOpacity style={styles.card} onPress={onPress} activeOpacity={0.7}>
-      <View style={styles.cardTop}>
-        <View style={[styles.tag, isQa ? styles.tagQa : styles.tagHighlight]}>
-          <Text style={[styles.tagText, isQa ? styles.tagTextQa : styles.tagTextHighlight]}>
-            {isQa ? '问答' : '划线'}
-          </Text>
-        </View>
-        <Text style={styles.bookTitle} numberOfLines={1}>{item.book_title}</Text>
+    <TouchableOpacity style={styles.bookCard} onPress={onPress} activeOpacity={0.7}>
+      <View style={styles.bookCardLeft}>
+        <Text style={styles.bookCardTitle} numberOfLines={1}>{group.book_title}</Text>
+        <Text style={styles.bookCardMeta}>
+          共 {group.items.length} 条 · 最近 {formatTime(group.items[0].created_at)}
+        </Text>
       </View>
-
-      <Text style={styles.quoteText} numberOfLines={3}>“{item.text}”</Text>
-
-      {isQa && !!item.answer && (
-        <View style={styles.answerBox}>
-          <Text style={styles.answerText} numberOfLines={3}>{item.answer}</Text>
-        </View>
-      )}
-
-      {isQa && item.turns && item.turns.length > 1 && (
-        <Text style={styles.turnCountText}>共 {item.turns.length} 轮对话</Text>
-      )}
-
-      {!!item.related_text && (
-        <View style={styles.relatedBox}>
-          <Text style={styles.relatedText} numberOfLines={2}>
-            🔗 与《{item.related_book_title}》里的"{item.related_text}"相关
-          </Text>
-        </View>
-      )}
-
-      <Text style={styles.timeText}>{formatTime(item.created_at)}</Text>
+      <Text style={styles.bookCardArrow}>›</Text>
     </TouchableOpacity>
   );
 }
@@ -86,12 +75,17 @@ export default function ReviewScreen({ navigation }) {
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
-  const filtered = useMemo(() => {
-    if (!items) return [];
-    if (tab === 'highlight') return items.filter((i) => i.type === 'highlight');
-    if (tab === 'qa') return items.filter((i) => i.type === 'qa');
+  const isBookshelfTab = tab === 'highlight' || tab === 'qa';
+
+  const bookGroups = useMemo(() => {
+    if (!items || !isBookshelfTab) return [];
+    return groupByBook(items, tab);
+  }, [items, tab, isBookshelfTab]);
+
+  const relatedItems = useMemo(() => {
+    if (!items || isBookshelfTab) return [];
     return items.filter((i) => i.type === 'qa' && !!i.related_text);
-  }, [items, tab]);
+  }, [items, isBookshelfTab]);
 
   const tabBar = (
     <View style={styles.tabRow}>
@@ -142,22 +136,48 @@ export default function ReviewScreen({ navigation }) {
         <Text style={styles.headerTitle}>划线复盘</Text>
       </View>
       {tabBar}
-      <FlatList
-        data={filtered}
-        keyExtractor={(item) => `${item.type}-${item.id}`}
-        contentContainerStyle={styles.listContent}
-        refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={() => load(true)} />
-        }
-        ListEmptyComponent={
-          <View style={styles.centerBox}>
-            <Text style={styles.emptyText}>{EMPTY_HINT[tab]}</Text>
-          </View>
-        }
-        renderItem={({ item }) => (
-          <ReviewCard item={item} onPress={() => navigation.navigate('ReviewDetail', { item })} />
-        )}
-      />
+      {isBookshelfTab ? (
+        <FlatList
+          data={bookGroups}
+          keyExtractor={(g) => `book-${g.book_id}`}
+          contentContainerStyle={styles.listContent}
+          refreshControl={
+            <RefreshControl refreshing={refreshing} onRefresh={() => load(true)} />
+          }
+          ListEmptyComponent={
+            <View style={styles.centerBox}>
+              <Text style={styles.emptyText}>{EMPTY_HINT[tab]}</Text>
+            </View>
+          }
+          renderItem={({ item: group }) => (
+            <BookCard
+              group={group}
+              onPress={() => navigation.navigate('ReviewBook', {
+                bookTitle: group.book_title,
+                tabLabel: TABS.find((t) => t.key === tab).label,
+                items: group.items,
+              })}
+            />
+          )}
+        />
+      ) : (
+        <FlatList
+          data={relatedItems}
+          keyExtractor={(item) => `${item.type}-${item.id}`}
+          contentContainerStyle={styles.listContent}
+          refreshControl={
+            <RefreshControl refreshing={refreshing} onRefresh={() => load(true)} />
+          }
+          ListEmptyComponent={
+            <View style={styles.centerBox}>
+              <Text style={styles.emptyText}>{EMPTY_HINT[tab]}</Text>
+            </View>
+          }
+          renderItem={({ item }) => (
+            <ReviewCard item={item} onPress={() => navigation.navigate('ReviewDetail', { item })} />
+          )}
+        />
+      )}
     </SafeAreaView>
   );
 }
@@ -183,34 +203,16 @@ const styles = StyleSheet.create({
 
   listContent: { padding: 16, flexGrow: 1 },
 
-  card: {
-    backgroundColor: '#fff', borderRadius: 14, padding: 14, marginBottom: 12,
+  bookCard: {
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: '#fff', borderRadius: 14, padding: 16, marginBottom: 12,
     shadowColor: '#000', shadowOpacity: 0.05,
     shadowOffset: { width: 0, height: 1 }, shadowRadius: 3, elevation: 1,
   },
-  cardTop: { flexDirection: 'row', alignItems: 'center', marginBottom: 8 },
-  tag: { borderRadius: 6, paddingHorizontal: 7, paddingVertical: 2, marginRight: 8 },
-  tagHighlight: { backgroundColor: '#fff3d6' },
-  tagQa: { backgroundColor: '#e7f0ff' },
-  tagText: { fontSize: 11, fontWeight: '700' },
-  tagTextHighlight: { color: AMBER },
-  tagTextQa: { color: BLUE },
-  bookTitle: { flex: 1, fontSize: 13, color: '#8a95b0', fontWeight: '600' },
-
-  quoteText: { fontSize: 15, color: '#1a1a2e', lineHeight: 22, fontStyle: 'italic' },
-
-  answerBox: {
-    marginTop: 8, paddingTop: 8, borderTopWidth: 1, borderTopColor: '#f0f2f7',
-  },
-  answerText: { fontSize: 13, color: '#5b6478', lineHeight: 19 },
-  turnCountText: { fontSize: 11, color: '#8a95b0', marginTop: 6, fontWeight: '600' },
-
-  relatedBox: {
-    marginTop: 8, padding: 8, borderRadius: 8, backgroundColor: '#f2effa',
-  },
-  relatedText: { fontSize: 12, color: '#7a5fb0', lineHeight: 17 },
-
-  timeText: { fontSize: 11, color: '#c0c6d6', marginTop: 8 },
+  bookCardLeft: { flex: 1 },
+  bookCardTitle: { fontSize: 16, color: '#1a1a2e', fontWeight: '700', marginBottom: 4 },
+  bookCardMeta: { fontSize: 12, color: '#8a95b0' },
+  bookCardArrow: { fontSize: 22, color: '#c0c6d6', marginLeft: 8 },
 
   centerBox: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingTop: 80 },
   emptyText: { color: '#b0b8cc', fontSize: 14, textAlign: 'center', lineHeight: 22 },

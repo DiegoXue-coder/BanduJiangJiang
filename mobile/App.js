@@ -11,6 +11,7 @@ import BookshelfScreen from './screens/BookshelfScreen';
 import ReaderScreen from './screens/ReaderScreen';
 import BookChatScreen from './screens/BookChatScreen';
 import ReviewScreen from './screens/ReviewScreen';
+import ReviewBookScreen from './screens/ReviewBookScreen';
 import ReviewDetailScreen from './screens/ReviewDetailScreen';
 import ProfileScreen from './screens/ProfileScreen';
 
@@ -38,6 +39,7 @@ function ReviewStackScreen() {
   return (
     <ReviewStack.Navigator screenOptions={{ headerShown: false }}>
       <ReviewStack.Screen name="ReviewHome" component={ReviewScreen} />
+      <ReviewStack.Screen name="ReviewBook" component={ReviewBookScreen} />
       <ReviewStack.Screen name="ReviewDetail" component={ReviewDetailScreen} />
     </ReviewStack.Navigator>
   );
@@ -45,7 +47,7 @@ function ReviewStackScreen() {
 
 function getTabBarStyle(route) {
   const focusedRoute = getFocusedRouteNameFromRoute(route) ?? 'BookshelfHome';
-  if (['Reader', 'BookChat', 'ReviewDetail'].includes(focusedRoute)) return { display: 'none' };
+  if (['Reader', 'BookChat', 'ReviewBook', 'ReviewDetail'].includes(focusedRoute)) return { display: 'none' };
   return undefined;
 }
 
