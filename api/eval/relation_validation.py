@@ -118,7 +118,7 @@ def save_pair_item(session: httpx.Client, ds: OpenAI, book_id: int, book_title: 
     #    测的是关联检测准不准，不是"跳转到原文"这个功能，没有必要为了凑一个
     #    看起来真实的CFI去解析EPUB定位具体位置，那是另一件事。
     r = session.post(f"{API_BASE}/app/books/{book_id}/highlights",
-                      json={"cfiLocation": "", "highlightedText": text})
+                      json={"cfi_location": "", "highlighted_text": text})
     r.raise_for_status()
 
     # 2. 真实问答记录（/history）——跟真实用户"划线→问AI"的行为一致，答案是
