@@ -1,15 +1,18 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View, Text, TouchableOpacity, StyleSheet, SafeAreaView, ActivityIndicator, Alert,
   Modal, FlatList,
 } from 'react-native';
 import { Reader, useReader } from '@epubjs-react-native/core';
 import { useFileSystem } from '@epubjs-react-native/expo-file-system';
+import { BottomSheetModal, BottomSheetBackdrop } from '@gorhom/bottom-sheet';
 import {
   getBookContext, getBookFileUrl, getHighlights, saveHighlight, updateProgress,
 } from '../lib/api';
+import { useTheme } from '../theme';
+import BookChatScreen from './BookChatScreen';
 
-const BLUE = '#4f8ef7';
+const BLUE = '#8C5642';
 
 // 三套主题：亮色 / 暖纸色（护眼） / 深色，对应范围声明里确认的阅读体验要求
 const THEMES = {
@@ -61,9 +64,15 @@ function ReaderInner({
       true;
     `);
   }
+  const uiTheme = useTheme();
   const [themeName, setThemeName] = useState('light');
   const [currentSectionTitle, setCurrentSectionTitle] = useState('');
   const [isReady, setIsReady] = useState(false);
+  // 阶段十：问AI从"跳转到独立页面"改成"底部弹出面板"，原文全程可见（半遮挡）。
+  // chatParams 存这次要问的划线原文+cfi，present() 弹出面板时用。
+  const [chatParams, setChatParams] = useState({ selection: '', cfiRange: '' });
+  const chatSheetRef = useRef(null);
+  const chatSnapPoints = useMemo(() => ['65%', '78%'], []);
   // 章节目录：epub.js 自动生成的导航页只有第一次打开书时会经过，选了某一章
   // 之后就没有入口再回去挑别的章节——加一个常驻的目录按钮，不依赖那个只会
   // 出现一次的自动导航页
@@ -124,10 +133,8 @@ function ReaderInner({
   }
 
   function openChat(selectionText = '', cfiRange = '') {
-    navigation.navigate('BookChat', {
-      bookId, bookTitle, author, chapterTitle: currentSectionTitle,
-      selection: selectionText, cfiRange,
-    });
+    setChatParams({ selection: selectionText, cfiRange });
+    chatSheetRef.current?.present();
   }
 
   function cycleTheme() {
@@ -138,20 +145,20 @@ function ReaderInner({
 
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: THEMES[themeName].body.background }]}>
-      <View style={styles.header}>
+      <View style={[styles.header, { backgroundColor: uiTheme.accent }]}>
         <TouchableOpacity onPress={() => navigation.goBack()} style={styles.headerBtn}>
-          <Text style={styles.headerBtnText}>‹ 书架</Text>
+          <Text style={[styles.headerBtnText, { color: uiTheme.textOnAccent }]}>‹ 书架</Text>
         </TouchableOpacity>
-        <Text style={styles.headerTitle} numberOfLines={1}>{bookTitle}</Text>
+        <Text style={[styles.headerTitle, { color: uiTheme.textOnAccent }]} numberOfLines={1}>{bookTitle}</Text>
         <View style={styles.headerRight}>
           <TouchableOpacity onPress={() => setShowToc(true)} style={styles.headerBtn}>
-            <Text style={styles.headerBtnText}>📑</Text>
+            <Text style={[styles.headerBtnText, { color: uiTheme.textOnAccent }]}>📑</Text>
           </TouchableOpacity>
           <TouchableOpacity onPress={() => openChat()} style={styles.headerBtn}>
-            <Text style={styles.headerBtnText}>💬</Text>
+            <Text style={[styles.headerBtnText, { color: uiTheme.textOnAccent }]}>💬</Text>
           </TouchableOpacity>
           <TouchableOpacity onPress={cycleTheme} style={styles.headerBtn}>
-            <Text style={styles.headerBtnText}>{THEME_LABEL[themeName]}</Text>
+            <Text style={[styles.headerBtnText, { color: uiTheme.textOnAccent }]}>{THEME_LABEL[themeName]}</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -218,34 +225,58 @@ function ReaderInner({
       />
 
       {!!selection && (
-        <View style={styles.selectionBar}>
-          <Text style={styles.selectionBarText} numberOfLines={1}>“{selection.text}”</Text>
+        <View style={[styles.selectionBar, { backgroundColor: uiTheme.text, borderRadius: uiTheme.radius }]}>
+          <Text style={[styles.selectionBarText, { color: uiTheme.bg }]} numberOfLines={1}>“{selection.text}”</Text>
           <View style={styles.selectionBarActions}>
             <TouchableOpacity
-              style={styles.selectionBtn}
+              style={[styles.selectionBtn, { backgroundColor: uiTheme.accent, borderRadius: uiTheme.radius }]}
               onPress={async () => {
                 await handleHighlight(selection.cfiRange, selection.text);
                 setSelection(null);
               }}
             >
-              <Text style={styles.selectionBtnText}>划线</Text>
+              <Text style={[styles.selectionBtnText, { color: uiTheme.textOnAccent }]}>划线</Text>
             </TouchableOpacity>
             <TouchableOpacity
-              style={styles.selectionBtn}
+              style={[styles.selectionBtn, { backgroundColor: uiTheme.accent, borderRadius: uiTheme.radius }]}
               onPress={() => {
                 const { text, cfiRange } = selection;
                 setSelection(null);
                 openChat(text, cfiRange);
               }}
             >
-              <Text style={styles.selectionBtnText}>问AI</Text>
+              <Text style={[styles.selectionBtnText, { color: uiTheme.textOnAccent }]}>问AI</Text>
             </TouchableOpacity>
             <TouchableOpacity style={styles.selectionCloseBtn} onPress={() => setSelection(null)}>
-              <Text style={styles.selectionCloseBtnText}>✕</Text>
+              <Text style={[styles.selectionCloseBtnText, { color: uiTheme.bg }]}>✕</Text>
             </TouchableOpacity>
           </View>
         </View>
       )}
+
+      <BottomSheetModal
+        ref={chatSheetRef}
+        snapPoints={chatSnapPoints}
+        index={0}
+        enablePanDownToClose
+        backgroundStyle={{ backgroundColor: uiTheme.bg, borderTopLeftRadius: 16, borderTopRightRadius: 16 }}
+        handleIndicatorStyle={{ backgroundColor: uiTheme.cardBorder }}
+        keyboardBehavior="interactive"
+        keyboardBlurBehavior="restore"
+        backdropComponent={(props) => (
+          <BottomSheetBackdrop {...props} appearsOnIndex={0} disappearsOnIndex={-1} opacity={0.25} pressBehavior="close" />
+        )}
+      >
+        <BookChatScreen
+          bookId={bookId}
+          bookTitle={bookTitle}
+          author={author}
+          chapterTitle={currentSectionTitle}
+          selection={chatParams.selection}
+          cfiRange={chatParams.cfiRange}
+          onClose={() => chatSheetRef.current?.dismiss()}
+        />
+      </BottomSheetModal>
     </SafeAreaView>
   );
 }

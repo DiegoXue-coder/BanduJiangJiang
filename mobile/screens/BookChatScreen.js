@@ -1,54 +1,59 @@
-// AI 对话面板（WBS 阶段四）——语音+文字问答管线跟 ReaderChatScreen.js 是
-// 同一套（DeepSeek对话 + edge-tts播放 + SenseVoice转录），那边验证过的逻辑
-// 原样搬过来，只是把"连微信读书网页版上下文"换成"传入自己书库的书本上下文"，
-// 调的接口也从本机局域网地址换成走 lib/api.js 的正式鉴权。
+// AI 对话面板——阶段十改造：不再是独立跳转页面（route/navigation），改成
+// ReaderScreen 里用 BottomSheetModal 弹出的内嵌面板，靠 props 直接传参、
+// onClose 收起。语音+文字问答这条管线（DeepSeek对话 + edge-tts播放 +
+// SenseVoice转录）本身没有变，只是外层容器和滚动组件换了。
 import React, { useState, useRef, useEffect } from 'react';
 import {
-  View, Text, TextInput, TouchableOpacity, ScrollView,
-  StyleSheet, KeyboardAvoidingView, Platform, SafeAreaView, Alert,
+  View, Text, TextInput, TouchableOpacity,
+  StyleSheet, Alert,
 } from 'react-native';
+import { BottomSheetScrollView } from '@gorhom/bottom-sheet';
 import { Audio } from 'expo-av';
 import * as FileSystem from 'expo-file-system/legacy';
 import {
   streamAsk, getTtsPlayUrl, transcribeAudio, saveQaHistory, getHighlights, saveHighlight,
 } from '../lib/api';
+import { useTheme } from '../theme';
 
 // 按中文/英文句末标点切句——流式回答边生成边攒 buffer，攒够一整句就送去TTS，
 // 不用等全部回答生成完才开口。
 const SENTENCE_END = /([。！？；\n])/;
 
-const BLUE = '#4f8ef7';
-const RED  = '#f7564f';
-
-function Bubble({ role, text }) {
+function Bubble({ role, text, theme }) {
   const isUser = role === 'user';
   return (
-    <View style={[styles.bubble, isUser ? styles.bubbleUser : styles.bubbleAI]}>
-      <Text style={[styles.bubbleText, isUser ? styles.bubbleTextUser : styles.bubbleTextAI]}>
+    <View style={[
+      styles.bubble,
+      { borderRadius: theme.radius, backgroundColor: isUser ? theme.accentSoft : theme.cardBg },
+      isUser ? styles.bubbleUser : styles.bubbleAI,
+      !isUser && { borderWidth: 0.5, borderColor: theme.cardBorder, shadowColor: theme.shadowColor },
+    ]}>
+      <Text style={[styles.bubbleText, { color: isUser ? theme.text : theme.text }]}>
         {text}
       </Text>
     </View>
   );
 }
 
-function TypingBubble() {
+function TypingBubble({ theme }) {
   const [frame, setFrame] = useState(0);
   useEffect(() => {
     const t = setInterval(() => setFrame(f => (f + 1) % 3), 400);
     return () => clearInterval(t);
   }, []);
   return (
-    <View style={[styles.bubble, styles.bubbleAI]}>
-      <Text style={[styles.bubbleText, styles.bubbleTextAI, styles.typingText]}>
+    <View style={[styles.bubble, styles.bubbleAI, { borderRadius: theme.radius, backgroundColor: theme.cardBg, borderWidth: 0.5, borderColor: theme.cardBorder }]}>
+      <Text style={[styles.bubbleText, styles.typingText, { color: theme.textMuted }]}>
         {['●○○', '○●○', '○○●'][frame]}
       </Text>
     </View>
   );
 }
 
-export default function BookChatScreen({ route, navigation }) {
-  const { bookId, bookTitle, author, chapterTitle, selection = '', cfiRange = '' } = route.params;
-
+export default function BookChatScreen({
+  bookId, bookTitle, author, chapterTitle, selection = '', cfiRange = '', onClose,
+}) {
+  const theme = useTheme();
   const [messages, setMessages]     = useState([]);
   const [input, setInput]           = useState('');
   const [status, setStatus]         = useState('');
@@ -78,14 +83,9 @@ export default function BookChatScreen({ route, navigation }) {
   const ttsPlayingRef  = useRef(false);
   const abortStreamRef = useRef(null); // streamAsk() 返回的取消函数
 
-  // 2026-07-24：排查"TTS完全没声音"——全代码库找不到任何地方显式设置过
-  // playsInSilentModeIOS: true（唯一碰过这个字段的是下面 toggleRecording
-  // 开始录音时，且停止录音时又把它连带重置掉了）。iOS 上手机physical静音
-  // 开关打开时，这个字段不是true的话，Audio.Sound会正常playAsync()、不报
-  // 任何错，但物理上完全没声音——这跟"没有任何语音输出、但也没报错"这个
-  // 现象完全吻合。这不是这几天改的播放队列逻辑引入的新bug，是从一开始就
-  // 没配过、只是之前测试时手机音量状态凑巧没触发。挂载时就设一次，不依赖
-  // 录音功能是否用过。
+  // 排查"TTS完全没声音"查到的坑：没有任何地方显式设置过 playsInSilentModeIOS，
+  // 手机physical静音开关打开时 playAsync() 正常resolve但完全没声音、不报错。
+  // 面板一挂载就设一次，不依赖录音功能有没有被用过。
   useEffect(() => {
     Audio.setAudioModeAsync({ playsInSilentModeIOS: true }).catch(() => {});
   }, []);
@@ -166,10 +166,8 @@ export default function BookChatScreen({ route, navigation }) {
   // 流式回答按句切出来的每一句都过这里排队——上一句还没放完，新句子先进
   // 队列，不会互相打断；播完一句自动接下一句，直到队列清空。
   //
-  // 2026-07-22：原来是"播完当前句才开始请求下一句"，请求+服务端合成+下载
-  // 这段耗时全部发生在两句之间，听起来就是句子中间有停顿。改成"当前句一
-  // 开始播放，就立刻在后台把下一句加载好（不播放）"——prefetchNext() 让
-  // 下一句的加载时间跟当前句的播放时间重叠，播完直接无缝接上已经准备好的
+  // 当前句一开始播放，就立刻在后台把下一句加载好（不播放）——prefetchNext()
+  // 让下一句的加载时间跟当前句的播放时间重叠，播完直接无缝接上已经准备好的
   // 音频，不用现场再等一次网络请求。
   function enqueueTts(text) {
     if (!ttsOn || !text.trim()) return;
@@ -185,12 +183,12 @@ export default function BookChatScreen({ route, navigation }) {
   // 提前把队列里下一句的音频加载好（只加载，不播放）。preparedRef 同一时间
   // 只准备一句——够用，队列纵深超过1句的情况很少见，没必要做成多级预取。
   //
-  // preparingRef 是在这里补的锁：跟 playNextInQueue 同一个坑——"占位"必须在
-  // await 之前同步完成，不然 flushSentences 一次性攒出好几句、连续同步调用
-  // 好几次 enqueueTts 时，第二次调用会在第一次的 createAsync 还没返回、
-  // preparedRef.current 还是空的这个窗口期里，误判"还没人在预取"，又并发
-  // 发起一次加载，两次预取都往同一个 preparedRef 写，导致其中一句音频被
-  // 静默吞掉、白白 shift 出队列却再也没人播放它。
+  // preparingRef 是这里补的锁：占位必须在 await 之前同步完成，不然
+  // flushSentences 一次性攒出好几句、连续同步调用好几次 enqueueTts 时，
+  // 第二次调用会在第一次的 createAsync 还没返回、preparedRef.current 还是
+  // 空的这个窗口期里，误判"还没人在预取"，又并发发起一次加载，两次预取都
+  // 往同一个 preparedRef 写，导致其中一句音频被静默吞掉、白白 shift 出
+  // 队列却再也没人播放它。
   async function prefetchNext() {
     if (preparedRef.current || preparingRef.current || ttsQueueRef.current.length === 0) return;
     const text = ttsQueueRef.current.shift();
@@ -213,10 +211,9 @@ export default function BookChatScreen({ route, navigation }) {
 
     // 先同步把要播的这一句"占"下来（要么拿走 preparedRef，要么从队列里
     // shift），紧接着立刻上锁 ttsPlayingRef——这两步中间不能插入任何
-    // await。上一版的坑就在这：锁是在 await 加载完之后才上的，等待加载
-    // 的这段时间里，如果 flushSentences 连续同步调用了好几次
-    // enqueueTts，每次都会看到"还没在播"，各自都触发一次播放，好几句
-    // 音频就这样同时播了出来（多个声音重叠的真正原因）。
+    // await。锁必须在 await 加载之前同步上，不然等待加载的这段时间里，
+    // 如果 flushSentences 连续同步调用了好几次 enqueueTts，每次都会看到
+    // "还没在播"，各自都触发一次播放，好几句音频就这样同时播了出来。
     let pendingText, pendingSound = null;
     if (preparedRef.current) {
       ({ text: pendingText, sound: pendingSound } = preparedRef.current);
@@ -270,10 +267,9 @@ export default function BookChatScreen({ route, navigation }) {
     if (!q || isThinking) return;
     setInput('');
     // 语音转文字发送这条路径专属的坑：toggleRecording 识别完之后会
-    // setStatus('识别完成 — 确认后点发送')，但发送本身（这个函数）原来
-    // 没有清掉这条提示——打字发送从来没设过 status，所以这条路径看不出
-    // 问题；语音发送之后这行字会一直挂在输入框下面，用户反馈"输入框没
-    // 清空"，实际上输入框值本身没问题，是这条状态提示没清导致看着像没发出去。
+    // setStatus('识别完成 — 确认后点发送')，发送本身原来没有清掉这条提示——
+    // 打字发送从来没设过 status，所以看不出问题；语音发送之后这行字会一直
+    // 挂在输入框下面，容易被当成"发送没成功/输入框没清空"。
     setStatus('');
     addMsg('user', q);
     setThinking(true);
@@ -347,9 +343,9 @@ export default function BookChatScreen({ route, navigation }) {
     );
   }
 
-  // 离开页面时中断还没结束的流式请求，顺带把还在播/还在排队的语音也停掉——
-  // 之前只清了流式请求，没清音频，导致退出对话页之后 TTS 还在后台自己接
-  // 着放完排队里剩下的句子，用户已经回到书架了耳朵里还在出声。
+  // 面板卸载（用户收起/关闭）时中断还没结束的流式请求，顺带把还在播/还在
+  // 排队的语音也停掉——不然收起面板之后 TTS 还在后台自己接着放完排队里
+  // 剩下的句子。
   useEffect(() => () => { abortStreamRef.current?.(); stopAudio(); }, []);
 
   // 手动打断：不管是还在流式生成文字、还是在放语音，点一下都立刻停，
@@ -365,25 +361,19 @@ export default function BookChatScreen({ route, navigation }) {
   }
 
   async function toggleRecording() {
-    console.log('[DEBUG] toggleRecording called, isRecording=', isRecording);
     if (isRecording) {
       setRecording(false);
       setStatus('识别中…');
       try {
-        console.log('[DEBUG] recordingRef.current=', !!recordingRef.current);
         const rec = recordingRef.current;
         await rec.stopAndUnloadAsync();
-        console.log('[DEBUG] stopAndUnloadAsync done');
         const uri = rec.getURI();
-        console.log('[DEBUG] recording uri=', uri);
         recordingRef.current = null;
         // 顺带保留 playsInSilentModeIOS: true——只关录音模式，别把这个字段
         // 隐式重置掉，不然录过一次音之后TTS播放又会看手机静音开关脸色
         await Audio.setAudioModeAsync({ allowsRecordingIOS: false, playsInSilentModeIOS: true });
 
-        console.log('[DEBUG] calling transcribeAudio...');
         const text = await transcribeAudio(uri, FileSystem.uploadAsync, FileSystem.FileSystemUploadType);
-        console.log('[DEBUG] transcribeAudio returned:', JSON.stringify(text));
         if (text?.trim()) {
           setInput(text.trim());
           setStatus('识别完成 — 确认后点发送');
@@ -391,13 +381,11 @@ export default function BookChatScreen({ route, navigation }) {
           setStatus('未识别到内容，请重试');
         }
       } catch (e) {
-        console.log('[DEBUG] toggleRecording (stop) error:', e && e.message, e && e.stack);
         setStatus(`识别失败：${e.message}`);
       }
     } else {
       try {
         const { status: perm } = await Audio.requestPermissionsAsync();
-        console.log('[DEBUG] mic permission status:', perm);
         if (perm !== 'granted') {
           setStatus('需要麦克风权限，请到系统设置里开启');
           return;
@@ -409,35 +397,41 @@ export default function BookChatScreen({ route, navigation }) {
         recordingRef.current = recording;
         setRecording(true);
         setStatus('录音中 — 再次点击停止');
-        console.log('[DEBUG] recording started');
       } catch (e) {
-        console.log('[DEBUG] toggleRecording (start) error:', e && e.message, e && e.stack);
         setStatus(`无法启动录音：${e.message}`);
       }
     }
   }
 
   return (
-    <SafeAreaView style={styles.safe}>
-      <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.headerBtn}>
-          <Text style={styles.headerBtnText}>‹ 返回</Text>
+    <View style={[styles.root, { backgroundColor: theme.bg }]}>
+      <View style={styles.topRow}>
+        <TouchableOpacity onPress={toggleTts} style={styles.topBtn}>
+          <Text style={[styles.topBtnText, { color: theme.textSecondary }]}>{ttsOn ? '🔊' : '🔇'}</Text>
         </TouchableOpacity>
-        <Text style={styles.headerTitle} numberOfLines={1}>{bookTitle}</Text>
-        <TouchableOpacity onPress={toggleTts} style={styles.headerBtn}>
-          <Text style={styles.headerBtnText}>{ttsOn ? '🔊' : '🔇'}</Text>
+        <Text style={[styles.topTitle, { color: theme.text }]} numberOfLines={1}>{bookTitle}</Text>
+        <TouchableOpacity onPress={onClose} style={styles.topBtn}>
+          <Text style={[styles.topBtnText, { color: theme.textSecondary }]}>⌄ 收起</Text>
         </TouchableOpacity>
       </View>
 
       <View style={styles.styleToggleRow}>
         <TouchableOpacity
-          style={[styles.styleToggleBtn, style === 'simple' && styles.styleToggleBtnActive]}
+          style={[
+            styles.styleToggleBtn,
+            { borderRadius: theme.radius, borderColor: theme.cardBorder, backgroundColor: theme.cardBg },
+            style === 'simple' && { backgroundColor: theme.accent, borderColor: theme.accent },
+          ]}
           onPress={() => setStyle('simple')}
         >
-          <Text style={[styles.styleToggleText, style === 'simple' && styles.styleToggleTextActive]}>讲解</Text>
+          <Text style={[styles.styleToggleText, { color: style === 'simple' ? theme.textOnAccent : theme.textSecondary }]}>讲解</Text>
         </TouchableOpacity>
         <TouchableOpacity
-          style={[styles.styleToggleBtn, style === 'socratic' && styles.styleToggleBtnActive]}
+          style={[
+            styles.styleToggleBtn,
+            { borderRadius: theme.radius, borderColor: theme.cardBorder, backgroundColor: theme.cardBg },
+            style === 'socratic' && { backgroundColor: theme.accent, borderColor: theme.accent },
+          ]}
           onPress={() => {
             setStyle('socratic');
             // 划线之后切到苏格拉底模式，输入框预填"讲解"方便直接点发送——
@@ -450,20 +444,23 @@ export default function BookChatScreen({ route, navigation }) {
             }
           }}
         >
-          <Text style={[styles.styleToggleText, style === 'socratic' && styles.styleToggleTextActive]}>苏格拉底</Text>
+          <Text style={[styles.styleToggleText, { color: style === 'socratic' ? theme.textOnAccent : theme.textSecondary }]}>苏格拉底</Text>
         </TouchableOpacity>
       </View>
 
       {!!selection && (
-        <View style={styles.selectionBar}>
-          <Text style={styles.selectionText} numberOfLines={2}>“{selection}”</Text>
+        <View style={[styles.selectionBar, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}>
+          <Text style={[styles.selectionText, { color: theme.textSecondary }]} numberOfLines={2}>“{selection}”</Text>
           {!!cfiRange && (
             <TouchableOpacity
-              style={[styles.saveHighlightBtn, highlightSaved && styles.saveHighlightBtnDone]}
+              style={[
+                styles.saveHighlightBtn,
+                { borderRadius: theme.radius, backgroundColor: highlightSaved ? theme.accentSoft : theme.tagSoft },
+              ]}
               onPress={handleSaveHighlight}
               disabled={highlightSaved || savingHighlight}
             >
-              <Text style={styles.saveHighlightText}>
+              <Text style={[styles.saveHighlightText, { color: highlightSaved ? theme.accent : theme.tag }]}>
                 {highlightSaved ? '✓ 已划线' : '📌 存为划线'}
               </Text>
             </TouchableOpacity>
@@ -471,155 +468,142 @@ export default function BookChatScreen({ route, navigation }) {
         </View>
       )}
 
-      <ScrollView ref={scrollRef} style={styles.messages} contentContainerStyle={styles.msgContent}>
+      <BottomSheetScrollView
+        ref={scrollRef}
+        style={styles.messages}
+        contentContainerStyle={styles.msgContent}
+      >
         {messages.length === 0 && (
-          <Text style={styles.emptyHint}>
+          <Text style={[styles.emptyHint, { color: theme.textMuted }]}>
             {selection ? '针对这段文字提问，或者随便聊聊' : '用语音或文字提问'}
           </Text>
         )}
-        {messages.map(m => <Bubble key={m.id} role={m.role} text={m.text} />)}
-        {isThinking && streamingId === null && <TypingBubble />}
-      </ScrollView>
+        {messages.map(m => <Bubble key={m.id} role={m.role} text={m.text} theme={theme} />)}
+        {isThinking && streamingId === null && <TypingBubble theme={theme} />}
+      </BottomSheetScrollView>
 
-      {!!status && <Text style={styles.status} numberOfLines={2}>{status}</Text>}
+      {!!status && <Text style={[styles.status, { color: theme.textMuted }]} numberOfLines={2}>{status}</Text>}
 
       {(isThinking || isSpeaking) && (
-        <TouchableOpacity style={styles.interruptBar} onPress={handleInterrupt}>
-          <Text style={styles.interruptBarText}>
+        <TouchableOpacity
+          style={[styles.interruptBar, { borderRadius: theme.radius, backgroundColor: theme.dangerSoft, borderColor: theme.danger }]}
+          onPress={handleInterrupt}
+        >
+          <Text style={[styles.interruptBarText, { color: theme.danger }]}>
             ⏹ {isThinking ? '打断生成' : '打断播放'}，说点别的
           </Text>
         </TouchableOpacity>
       )}
 
-      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-        <View style={styles.inputRow}>
-          <TouchableOpacity
-            style={[styles.voiceBtn, isRecording && styles.voiceBtnActive]}
-            onPress={toggleRecording}
-            disabled={isThinking}
-          >
-            <Text style={styles.voiceIcon}>{isRecording ? '⏹' : '🎤'}</Text>
-          </TouchableOpacity>
+      <View style={[styles.inputRow, { backgroundColor: theme.cardBg, borderTopColor: theme.cardBorder }]}>
+        <TouchableOpacity
+          style={[styles.voiceBtn, { backgroundColor: isRecording ? theme.danger : theme.accent }]}
+          onPress={toggleRecording}
+          disabled={isThinking}
+        >
+          <Text style={styles.voiceIcon}>{isRecording ? '⏹' : '🎤'}</Text>
+        </TouchableOpacity>
 
-          <TextInput
-            style={styles.textInput}
-            value={input}
-            onChangeText={setInput}
-            placeholder="输入问题…"
-            placeholderTextColor="#a0a8bc"
-            returnKeyType="send"
-            onSubmitEditing={() => handleSend(input)}
-            editable={!isThinking}
-          />
+        <TextInput
+          style={[styles.textInput, { borderRadius: theme.radius, backgroundColor: theme.bg, borderColor: theme.cardBorder, color: theme.text }]}
+          value={input}
+          onChangeText={setInput}
+          placeholder="输入问题…"
+          placeholderTextColor={theme.textMuted}
+          returnKeyType="send"
+          onSubmitEditing={() => handleSend(input)}
+          editable={!isThinking}
+        />
 
-          <TouchableOpacity
-            style={[styles.sendBtn, (!input.trim() || isThinking) && styles.sendBtnOff]}
-            onPress={() => handleSend(input)}
-            disabled={!input.trim() || isThinking}
-          >
-            <Text style={styles.sendText}>发送</Text>
-          </TouchableOpacity>
-        </View>
-      </KeyboardAvoidingView>
-    </SafeAreaView>
+        <TouchableOpacity
+          style={[
+            styles.sendBtn,
+            { borderRadius: theme.radius, backgroundColor: theme.accent },
+            (!input.trim() || isThinking) && styles.sendBtnOff,
+          ]}
+          onPress={() => handleSend(input)}
+          disabled={!input.trim() || isThinking}
+        >
+          <Text style={[styles.sendText, { color: theme.textOnAccent }]}>发送</Text>
+        </TouchableOpacity>
+      </View>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: '#f4f6fb' },
+  root: { flex: 1 },
 
-  header: {
+  topRow: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    paddingHorizontal: 12, paddingVertical: 10,
-    backgroundColor: BLUE,
+    paddingHorizontal: 16, paddingVertical: 6,
   },
-  headerBtn: { padding: 6, minWidth: 44 },
-  headerBtnText: { color: '#fff', fontSize: 15, fontWeight: '600' },
-  headerTitle: { flex: 1, textAlign: 'center', color: '#fff', fontSize: 16, fontWeight: '700' },
+  topBtn: { padding: 6, minWidth: 44 },
+  topBtnText: { fontSize: 14, fontWeight: '600' },
+  topTitle: { flex: 1, textAlign: 'center', fontSize: 15, fontWeight: '700' },
 
   styleToggleRow: {
     flexDirection: 'row', gap: 8,
     paddingHorizontal: 16, paddingVertical: 8,
-    backgroundColor: '#fff',
-    borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#dde3f0',
   },
   styleToggleBtn: {
-    paddingHorizontal: 14, paddingVertical: 6, borderRadius: 16,
-    backgroundColor: '#f4f6fb', borderWidth: 1, borderColor: '#dde3f0',
+    paddingHorizontal: 14, paddingVertical: 6, borderWidth: 1,
   },
-  styleToggleBtnActive: { backgroundColor: BLUE, borderColor: BLUE },
-  styleToggleText: { fontSize: 13, color: '#5b6478', fontWeight: '600' },
-  styleToggleTextActive: { color: '#fff' },
+  styleToggleText: { fontSize: 13, fontWeight: '600' },
 
   selectionBar: {
     flexDirection: 'row', alignItems: 'center', gap: 10,
-    backgroundColor: '#fff', paddingHorizontal: 16, paddingVertical: 10,
-    borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#dde3f0',
+    marginHorizontal: 16, marginBottom: 8, padding: 10,
+    borderWidth: 0.5, borderRadius: 8,
   },
-  selectionText: { flex: 1, fontSize: 13, color: '#5b6478', fontStyle: 'italic' },
-  saveHighlightBtn: {
-    paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8,
-    backgroundColor: '#fff3d6',
-  },
-  saveHighlightBtnDone: { backgroundColor: '#eef3ff' },
-  saveHighlightText: { fontSize: 12, color: '#a35d00', fontWeight: '600' },
+  selectionText: { flex: 1, fontSize: 13, fontStyle: 'italic' },
+  saveHighlightBtn: { paddingHorizontal: 10, paddingVertical: 6 },
+  saveHighlightText: { fontSize: 12, fontWeight: '600' },
 
   messages:   { flex: 1 },
-  msgContent: { padding: 16, paddingBottom: 8 },
+  msgContent: { paddingHorizontal: 16, paddingBottom: 8 },
   emptyHint: {
-    textAlign: 'center', color: '#b0b8cc', fontSize: 13,
-    marginTop: 48, lineHeight: 24,
+    textAlign: 'center', fontSize: 13,
+    marginTop: 24, lineHeight: 24,
   },
 
-  bubble: { maxWidth: '85%', padding: 10, borderRadius: 14, marginBottom: 8 },
-  bubbleUser: {
-    backgroundColor: '#eef3ff', alignSelf: 'flex-end', borderBottomRightRadius: 4,
-  },
-  bubbleAI: {
-    backgroundColor: '#fff', alignSelf: 'flex-start', borderBottomLeftRadius: 4,
-    shadowColor: '#000', shadowOpacity: 0.05,
-    shadowOffset: { width: 0, height: 1 }, shadowRadius: 3, elevation: 1,
-  },
-  bubbleText:     { fontSize: 14, lineHeight: 22 },
-  bubbleTextUser: { color: '#2c3e6e' },
-  bubbleTextAI:   { color: '#1a1a2e' },
-  typingText:     { letterSpacing: 6, color: '#b0b8cc' },
+  bubble: { maxWidth: '85%', padding: 10, marginBottom: 8 },
+  bubbleUser: { alignSelf: 'flex-end' },
+  bubbleAI:   { alignSelf: 'flex-start' },
+  bubbleText: { fontSize: 14, lineHeight: 22 },
+  typingText: { letterSpacing: 6 },
 
   status: {
-    textAlign: 'center', fontSize: 12, color: '#8a95b0',
+    textAlign: 'center', fontSize: 12,
     paddingHorizontal: 16, paddingVertical: 5,
   },
 
   interruptBar: {
     marginHorizontal: 16, marginBottom: 8, paddingVertical: 10,
-    borderRadius: 10, backgroundColor: '#fff0ee',
-    borderWidth: 1, borderColor: RED, alignItems: 'center',
+    borderWidth: 1, alignItems: 'center',
   },
-  interruptBarText: { color: RED, fontSize: 13, fontWeight: '600' },
+  interruptBarText: { fontSize: 13, fontWeight: '600' },
 
   inputRow: {
     flexDirection: 'row', alignItems: 'center',
     paddingHorizontal: 12, paddingVertical: 10, gap: 8,
-    backgroundColor: '#fff',
-    borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: '#dde3f0',
+    borderTopWidth: StyleSheet.hairlineWidth,
+    paddingBottom: 24, // 面板底部留白，避免贴着手机底部安全区/home indicator
   },
   voiceBtn: {
     width: 44, height: 44, borderRadius: 22,
-    backgroundColor: BLUE, alignItems: 'center', justifyContent: 'center',
+    alignItems: 'center', justifyContent: 'center',
   },
-  voiceBtnActive: { backgroundColor: RED },
   voiceIcon: { fontSize: 18 },
 
   textInput: {
     flex: 1, height: 44, paddingHorizontal: 12,
-    backgroundColor: '#f4f6fb', borderRadius: 10,
-    fontSize: 14, color: '#1a1a2e',
-    borderWidth: 1.5, borderColor: '#dde3f0',
+    fontSize: 14, borderWidth: 1.5,
   },
   sendBtn: {
-    height: 44, paddingHorizontal: 16, borderRadius: 10,
-    backgroundColor: BLUE, alignItems: 'center', justifyContent: 'center',
+    height: 44, paddingHorizontal: 16,
+    alignItems: 'center', justifyContent: 'center',
   },
   sendBtnOff: { opacity: 0.45 },
-  sendText:   { color: '#fff', fontSize: 14, fontWeight: '600' },
+  sendText:   { fontSize: 14, fontWeight: '600' },
 });
