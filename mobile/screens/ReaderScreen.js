@@ -294,8 +294,8 @@ function ReaderInner({
       )}
 
       <Modal visible={showToc} animationType="slide" onRequestClose={() => setShowToc(false)}>
-        <SafeAreaView style={[styles.tocSafe, { backgroundColor: uiTheme.bg }]} {...tocPanResponder.panHandlers}>
-          <View style={[styles.tocHeader, { borderBottomColor: uiTheme.cardBorder }]}>
+        <SafeAreaView edges={['bottom', 'left', 'right']} style={[styles.tocSafe, { backgroundColor: uiTheme.bg }]} {...tocPanResponder.panHandlers}>
+          <View style={[styles.tocHeader, { borderBottomColor: uiTheme.cardBorder, paddingTop: insets.top + 14 }]}>
             <Text style={[styles.tocHeaderTitle, { color: uiTheme.text }]}>目录</Text>
             <TouchableOpacity onPress={() => setShowToc(false)} style={styles.tocCloseBtn}>
               <Text style={[styles.tocCloseBtnText, { color: uiTheme.accent }]}>完成</Text>
