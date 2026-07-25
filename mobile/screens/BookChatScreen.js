@@ -78,6 +78,18 @@ export default function BookChatScreen({ route, navigation }) {
   const ttsPlayingRef  = useRef(false);
   const abortStreamRef = useRef(null); // streamAsk() 返回的取消函数
 
+  // 2026-07-24：排查"TTS完全没声音"——全代码库找不到任何地方显式设置过
+  // playsInSilentModeIOS: true（唯一碰过这个字段的是下面 toggleRecording
+  // 开始录音时，且停止录音时又把它连带重置掉了）。iOS 上手机physical静音
+  // 开关打开时，这个字段不是true的话，Audio.Sound会正常playAsync()、不报
+  // 任何错，但物理上完全没声音——这跟"没有任何语音输出、但也没报错"这个
+  // 现象完全吻合。这不是这几天改的播放队列逻辑引入的新bug，是从一开始就
+  // 没配过、只是之前测试时手机音量状态凑巧没触发。挂载时就设一次，不依赖
+  // 录音功能是否用过。
+  useEffect(() => {
+    Audio.setAudioModeAsync({ playsInSilentModeIOS: true }).catch(() => {});
+  }, []);
+
   useEffect(() => {
     getHighlights(bookId)
       .then(rows => {
@@ -257,6 +269,12 @@ export default function BookChatScreen({ route, navigation }) {
     const q = question.trim();
     if (!q || isThinking) return;
     setInput('');
+    // 语音转文字发送这条路径专属的坑：toggleRecording 识别完之后会
+    // setStatus('识别完成 — 确认后点发送')，但发送本身（这个函数）原来
+    // 没有清掉这条提示——打字发送从来没设过 status，所以这条路径看不出
+    // 问题；语音发送之后这行字会一直挂在输入框下面，用户反馈"输入框没
+    // 清空"，实际上输入框值本身没问题，是这条状态提示没清导致看着像没发出去。
+    setStatus('');
     addMsg('user', q);
     setThinking(true);
     stopAudio(); // 新一轮提问，先把上一轮还没播完的音频/队列清掉
@@ -359,7 +377,9 @@ export default function BookChatScreen({ route, navigation }) {
         const uri = rec.getURI();
         console.log('[DEBUG] recording uri=', uri);
         recordingRef.current = null;
-        await Audio.setAudioModeAsync({ allowsRecordingIOS: false });
+        // 顺带保留 playsInSilentModeIOS: true——只关录音模式，别把这个字段
+        // 隐式重置掉，不然录过一次音之后TTS播放又会看手机静音开关脸色
+        await Audio.setAudioModeAsync({ allowsRecordingIOS: false, playsInSilentModeIOS: true });
 
         console.log('[DEBUG] calling transcribeAudio...');
         const text = await transcribeAudio(uri, FileSystem.uploadAsync, FileSystem.FileSystemUploadType);
