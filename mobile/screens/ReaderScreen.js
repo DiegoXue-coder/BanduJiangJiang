@@ -7,6 +7,7 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { Reader, useReader } from '@epubjs-react-native/core';
 import { useFileSystem } from '@epubjs-react-native/expo-file-system';
 import { BottomSheetModal, BottomSheetBackdrop } from '@gorhom/bottom-sheet';
+import { IconList, IconMessageCircle, IconBrightness, IconTextSize } from '@tabler/icons-react-native';
 import {
   getBookContext, getBookFileUrl, getHighlights, saveHighlight, updateProgress,
 } from '../lib/api';
@@ -20,7 +21,16 @@ const THEMES = {
   dark:  { body: { background: '#1a1a2e', color: '#dcdce6' } },
 };
 const THEME_ORDER = ['light', 'paper', 'dark'];
-const THEME_LABEL = { light: '☀️', paper: '📜', dark: '🌙' };
+// 阶段十一：颜色/主题从"点一下循环切换"改成"三档横向切换控件"，标签跟着改
+const THEME_SEGMENT_LABEL = { light: '默认', paper: '护眼模式', dark: '晚间阅读' };
+
+// 字号调节：pt为单位，对应 epub.js rendition.themes.fontSize() 接受的CSS尺寸。
+// 16pt是常见的默认阅读字号（比epub.js库自己的12pt默认值大，更适合国学爱好者
+// 目标用户群体），12/28是给的合理上下限，避免调到读不出字或严重溢出。
+const FONT_SIZE_DEFAULT = 16;
+const FONT_SIZE_MIN = 12;
+const FONT_SIZE_MAX = 28;
+const FONT_SIZE_STEP = 2;
 
 // 进度上报节流：翻页很频繁，没必要每次都请求后端
 const PROGRESS_DEBOUNCE_MS = 2000;
@@ -29,7 +39,7 @@ function ReaderInner({
   bookId, bookTitle, author, initialLocation, initialAnnotations, navigation,
   jumpToCfi, jumpNonce,
 }) {
-  const { addAnnotation, changeTheme, toc, goToLocation, injectJavascript } = useReader();
+  const { addAnnotation, changeTheme, changeFontSize, toc, goToLocation, injectJavascript } = useReader();
 
   // 目录跳转不能直接把 toc 里的 href（形如"chap_005.xhtml"）丢给 goToLocation——
   // 那个函数最终是调 epub.js 的 rendition.display(target)，虽然理论上支持
@@ -80,6 +90,11 @@ function ReaderInner({
   // 之后就没有入口再回去挑别的章节——加一个常驻的目录按钮，不依赖那个只会
   // 出现一次的自动导航页
   const [showToc, setShowToc] = useState(false);
+  // 阶段十一：颜色/字号两个图标点击后弹出的是同一排header下方的横向控件
+  // （不是二级菜单），同一时间只显示一个，互斥
+  const [showThemePanel, setShowThemePanel] = useState(false);
+  const [showFontSizePanel, setShowFontSizePanel] = useState(false);
+  const [fontSizePt, setFontSizePt] = useState(FONT_SIZE_DEFAULT);
   // 长按原生菜单（menuItems）在拖动选区手柄调整范围后不会重新弹出——这是
   // react-native-webview 自身的已知限制，不是我们代码能修的。改用这个悬浮条
   // 兜底：只要 epub.js 报了新的选区（onSelected，拖动调整后也会正常触发），
@@ -140,10 +155,27 @@ function ReaderInner({
     chatSheetRef.current?.present();
   }
 
-  function cycleTheme() {
-    const next = THEME_ORDER[(THEME_ORDER.indexOf(themeName) + 1) % THEME_ORDER.length];
+  function selectTheme(next) {
     setThemeName(next);
     changeTheme(THEMES[next]);
+  }
+
+  function toggleThemePanel() {
+    setShowFontSizePanel(false);
+    setShowThemePanel((v) => !v);
+  }
+
+  function toggleFontSizePanel() {
+    setShowThemePanel(false);
+    setShowFontSizePanel((v) => !v);
+  }
+
+  function adjustFontSize(delta) {
+    setFontSizePt((prev) => {
+      const next = Math.min(FONT_SIZE_MAX, Math.max(FONT_SIZE_MIN, prev + delta));
+      changeFontSize(`${next}pt`);
+      return next;
+    });
   }
 
   return (
@@ -154,17 +186,63 @@ function ReaderInner({
         </TouchableOpacity>
         <Text style={[styles.headerTitle, { color: uiTheme.textOnAccent }]} numberOfLines={1}>{bookTitle}</Text>
         <View style={styles.headerRight}>
+          <TouchableOpacity onPress={toggleFontSizePanel} style={styles.headerBtn}>
+            <IconTextSize color={uiTheme.textOnAccent} size={22} stroke={1.75} />
+          </TouchableOpacity>
           <TouchableOpacity onPress={() => setShowToc(true)} style={styles.headerBtn}>
-            <Text style={[styles.headerBtnText, { color: uiTheme.textOnAccent }]}>📑</Text>
+            <IconList color={uiTheme.textOnAccent} size={22} stroke={1.75} />
           </TouchableOpacity>
           <TouchableOpacity onPress={() => openChat()} style={styles.headerBtn}>
-            <Text style={[styles.headerBtnText, { color: uiTheme.textOnAccent }]}>💬</Text>
+            <IconMessageCircle color={uiTheme.textOnAccent} size={22} stroke={1.75} />
           </TouchableOpacity>
-          <TouchableOpacity onPress={cycleTheme} style={styles.headerBtn}>
-            <Text style={[styles.headerBtnText, { color: uiTheme.textOnAccent }]}>{THEME_LABEL[themeName]}</Text>
+          <TouchableOpacity onPress={toggleThemePanel} style={styles.headerBtn}>
+            <IconBrightness color={uiTheme.textOnAccent} size={22} stroke={1.75} />
           </TouchableOpacity>
         </View>
       </View>
+
+      {showFontSizePanel && (
+        <View style={[styles.controlPanel, { backgroundColor: uiTheme.cardBg, borderBottomColor: uiTheme.cardBorder }]}>
+          <TouchableOpacity
+            style={[styles.fontSizeBtn, { borderRadius: uiTheme.radius, borderColor: uiTheme.cardBorder }]}
+            onPress={() => adjustFontSize(-FONT_SIZE_STEP)}
+            disabled={fontSizePt <= FONT_SIZE_MIN}
+          >
+            <Text style={[styles.fontSizeBtnText, { color: uiTheme.text, fontSize: 14 }]}>A-</Text>
+          </TouchableOpacity>
+          <Text style={[styles.fontSizeValue, { color: uiTheme.textSecondary }]}>{fontSizePt}pt</Text>
+          <TouchableOpacity
+            style={[styles.fontSizeBtn, { borderRadius: uiTheme.radius, borderColor: uiTheme.cardBorder }]}
+            onPress={() => adjustFontSize(FONT_SIZE_STEP)}
+            disabled={fontSizePt >= FONT_SIZE_MAX}
+          >
+            <Text style={[styles.fontSizeBtnText, { color: uiTheme.text, fontSize: 20 }]}>A+</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {showThemePanel && (
+        <View style={[styles.controlPanel, { backgroundColor: uiTheme.cardBg, borderBottomColor: uiTheme.cardBorder }]}>
+          {THEME_ORDER.map((name) => (
+            <TouchableOpacity
+              key={name}
+              style={[
+                styles.themeSegment,
+                { borderRadius: uiTheme.radius, borderColor: uiTheme.cardBorder },
+                themeName === name && { backgroundColor: uiTheme.accent, borderColor: uiTheme.accent },
+              ]}
+              onPress={() => selectTheme(name)}
+            >
+              <Text style={[
+                styles.themeSegmentText,
+                { color: themeName === name ? uiTheme.textOnAccent : uiTheme.textSecondary },
+              ]}>
+                {THEME_SEGMENT_LABEL[name]}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+      )}
 
       <Modal visible={showToc} animationType="slide" onRequestClose={() => setShowToc(false)}>
         <SafeAreaView style={[styles.tocSafe, { backgroundColor: uiTheme.bg }]}>
@@ -352,8 +430,23 @@ const styles = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     paddingHorizontal: 12, paddingVertical: 10,
   },
-  headerBtn: { padding: 6, minWidth: 36 },
+  headerBtn: { padding: 5, minWidth: 32, alignItems: 'center', justifyContent: 'center' },
   headerBtnText: { fontSize: 15, fontWeight: '600' },
+
+  controlPanel: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: 12, paddingVertical: 10, paddingHorizontal: 16,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  fontSizeBtn: {
+    paddingHorizontal: 14, paddingVertical: 6, borderWidth: 1,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  fontSizeBtnText: { fontWeight: '700' },
+  fontSizeValue: { fontSize: 14, fontWeight: '600', minWidth: 40, textAlign: 'center' },
+
+  themeSegment: { paddingHorizontal: 16, paddingVertical: 8, borderWidth: 1 },
+  themeSegmentText: { fontSize: 13, fontWeight: '600' },
   headerTitle: { flex: 1, textAlign: 'center', fontSize: 16, fontWeight: '700' },
   headerRight: { flexDirection: 'row', alignItems: 'center' },
 
