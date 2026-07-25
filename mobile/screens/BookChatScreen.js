@@ -484,53 +484,58 @@ export default function BookChatScreen({
         {isThinking && streamingId === null && <TypingBubble theme={theme} />}
       </BottomSheetScrollView>
 
-      {!!status && <Text style={[styles.status, { color: theme.textMuted }]} numberOfLines={2}>{status}</Text>}
+      {/* 输入区绝对定位钉在面板底部——不依赖上面几层容器 flex 高度算得准不准，
+          消息区多长都不会把它挤走。msgContent 的 paddingBottom 留够这块的高度，
+          避免最后几条消息被这里挡住。 */}
+      <View style={[styles.footerGroup, { backgroundColor: theme.bg }]}>
+        {!!status && <Text style={[styles.status, { color: theme.textMuted }]} numberOfLines={2}>{status}</Text>}
 
-      {(isThinking || isSpeaking) && (
-        <TouchableOpacity
-          style={[styles.interruptBar, { borderRadius: theme.radius, backgroundColor: theme.dangerSoft, borderColor: theme.danger }]}
-          onPress={handleInterrupt}
-        >
-          <Text style={[styles.interruptBarText, { color: theme.danger }]}>
-            ⏹ {isThinking ? '打断生成' : '打断播放'}，说点别的
-          </Text>
-        </TouchableOpacity>
-      )}
+        {(isThinking || isSpeaking) && (
+          <TouchableOpacity
+            style={[styles.interruptBar, { borderRadius: theme.radius, backgroundColor: theme.dangerSoft, borderColor: theme.danger }]}
+            onPress={handleInterrupt}
+          >
+            <Text style={[styles.interruptBarText, { color: theme.danger }]}>
+              ⏹ {isThinking ? '打断生成' : '打断播放'}，说点别的
+            </Text>
+          </TouchableOpacity>
+        )}
 
-      <View style={[
-        styles.inputRow,
-        { backgroundColor: theme.cardBg, borderTopColor: theme.cardBorder, paddingBottom: insets.bottom + 10 },
-      ]}>
-        <TouchableOpacity
-          style={[styles.voiceBtn, { backgroundColor: isRecording ? theme.danger : theme.accent }]}
-          onPress={toggleRecording}
-          disabled={isThinking}
-        >
-          <Text style={styles.voiceIcon}>{isRecording ? '⏹' : '🎤'}</Text>
-        </TouchableOpacity>
+        <View style={[
+          styles.inputRow,
+          { backgroundColor: theme.cardBg, borderTopColor: theme.cardBorder, paddingBottom: insets.bottom + 10 },
+        ]}>
+          <TouchableOpacity
+            style={[styles.voiceBtn, { backgroundColor: isRecording ? theme.danger : theme.accent }]}
+            onPress={toggleRecording}
+            disabled={isThinking}
+          >
+            <Text style={styles.voiceIcon}>{isRecording ? '⏹' : '🎤'}</Text>
+          </TouchableOpacity>
 
-        <TextInput
-          style={[styles.textInput, { borderRadius: theme.radius, backgroundColor: theme.bg, borderColor: theme.cardBorder, color: theme.text }]}
-          value={input}
-          onChangeText={setInput}
-          placeholder="输入问题…"
-          placeholderTextColor={theme.textMuted}
-          returnKeyType="send"
-          onSubmitEditing={() => handleSend(input)}
-          editable={!isThinking}
-        />
+          <TextInput
+            style={[styles.textInput, { borderRadius: theme.radius, backgroundColor: theme.bg, borderColor: theme.cardBorder, color: theme.text }]}
+            value={input}
+            onChangeText={setInput}
+            placeholder="输入问题…"
+            placeholderTextColor={theme.textMuted}
+            returnKeyType="send"
+            onSubmitEditing={() => handleSend(input)}
+            editable={!isThinking}
+          />
 
-        <TouchableOpacity
-          style={[
-            styles.sendBtn,
-            { borderRadius: theme.radius, backgroundColor: theme.accent },
-            (!input.trim() || isThinking) && styles.sendBtnOff,
-          ]}
-          onPress={() => handleSend(input)}
-          disabled={!input.trim() || isThinking}
-        >
-          <Text style={[styles.sendText, { color: theme.textOnAccent }]}>发送</Text>
-        </TouchableOpacity>
+          <TouchableOpacity
+            style={[
+              styles.sendBtn,
+              { borderRadius: theme.radius, backgroundColor: theme.accent },
+              (!input.trim() || isThinking) && styles.sendBtnOff,
+            ]}
+            onPress={() => handleSend(input)}
+            disabled={!input.trim() || isThinking}
+          >
+            <Text style={[styles.sendText, { color: theme.textOnAccent }]}>发送</Text>
+          </TouchableOpacity>
+        </View>
       </View>
     </View>
   );
@@ -566,11 +571,19 @@ const styles = StyleSheet.create({
   saveHighlightText: { fontSize: 12, fontWeight: '600' },
 
   messages:   { flex: 1 },
-  msgContent: { paddingHorizontal: 16, paddingBottom: 8 },
+  // 底部留出空间别被 footerGroup（绝对定位、钉在面板底部）挡住最后几条消息——
+  // 这个值是估的（输入框+可能出现的status/interruptBar+安全区留白），不追求
+  // 像素级精确，够用就行
+  msgContent: { paddingHorizontal: 16, paddingBottom: 110 },
   emptyHint: {
     textAlign: 'center', fontSize: 13,
     marginTop: 24, lineHeight: 24,
   },
+
+  // 绝对定位钉死在面板底部，不依赖上层容器的 flex 高度分配——上面几层
+  // (BottomSheetModal→BottomSheetContent→本组件根View) 的高度传递关系
+  // 之前排查过好几轮都不够可靠，这样写不用再赌那条链路一定算得对。
+  footerGroup: { position: 'absolute', left: 0, right: 0, bottom: 0 },
 
   bubble: { maxWidth: '85%', padding: 10, marginBottom: 8 },
   bubbleUser: { alignSelf: 'flex-end' },
