@@ -5,7 +5,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity,
-  StyleSheet, Alert,
+  StyleSheet, Alert, Keyboard, Platform,
 } from 'react-native';
 import { BottomSheetScrollView } from '@gorhom/bottom-sheet';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -75,6 +75,12 @@ export default function BookChatScreen({
   // cfi_location，避免同一段文字重复存两条划线记录
   const [highlightSaved, setHighlightSaved] = useState(false);
   const [savingHighlight, setSavingHighlight] = useState(false);
+  // 输入区贴底靠 footerGroup 的 position:absolute + bottom:0 实现，键盘弹出时
+  // 不依赖 @gorhom/bottom-sheet 自己的 keyboardBehavior（试过 interactive 和
+  // extend 两种取值，真机反馈键盘照样直接盖住输入框，没有联动）——改成用
+  // React Native 最基础的 Keyboard 事件自己算高度，把 footerGroup 的 bottom
+  // 顶上去，不再依赖那层不确定生不生效的库内部行为。
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
 
   const recordingRef   = useRef(null);
   const soundRef       = useRef(null);
@@ -90,6 +96,25 @@ export default function BookChatScreen({
   // 面板一挂载就设一次，不依赖录音功能有没有被用过。
   useEffect(() => {
     Audio.setAudioModeAsync({ playsInSilentModeIOS: true }).catch(() => {});
+  }, []);
+
+  // 键盘弹出/收起时直接顶输入区——不依赖 @gorhom/bottom-sheet 自己的
+  // keyboardBehavior（试过 interactive/extend 都没能在真机上让面板正确
+  // 联动键盘），改用最基础的 Keyboard 事件自己算高度。iOS 用 will 事件
+  // （跟系统键盘动画同步开始，不会有肉眼可见的延迟感）。
+  useEffect(() => {
+    const showEvt = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvt = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    const showSub = Keyboard.addListener(showEvt, (e) => {
+      setKeyboardHeight(e.endCoordinates?.height || 0);
+    });
+    const hideSub = Keyboard.addListener(hideEvt, () => {
+      setKeyboardHeight(0);
+    });
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
   }, []);
 
   useEffect(() => {
@@ -487,7 +512,7 @@ export default function BookChatScreen({
       {/* 输入区绝对定位钉在面板底部——不依赖上面几层容器 flex 高度算得准不准，
           消息区多长都不会把它挤走。msgContent 的 paddingBottom 留够这块的高度，
           避免最后几条消息被这里挡住。 */}
-      <View style={[styles.footerGroup, { backgroundColor: '#FF00FF' }]}>
+      <View style={[styles.footerGroup, { backgroundColor: '#FF00FF', bottom: keyboardHeight }]}>
         {!!status && <Text style={[styles.status, { color: theme.textMuted }]} numberOfLines={2}>{status}</Text>}
 
         {(isThinking || isSpeaking) && (

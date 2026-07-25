@@ -72,7 +72,10 @@ function ReaderInner({
   // chatParams 存这次要问的划线原文+cfi，present() 弹出面板时用。
   const [chatParams, setChatParams] = useState({ selection: '', cfiRange: '' });
   const chatSheetRef = useRef(null);
-  const chatSnapPoints = useMemo(() => ['65%', '78%'], []);
+  // 临时诊断：先固定给一个明显够大的单一高度，排查"默认高度不够"还是
+  // "别的更深层的定位/裁切问题"——排查完确定方向后要按验收标准的
+  // 65%~78%范围改回去，这不是最终值。
+  const chatSnapPoints = useMemo(() => ['85%'], []);
   // 章节目录：epub.js 自动生成的导航页只有第一次打开书时会经过，选了某一章
   // 之后就没有入口再回去挑别的章节——加一个常驻的目录按钮，不依赖那个只会
   // 出现一次的自动导航页
