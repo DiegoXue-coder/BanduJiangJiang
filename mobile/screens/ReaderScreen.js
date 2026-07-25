@@ -256,6 +256,7 @@ function ReaderInner({
         ref={chatSheetRef}
         snapPoints={chatSnapPoints}
         index={0}
+        enableDynamicSizing={false}
         enablePanDownToClose
         backgroundStyle={{ backgroundColor: uiTheme.bg, borderTopLeftRadius: 16, borderTopRightRadius: 16 }}
         handleIndicatorStyle={{ backgroundColor: uiTheme.cardBorder }}
