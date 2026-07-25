@@ -6,8 +6,7 @@ import {
 import { useFocusEffect } from '@react-navigation/native';
 import { getReview } from '../lib/api';
 import { ReviewCard, formatTime } from '../components/ReviewCard';
-
-const BLUE = '#4f8ef7';
+import { useTheme } from '../theme';
 
 const TABS = [
   { key: 'highlight', label: '划线' },
@@ -40,21 +39,29 @@ function groupByBook(items, type) {
   return groups;
 }
 
-function BookCard({ group, onPress }) {
+function BookCard({ group, onPress, theme }) {
   return (
-    <TouchableOpacity style={styles.bookCard} onPress={onPress} activeOpacity={0.7}>
+    <TouchableOpacity
+      style={[styles.bookCard, {
+        backgroundColor: theme.cardBg, borderRadius: theme.radius,
+        borderWidth: 0.5, borderColor: theme.cardBorder, shadowColor: theme.shadowColor,
+      }]}
+      onPress={onPress}
+      activeOpacity={0.7}
+    >
       <View style={styles.bookCardLeft}>
-        <Text style={styles.bookCardTitle} numberOfLines={1}>{group.book_title}</Text>
-        <Text style={styles.bookCardMeta}>
+        <Text style={[styles.bookCardTitle, { color: theme.text }]} numberOfLines={1}>{group.book_title}</Text>
+        <Text style={[styles.bookCardMeta, { color: theme.textSecondary }]}>
           共 {group.items.length} 条 · 最近 {formatTime(group.items[0].created_at)}
         </Text>
       </View>
-      <Text style={styles.bookCardArrow}>›</Text>
+      <Text style={[styles.bookCardArrow, { color: theme.textMuted }]}>›</Text>
     </TouchableOpacity>
   );
 }
 
 export default function ReviewScreen({ navigation }) {
+  const theme = useTheme();
   const [items, setItems]     = useState(null); // null = 加载中
   const [error, setError]     = useState('');
   const [refreshing, setRefreshing] = useState(false);
@@ -88,14 +95,18 @@ export default function ReviewScreen({ navigation }) {
   }, [items, isBookshelfTab]);
 
   const tabBar = (
-    <View style={styles.tabRow}>
+    <View style={[styles.tabRow, { backgroundColor: theme.cardBg, borderBottomColor: theme.cardBorder }]}>
       {TABS.map((t) => (
         <TouchableOpacity
           key={t.key}
-          style={[styles.tabBtn, tab === t.key && styles.tabBtnActive]}
+          style={[
+            styles.tabBtn,
+            { borderRadius: theme.radius, backgroundColor: theme.bg, borderColor: theme.cardBorder },
+            tab === t.key && { backgroundColor: theme.accent, borderColor: theme.accent },
+          ]}
           onPress={() => setTab(t.key)}
         >
-          <Text style={[styles.tabText, tab === t.key && styles.tabTextActive]}>{t.label}</Text>
+          <Text style={[styles.tabText, { color: tab === t.key ? theme.textOnAccent : theme.textSecondary }]}>{t.label}</Text>
         </TouchableOpacity>
       ))}
     </View>
@@ -103,12 +114,12 @@ export default function ReviewScreen({ navigation }) {
 
   if (items === null && !error) {
     return (
-      <SafeAreaView style={styles.safe}>
-        <View style={styles.header}>
-          <Text style={styles.headerTitle}>划线复盘</Text>
+      <SafeAreaView style={[styles.safe, { backgroundColor: theme.bg }]}>
+        <View style={[styles.header, { backgroundColor: theme.accent }]}>
+          <Text style={[styles.headerTitle, { color: theme.textOnAccent }]}>划线复盘</Text>
         </View>
         <View style={styles.centerBox}>
-          <ActivityIndicator size="large" color={BLUE} />
+          <ActivityIndicator size="large" color={theme.accent} />
         </View>
       </SafeAreaView>
     );
@@ -116,14 +127,14 @@ export default function ReviewScreen({ navigation }) {
 
   if (error && items === null) {
     return (
-      <SafeAreaView style={styles.safe}>
-        <View style={styles.header}>
-          <Text style={styles.headerTitle}>划线复盘</Text>
+      <SafeAreaView style={[styles.safe, { backgroundColor: theme.bg }]}>
+        <View style={[styles.header, { backgroundColor: theme.accent }]}>
+          <Text style={[styles.headerTitle, { color: theme.textOnAccent }]}>划线复盘</Text>
         </View>
         <View style={styles.centerBox}>
-          <Text style={styles.errorText}>加载失败：{error}</Text>
-          <TouchableOpacity style={styles.retryBtn} onPress={() => load()}>
-            <Text style={styles.retryText}>重试</Text>
+          <Text style={[styles.errorText, { color: theme.danger }]}>加载失败：{error}</Text>
+          <TouchableOpacity style={[styles.retryBtn, { backgroundColor: theme.accent, borderRadius: theme.radius }]} onPress={() => load()}>
+            <Text style={[styles.retryText, { color: theme.textOnAccent }]}>重试</Text>
           </TouchableOpacity>
         </View>
       </SafeAreaView>
@@ -131,9 +142,9 @@ export default function ReviewScreen({ navigation }) {
   }
 
   return (
-    <SafeAreaView style={styles.safe}>
-      <View style={styles.header}>
-        <Text style={styles.headerTitle}>划线复盘</Text>
+    <SafeAreaView style={[styles.safe, { backgroundColor: theme.bg }]}>
+      <View style={[styles.header, { backgroundColor: theme.accent }]}>
+        <Text style={[styles.headerTitle, { color: theme.textOnAccent }]}>划线复盘</Text>
       </View>
       {tabBar}
       {isBookshelfTab ? (
@@ -146,12 +157,13 @@ export default function ReviewScreen({ navigation }) {
           }
           ListEmptyComponent={
             <View style={styles.centerBox}>
-              <Text style={styles.emptyText}>{EMPTY_HINT[tab]}</Text>
+              <Text style={[styles.emptyText, { color: theme.textMuted }]}>{EMPTY_HINT[tab]}</Text>
             </View>
           }
           renderItem={({ item: group }) => (
             <BookCard
               group={group}
+              theme={theme}
               onPress={() => navigation.navigate('ReviewBook', {
                 bookTitle: group.book_title,
                 tabLabel: TABS.find((t) => t.key === tab).label,
@@ -170,7 +182,7 @@ export default function ReviewScreen({ navigation }) {
           }
           ListEmptyComponent={
             <View style={styles.centerBox}>
-              <Text style={styles.emptyText}>{EMPTY_HINT[tab]}</Text>
+              <Text style={[styles.emptyText, { color: theme.textMuted }]}>{EMPTY_HINT[tab]}</Text>
             </View>
           }
           renderItem={({ item }) => (
@@ -183,43 +195,33 @@ export default function ReviewScreen({ navigation }) {
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: '#f4f6fb' },
-  header: { paddingHorizontal: 16, paddingVertical: 14, backgroundColor: BLUE },
-  headerTitle: { color: '#fff', fontSize: 20, fontWeight: '700' },
+  safe: { flex: 1 },
+  header: { paddingHorizontal: 16, paddingVertical: 14 },
+  headerTitle: { fontSize: 20, fontWeight: '700' },
 
   tabRow: {
     flexDirection: 'row', gap: 8,
     paddingHorizontal: 16, paddingVertical: 10,
-    backgroundColor: '#fff',
-    borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#dde3f0',
+    borderBottomWidth: StyleSheet.hairlineWidth,
   },
-  tabBtn: {
-    paddingHorizontal: 14, paddingVertical: 6, borderRadius: 16,
-    backgroundColor: '#f4f6fb', borderWidth: 1, borderColor: '#dde3f0',
-  },
-  tabBtnActive: { backgroundColor: BLUE, borderColor: BLUE },
-  tabText: { fontSize: 13, color: '#5b6478', fontWeight: '600' },
-  tabTextActive: { color: '#fff' },
+  tabBtn: { paddingHorizontal: 14, paddingVertical: 6, borderWidth: 1 },
+  tabText: { fontSize: 13, fontWeight: '600' },
 
   listContent: { padding: 16, flexGrow: 1 },
 
   bookCard: {
     flexDirection: 'row', alignItems: 'center',
-    backgroundColor: '#fff', borderRadius: 14, padding: 16, marginBottom: 12,
-    shadowColor: '#000', shadowOpacity: 0.05,
-    shadowOffset: { width: 0, height: 1 }, shadowRadius: 3, elevation: 1,
+    padding: 16, marginBottom: 12,
+    shadowOpacity: 0.05, shadowOffset: { width: 0, height: 1 }, shadowRadius: 3, elevation: 1,
   },
   bookCardLeft: { flex: 1 },
-  bookCardTitle: { fontSize: 16, color: '#1a1a2e', fontWeight: '700', marginBottom: 4 },
-  bookCardMeta: { fontSize: 12, color: '#8a95b0' },
-  bookCardArrow: { fontSize: 22, color: '#c0c6d6', marginLeft: 8 },
+  bookCardTitle: { fontSize: 16, fontWeight: '700', marginBottom: 4 },
+  bookCardMeta: { fontSize: 12 },
+  bookCardArrow: { fontSize: 22, marginLeft: 8 },
 
   centerBox: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingTop: 80 },
-  emptyText: { color: '#b0b8cc', fontSize: 14, textAlign: 'center', lineHeight: 22 },
-  errorText: { color: '#f7564f', fontSize: 14, textAlign: 'center', paddingHorizontal: 24 },
-  retryBtn: {
-    marginTop: 16, paddingHorizontal: 20, paddingVertical: 10,
-    backgroundColor: BLUE, borderRadius: 10,
-  },
-  retryText: { color: '#fff', fontWeight: '600' },
+  emptyText: { fontSize: 14, textAlign: 'center', lineHeight: 22 },
+  errorText: { fontSize: 14, textAlign: 'center', paddingHorizontal: 24 },
+  retryBtn: { marginTop: 16, paddingHorizontal: 20, paddingVertical: 10 },
+  retryText: { fontWeight: '600' },
 });

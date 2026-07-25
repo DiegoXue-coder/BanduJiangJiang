@@ -14,8 +14,8 @@ import ReviewScreen from './screens/ReviewScreen';
 import ReviewBookScreen from './screens/ReviewBookScreen';
 import ReviewDetailScreen from './screens/ReviewDetailScreen';
 import ProfileScreen from './screens/ProfileScreen';
+import { useTheme } from './theme';
 
-const BLUE = '#8C5642'; // 阶段十：底部tab选中色跟着新主题走
 const TAB_ICON = { 书架: '📚', 划线复盘: '✍️', 我的: '👤' };
 
 const Tab = createBottomTabNavigator();
@@ -46,13 +46,15 @@ function ReviewStackScreen() {
   );
 }
 
-function getTabBarStyle(route) {
+function getTabBarStyle(route, visibleStyle) {
   const focusedRoute = getFocusedRouteNameFromRoute(route) ?? 'BookshelfHome';
   if (['Reader', 'ReviewBook', 'ReviewDetail'].includes(focusedRoute)) return { display: 'none' };
-  return undefined;
+  return visibleStyle;
 }
 
 export default function App() {
+  const theme = useTheme();
+  const tabBarStyle = { backgroundColor: theme.cardBg, borderTopColor: theme.cardBorder };
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <BottomSheetModalProvider>
@@ -62,8 +64,9 @@ export default function App() {
             <Tab.Navigator
               screenOptions={({ route }) => ({
                 headerShown: false,
-                tabBarActiveTintColor: BLUE,
-                tabBarInactiveTintColor: '#8a95b0',
+                tabBarActiveTintColor: theme.accent,
+                tabBarInactiveTintColor: theme.textMuted,
+                tabBarStyle,
                 tabBarIcon: ({ color }) => (
                   <Text style={{ fontSize: 18, color }}>{TAB_ICON[route.name]}</Text>
                 ),
@@ -72,13 +75,13 @@ export default function App() {
               <Tab.Screen
                 name="书架"
                 component={BookshelfStackScreen}
-                options={({ route }) => ({ tabBarStyle: getTabBarStyle(route) })}
+                options={({ route }) => ({ tabBarStyle: getTabBarStyle(route, tabBarStyle) })}
               />
               <Tab.Screen
                 name="划线复盘"
                 component={ReviewStackScreen}
                 options={({ route }) => ({
-                  tabBarStyle: getTabBarStyle(route),
+                  tabBarStyle: getTabBarStyle(route, tabBarStyle),
                   // 切到别的tab再切回来，要回到总览列表，不能停在上次看的详情页。
                   // 上一版用的 unmountOnBlur 在装的这个 react-navigation 版本里
                   // 根本不存在（凭记忆写的，没查证，等于没修）——查了源码

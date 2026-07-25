@@ -3,9 +3,7 @@ import {
   View, Text, ScrollView, TouchableOpacity, StyleSheet, SafeAreaView, Alert,
 } from 'react-native';
 import { deleteHighlight } from '../lib/api';
-
-const BLUE = '#4f8ef7';
-const AMBER = '#e0952f';
+import { useTheme } from '../theme';
 
 function formatTime(iso) {
   const d = new Date(iso);
@@ -14,6 +12,7 @@ function formatTime(iso) {
 }
 
 export default function ReviewDetailScreen({ route, navigation }) {
+  const theme = useTheme();
   const { item } = route.params;
   const isQa = item.type === 'qa';
   const [deleting, setDeleting] = useState(false);
@@ -53,56 +52,66 @@ export default function ReviewDetailScreen({ route, navigation }) {
   }
 
   return (
-    <SafeAreaView style={styles.safe}>
-      <View style={styles.header}>
+    <SafeAreaView style={[styles.safe, { backgroundColor: theme.bg }]}>
+      <View style={[styles.header, { backgroundColor: theme.accent }]}>
         <TouchableOpacity onPress={() => navigation.goBack()} style={styles.headerBtn}>
-          <Text style={styles.headerBtnText}>‹ 返回</Text>
+          <Text style={[styles.headerBtnText, { color: theme.textOnAccent }]}>‹ 返回</Text>
         </TouchableOpacity>
-        <Text style={styles.headerTitle} numberOfLines={1}>{item.book_title}</Text>
+        <Text style={[styles.headerTitle, { color: theme.textOnAccent }]} numberOfLines={1}>{item.book_title}</Text>
         <View style={styles.headerBtn} />
       </View>
 
       <ScrollView contentContainerStyle={styles.content}>
-        <View style={[styles.tag, isQa ? styles.tagQa : styles.tagHighlight]}>
-          <Text style={[styles.tagText, isQa ? styles.tagTextQa : styles.tagTextHighlight]}>
+        <View style={[
+          styles.tag,
+          { borderRadius: theme.radius, backgroundColor: isQa ? theme.accentSoft : theme.tagSoft },
+        ]}>
+          <Text style={[styles.tagText, { color: isQa ? theme.accent : theme.tag }]}>
             {isQa ? '问答' : '划线'}
           </Text>
         </View>
 
-        <Text style={styles.quoteText}>“{item.text}”</Text>
+        <Text style={[styles.quoteText, { color: theme.text }]}>“{item.text}”</Text>
 
         {isQa && (item.turns || []).map((turn, idx) => (
-          <View key={turn.id} style={idx > 0 ? styles.turnDivider : null}>
-            <Text style={styles.sectionLabel}>第{idx + 1}轮 · 提问</Text>
-            <Text style={styles.bodyText}>{turn.question}</Text>
-            <Text style={styles.sectionLabel}>回答</Text>
-            <Text style={styles.bodyText}>{turn.answer}</Text>
+          <View key={turn.id} style={idx > 0 ? [styles.turnDivider, { borderTopColor: theme.cardBorder }] : null}>
+            <Text style={[styles.sectionLabel, { color: theme.textSecondary }]}>第{idx + 1}轮 · 提问</Text>
+            <Text style={[styles.bodyText, { color: theme.text }]}>{turn.question}</Text>
+            <Text style={[styles.sectionLabel, { color: theme.textSecondary }]}>回答</Text>
+            <Text style={[styles.bodyText, { color: theme.text }]}>{turn.answer}</Text>
           </View>
         ))}
 
         {!!item.related_text && (
-          <View style={styles.relatedBox}>
-            <Text style={styles.relatedText}>
+          <View style={[styles.relatedBox, { borderRadius: theme.radius, backgroundColor: theme.accentSoft }]}>
+            <Text style={[styles.relatedText, { color: theme.accent }]}>
               🔗 与《{item.related_book_title}》里的"{item.related_text}"相关
             </Text>
           </View>
         )}
 
-        <Text style={styles.timeText}>{formatTime(item.created_at)}</Text>
+        <Text style={[styles.timeText, { color: theme.textMuted }]}>{formatTime(item.created_at)}</Text>
 
-        <TouchableOpacity style={styles.jumpBtn} onPress={jumpToOriginal}>
-          <Text style={styles.jumpBtnText}>
+        <TouchableOpacity
+          style={[styles.jumpBtn, { borderRadius: theme.radius, backgroundColor: theme.accent }]}
+          onPress={jumpToOriginal}
+        >
+          <Text style={[styles.jumpBtnText, { color: theme.textOnAccent }]}>
             {item.cfi_location ? '📖 跳转到原文位置' : '📖 打开这本书（无法精确定位到原段落）'}
           </Text>
         </TouchableOpacity>
 
         {!isQa && (
           <TouchableOpacity
-            style={[styles.deleteBtn, deleting && styles.deleteBtnOff]}
+            style={[
+              styles.deleteBtn,
+              { borderRadius: theme.radius, backgroundColor: theme.cardBg, borderColor: theme.danger },
+              deleting && styles.deleteBtnOff,
+            ]}
             onPress={confirmDelete}
             disabled={deleting}
           >
-            <Text style={styles.deleteBtnText}>{deleting ? '删除中…' : '🗑 删除这条划线'}</Text>
+            <Text style={[styles.deleteBtnText, { color: theme.danger }]}>{deleting ? '删除中…' : '🗑 删除这条划线'}</Text>
           </TouchableOpacity>
         )}
       </ScrollView>
@@ -111,52 +120,35 @@ export default function ReviewDetailScreen({ route, navigation }) {
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: '#f4f6fb' },
+  safe: { flex: 1 },
   header: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     paddingHorizontal: 12, paddingVertical: 10,
-    backgroundColor: BLUE,
   },
   headerBtn: { padding: 6, minWidth: 60 },
-  headerBtnText: { color: '#fff', fontSize: 15, fontWeight: '600' },
-  headerTitle: { flex: 1, textAlign: 'center', color: '#fff', fontSize: 16, fontWeight: '700' },
+  headerBtnText: { fontSize: 15, fontWeight: '600' },
+  headerTitle: { flex: 1, textAlign: 'center', fontSize: 16, fontWeight: '700' },
 
   content: { padding: 20 },
 
-  tag: { alignSelf: 'flex-start', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 3, marginBottom: 14 },
-  tagHighlight: { backgroundColor: '#fff3d6' },
-  tagQa: { backgroundColor: '#e7f0ff' },
+  tag: { alignSelf: 'flex-start', paddingHorizontal: 8, paddingVertical: 3, marginBottom: 14 },
   tagText: { fontSize: 12, fontWeight: '700' },
-  tagTextHighlight: { color: AMBER },
-  tagTextQa: { color: BLUE },
 
-  quoteText: {
-    fontSize: 17, color: '#1a1a2e', lineHeight: 27, fontStyle: 'italic',
-    marginBottom: 20,
-  },
+  quoteText: { fontSize: 17, lineHeight: 27, fontStyle: 'italic', marginBottom: 20 },
 
-  sectionLabel: { fontSize: 12, color: '#8a95b0', fontWeight: '700', marginBottom: 6, marginTop: 12 },
-  turnDivider: { marginTop: 16, paddingTop: 16, borderTopWidth: 1, borderTopColor: '#f0f2f7' },
-  bodyText: { fontSize: 15, color: '#1a1a2e', lineHeight: 24 },
+  sectionLabel: { fontSize: 12, fontWeight: '700', marginBottom: 6, marginTop: 12 },
+  turnDivider: { marginTop: 16, paddingTop: 16, borderTopWidth: 0.5 },
+  bodyText: { fontSize: 15, lineHeight: 24 },
 
-  relatedBox: {
-    marginTop: 20, padding: 12, borderRadius: 10, backgroundColor: '#f2effa',
-  },
-  relatedText: { fontSize: 13, color: '#7a5fb0', lineHeight: 19 },
+  relatedBox: { marginTop: 20, padding: 12 },
+  relatedText: { fontSize: 13, lineHeight: 19 },
 
-  timeText: { fontSize: 12, color: '#c0c6d6', marginTop: 20 },
+  timeText: { fontSize: 12, marginTop: 20 },
 
-  jumpBtn: {
-    marginTop: 24, paddingVertical: 14, borderRadius: 12,
-    backgroundColor: BLUE, alignItems: 'center',
-  },
-  jumpBtnText: { color: '#fff', fontSize: 14, fontWeight: '700' },
+  jumpBtn: { marginTop: 24, paddingVertical: 14, alignItems: 'center' },
+  jumpBtnText: { fontSize: 14, fontWeight: '700' },
 
-  deleteBtn: {
-    marginTop: 12, paddingVertical: 14, borderRadius: 12,
-    backgroundColor: '#fff', alignItems: 'center',
-    borderWidth: 1.5, borderColor: '#f7564f',
-  },
+  deleteBtn: { marginTop: 12, paddingVertical: 14, alignItems: 'center', borderWidth: 1.5 },
   deleteBtnOff: { opacity: 0.5 },
-  deleteBtnText: { color: '#f7564f', fontSize: 14, fontWeight: '700' },
+  deleteBtnText: { fontSize: 14, fontWeight: '700' },
 });

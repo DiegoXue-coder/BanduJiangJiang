@@ -12,8 +12,6 @@ import {
 import { useTheme } from '../theme';
 import BookChatScreen from './BookChatScreen';
 
-const BLUE = '#8C5642';
-
 // 三套主题：亮色 / 暖纸色（护眼） / 深色，对应范围声明里确认的阅读体验要求
 const THEMES = {
   light: { body: { background: '#ffffff', color: '#1a1a2e' } },
@@ -164,11 +162,11 @@ function ReaderInner({
       </View>
 
       <Modal visible={showToc} animationType="slide" onRequestClose={() => setShowToc(false)}>
-        <SafeAreaView style={styles.tocSafe}>
-          <View style={styles.tocHeader}>
-            <Text style={styles.tocHeaderTitle}>目录</Text>
+        <SafeAreaView style={[styles.tocSafe, { backgroundColor: uiTheme.bg }]}>
+          <View style={[styles.tocHeader, { borderBottomColor: uiTheme.cardBorder }]}>
+            <Text style={[styles.tocHeaderTitle, { color: uiTheme.text }]}>目录</Text>
             <TouchableOpacity onPress={() => setShowToc(false)} style={styles.tocCloseBtn}>
-              <Text style={styles.tocCloseBtnText}>完成</Text>
+              <Text style={[styles.tocCloseBtnText, { color: uiTheme.accent }]}>完成</Text>
             </TouchableOpacity>
           </View>
           <FlatList
@@ -176,13 +174,13 @@ function ReaderInner({
             keyExtractor={(item, idx) => item.id || String(idx)}
             renderItem={({ item }) => (
               <TouchableOpacity
-                style={styles.tocItem}
+                style={[styles.tocItem, { borderBottomColor: uiTheme.cardBorder }]}
                 onPress={() => {
                   goToTocItem(item.href);
                   setShowToc(false);
                 }}
               >
-                <Text style={styles.tocItemText}>{item.label?.trim()}</Text>
+                <Text style={[styles.tocItemText, { color: uiTheme.text }]}>{item.label?.trim()}</Text>
               </TouchableOpacity>
             )}
           />
@@ -218,8 +216,8 @@ function ReaderInner({
         ]}
         renderLoadingFileComponent={() => (
           <View style={styles.centerBox}>
-            <ActivityIndicator size="large" color={BLUE} />
-            <Text style={styles.loadingText}>正在下载书本…</Text>
+            <ActivityIndicator size="large" color={uiTheme.accent} />
+            <Text style={[styles.loadingText, { color: uiTheme.textSecondary }]}>正在下载书本…</Text>
           </View>
         )}
       />
@@ -288,6 +286,7 @@ export default function ReaderScreen({ route, navigation }) {
   // 主动跳转（initialLocation 那套只在首次挂载时生效）。jumpNonce 每次点击"跳转
   // 到原文位置"都会变，保证哪怕连续两次跳同一个位置也真的会触发。
   const { bookId, initialCfi, jumpNonce } = route.params;
+  const theme = useTheme();
   const [ctx, setCtx] = useState(null);
   const [highlights, setHighlights] = useState(null);
   const [error, setError] = useState('');
@@ -306,11 +305,11 @@ export default function ReaderScreen({ route, navigation }) {
 
   if (error) {
     return (
-      <SafeAreaView style={styles.safe}>
+      <SafeAreaView style={[styles.safe, { backgroundColor: theme.bg }]}>
         <View style={styles.centerBox}>
-          <Text style={styles.errorText}>打开失败：{error}</Text>
-          <TouchableOpacity style={styles.retryBtn} onPress={() => navigation.goBack()}>
-            <Text style={styles.retryText}>返回书架</Text>
+          <Text style={[styles.errorText, { color: theme.danger }]}>打开失败：{error}</Text>
+          <TouchableOpacity style={[styles.retryBtn, { backgroundColor: theme.accent, borderRadius: theme.radius }]} onPress={() => navigation.goBack()}>
+            <Text style={[styles.retryText, { color: theme.textOnAccent }]}>返回书架</Text>
           </TouchableOpacity>
         </View>
       </SafeAreaView>
@@ -319,9 +318,9 @@ export default function ReaderScreen({ route, navigation }) {
 
   if (!ctx || !highlights) {
     return (
-      <SafeAreaView style={styles.safe}>
+      <SafeAreaView style={[styles.safe, { backgroundColor: theme.bg }]}>
         <View style={styles.centerBox}>
-          <ActivityIndicator size="large" color={BLUE} />
+          <ActivityIndicator size="large" color={theme.accent} />
         </View>
       </SafeAreaView>
     );
@@ -342,56 +341,48 @@ export default function ReaderScreen({ route, navigation }) {
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: '#fff' },
+  safe: { flex: 1 },
   header: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     paddingHorizontal: 12, paddingVertical: 10,
-    backgroundColor: BLUE,
   },
   headerBtn: { padding: 6, minWidth: 36 },
-  headerBtnText: { color: '#fff', fontSize: 15, fontWeight: '600' },
-  headerTitle: { flex: 1, textAlign: 'center', color: '#fff', fontSize: 16, fontWeight: '700' },
+  headerBtnText: { fontSize: 15, fontWeight: '600' },
+  headerTitle: { flex: 1, textAlign: 'center', fontSize: 16, fontWeight: '700' },
   headerRight: { flexDirection: 'row', alignItems: 'center' },
 
   centerBox: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12 },
-  loadingText: { color: '#8a95b0', fontSize: 13 },
-  errorText: { color: '#f7564f', fontSize: 14, textAlign: 'center', paddingHorizontal: 24 },
-  retryBtn: {
-    marginTop: 16, paddingHorizontal: 20, paddingVertical: 10,
-    backgroundColor: BLUE, borderRadius: 10,
-  },
-  retryText: { color: '#fff', fontWeight: '600' },
+  loadingText: { fontSize: 13 },
+  errorText: { fontSize: 14, textAlign: 'center', paddingHorizontal: 24 },
+  retryBtn: { marginTop: 16, paddingHorizontal: 20, paddingVertical: 10 },
+  retryText: { fontWeight: '600' },
 
   selectionBar: {
     position: 'absolute', left: 12, right: 12, bottom: 24,
-    backgroundColor: '#1a1a2eee', borderRadius: 14,
     paddingVertical: 10, paddingHorizontal: 14,
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     shadowColor: '#000', shadowOpacity: 0.2,
     shadowOffset: { width: 0, height: 2 }, shadowRadius: 6, elevation: 4,
   },
-  selectionBarText: { flex: 1, color: '#dcdce6', fontSize: 13, marginRight: 10 },
+  selectionBarText: { flex: 1, fontSize: 13, marginRight: 10 },
   selectionBarActions: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  selectionBtn: {
-    paddingHorizontal: 12, paddingVertical: 7, borderRadius: 8,
-    backgroundColor: BLUE,
-  },
-  selectionBtnText: { color: '#fff', fontSize: 13, fontWeight: '600' },
+  selectionBtn: { paddingHorizontal: 12, paddingVertical: 7 },
+  selectionBtnText: { fontSize: 13, fontWeight: '600' },
   selectionCloseBtn: { paddingHorizontal: 6, paddingVertical: 7 },
-  selectionCloseBtnText: { color: '#8a95b0', fontSize: 15 },
+  selectionCloseBtnText: { fontSize: 15 },
 
-  tocSafe: { flex: 1, backgroundColor: '#fff' },
+  tocSafe: { flex: 1 },
   tocHeader: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     paddingHorizontal: 16, paddingVertical: 14,
-    borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#dde3f0',
+    borderBottomWidth: StyleSheet.hairlineWidth,
   },
-  tocHeaderTitle: { fontSize: 17, fontWeight: '700', color: '#1a1a2e' },
+  tocHeaderTitle: { fontSize: 17, fontWeight: '700' },
   tocCloseBtn: { padding: 4 },
-  tocCloseBtnText: { color: BLUE, fontSize: 15, fontWeight: '600' },
+  tocCloseBtnText: { fontSize: 15, fontWeight: '600' },
   tocItem: {
     paddingHorizontal: 16, paddingVertical: 14,
-    borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#f0f2f7',
+    borderBottomWidth: StyleSheet.hairlineWidth,
   },
-  tocItemText: { fontSize: 15, color: '#1a1a2e' },
+  tocItemText: { fontSize: 15 },
 });

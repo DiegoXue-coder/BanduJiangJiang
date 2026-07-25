@@ -5,21 +5,21 @@
 import React from 'react';
 import { View, Text, FlatList, StyleSheet, SafeAreaView, TouchableOpacity } from 'react-native';
 import { ReviewCard } from '../components/ReviewCard';
-
-const BLUE = '#4f8ef7';
+import { useTheme } from '../theme';
 
 export default function ReviewBookScreen({ route, navigation }) {
+  const theme = useTheme();
   const { bookTitle, tabLabel, items } = route.params;
 
   return (
-    <SafeAreaView style={styles.safe}>
-      <View style={styles.header}>
+    <SafeAreaView style={[styles.safe, { backgroundColor: theme.bg }]}>
+      <View style={[styles.header, { backgroundColor: theme.accent }]}>
         <TouchableOpacity onPress={() => navigation.goBack()} style={styles.headerBtn}>
-          <Text style={styles.headerBtnText}>‹ 返回</Text>
+          <Text style={[styles.headerBtnText, { color: theme.textOnAccent }]}>‹ 返回</Text>
         </TouchableOpacity>
         <View style={styles.headerCenter}>
-          <Text style={styles.headerTitle} numberOfLines={1}>{bookTitle}</Text>
-          <Text style={styles.headerSubtitle}>{tabLabel} · 共{items.length}条</Text>
+          <Text style={[styles.headerTitle, { color: theme.textOnAccent }]} numberOfLines={1}>{bookTitle}</Text>
+          <Text style={[styles.headerSubtitle, { color: theme.accentSoft }]}>{tabLabel} · 共{items.length}条</Text>
         </View>
         <View style={styles.headerBtn} />
       </View>
@@ -37,17 +37,16 @@ export default function ReviewBookScreen({ route, navigation }) {
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: '#f4f6fb' },
+  safe: { flex: 1 },
   header: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     paddingHorizontal: 12, paddingVertical: 10,
-    backgroundColor: BLUE,
   },
   headerBtn: { padding: 6, minWidth: 60 },
-  headerBtnText: { color: '#fff', fontSize: 15, fontWeight: '600' },
+  headerBtnText: { fontSize: 15, fontWeight: '600' },
   headerCenter: { flex: 1, alignItems: 'center' },
-  headerTitle: { color: '#fff', fontSize: 16, fontWeight: '700' },
-  headerSubtitle: { color: '#dce6fb', fontSize: 11, marginTop: 2 },
+  headerTitle: { fontSize: 16, fontWeight: '700' },
+  headerSubtitle: { fontSize: 11, marginTop: 2 },
 
   listContent: { padding: 16, flexGrow: 1 },
 });
