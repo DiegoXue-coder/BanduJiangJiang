@@ -95,7 +95,7 @@ export default function App() {
                   tabBarStyle,
                   tabBarIcon: ({ color, size }) => {
                     const IconComponent = TAB_ICON_COMPONENT[route.name];
-                    return <IconComponent color={color} size={size} stroke={1.75} />;
+                    return <IconComponent color={color} size={size} strokeWidth={1.75} />;
                   },
                 })}
               >

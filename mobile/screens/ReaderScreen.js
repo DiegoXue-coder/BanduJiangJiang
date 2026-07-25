@@ -236,16 +236,16 @@ function ReaderInner({
         <Text style={[styles.headerTitle, { color: uiTheme.textOnAccent }]} numberOfLines={1}>{bookTitle}</Text>
         <View style={styles.headerRight}>
           <TouchableOpacity onPress={toggleFontSizePanel} style={styles.headerBtn}>
-            <IconTextSize color={uiTheme.textOnAccent} size={22} stroke={1.75} />
+            <IconTextSize color={uiTheme.textOnAccent} size={22} strokeWidth={1.75} />
           </TouchableOpacity>
           <TouchableOpacity onPress={() => setShowToc(true)} style={styles.headerBtn}>
-            <IconList color={uiTheme.textOnAccent} size={22} stroke={1.75} />
+            <IconList color={uiTheme.textOnAccent} size={22} strokeWidth={1.75} />
           </TouchableOpacity>
           <TouchableOpacity onPress={() => openChat()} style={styles.headerBtn}>
-            <IconMessageCircle color={uiTheme.textOnAccent} size={22} stroke={1.75} />
+            <IconMessageCircle color={uiTheme.textOnAccent} size={22} strokeWidth={1.75} />
           </TouchableOpacity>
           <TouchableOpacity onPress={toggleThemePanel} style={styles.headerBtn}>
-            <IconBrightness color={uiTheme.textOnAccent} size={22} stroke={1.75} />
+            <IconBrightness color={uiTheme.textOnAccent} size={22} strokeWidth={1.75} />
           </TouchableOpacity>
         </View>
       </View>
