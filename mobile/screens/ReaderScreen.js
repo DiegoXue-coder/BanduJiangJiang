@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  View, Text, TouchableOpacity, StyleSheet, SafeAreaView, ActivityIndicator, Alert,
+  View, Text, TouchableOpacity, StyleSheet, ActivityIndicator, Alert,
   Modal, FlatList,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { Reader, useReader } from '@epubjs-react-native/core';
 import { useFileSystem } from '@epubjs-react-native/expo-file-system';
 import { BottomSheetModal, BottomSheetBackdrop } from '@gorhom/bottom-sheet';

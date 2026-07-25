@@ -7,7 +7,7 @@ import {
   View, Text, TextInput, TouchableOpacity,
   StyleSheet, Alert,
 } from 'react-native';
-import { BottomSheetScrollView } from '@gorhom/bottom-sheet';
+import { BottomSheetScrollView, BottomSheetView } from '@gorhom/bottom-sheet';
 import { Audio } from 'expo-av';
 import * as FileSystem from 'expo-file-system/legacy';
 import {
@@ -404,7 +404,7 @@ export default function BookChatScreen({
   }
 
   return (
-    <View style={[styles.root, { backgroundColor: theme.bg }]}>
+    <BottomSheetView style={[styles.root, { backgroundColor: theme.bg }]}>
       <View style={styles.topRow}>
         <TouchableOpacity onPress={toggleTts} style={styles.topBtn}>
           <Text style={[styles.topBtnText, { color: theme.textSecondary }]}>{ttsOn ? '🔊' : '🔇'}</Text>
@@ -527,7 +527,7 @@ export default function BookChatScreen({
           <Text style={[styles.sendText, { color: theme.textOnAccent }]}>发送</Text>
         </TouchableOpacity>
       </View>
-    </View>
+    </BottomSheetView>
   );
 }
 

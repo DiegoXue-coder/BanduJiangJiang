@@ -1,6 +1,7 @@
 import React from 'react';
 import { Text } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { BottomSheetModalProvider } from '@gorhom/bottom-sheet';
 import { StatusBar } from 'expo-status-bar';
 import { NavigationContainer, getFocusedRouteNameFromRoute } from '@react-navigation/native';
@@ -56,47 +57,49 @@ export default function App() {
   const theme = useTheme();
   const tabBarStyle = { backgroundColor: theme.cardBg, borderTopColor: theme.cardBorder };
   return (
-    <GestureHandlerRootView style={{ flex: 1 }}>
-      <BottomSheetModalProvider>
-        <ReaderProvider>
-          <NavigationContainer>
-            <StatusBar style="auto" />
-            <Tab.Navigator
-              screenOptions={({ route }) => ({
-                headerShown: false,
-                tabBarActiveTintColor: theme.accent,
-                tabBarInactiveTintColor: theme.textMuted,
-                tabBarStyle,
-                tabBarIcon: ({ color }) => (
-                  <Text style={{ fontSize: 18, color }}>{TAB_ICON[route.name]}</Text>
-                ),
-              })}
-            >
-              <Tab.Screen
-                name="书架"
-                component={BookshelfStackScreen}
-                options={({ route }) => ({ tabBarStyle: getTabBarStyle(route, tabBarStyle) })}
-              />
-              <Tab.Screen
-                name="划线复盘"
-                component={ReviewStackScreen}
-                options={({ route }) => ({
-                  tabBarStyle: getTabBarStyle(route, tabBarStyle),
-                  // 切到别的tab再切回来，要回到总览列表，不能停在上次看的详情页。
-                  // 上一版用的 unmountOnBlur 在装的这个 react-navigation 版本里
-                  // 根本不存在（凭记忆写的，没查证，等于没修）——查了源码
-                  // （@react-navigation/bottom-tabs 的 BottomTabView.js）确认
-                  // popToTopOnBlur 才是这个版本真正支持、专门给"tab下面挂了个
-                  // stack 导航"这种场景设计的选项：离开这个tab时把嵌套的 stack
-                  // pop 回第一页（ReviewHome）。
-                  popToTopOnBlur: true,
+    <SafeAreaProvider>
+      <GestureHandlerRootView style={{ flex: 1 }}>
+        <BottomSheetModalProvider>
+          <ReaderProvider>
+            <NavigationContainer>
+              <StatusBar style="auto" />
+              <Tab.Navigator
+                screenOptions={({ route }) => ({
+                  headerShown: false,
+                  tabBarActiveTintColor: theme.accent,
+                  tabBarInactiveTintColor: theme.textMuted,
+                  tabBarStyle,
+                  tabBarIcon: ({ color }) => (
+                    <Text style={{ fontSize: 18, color }}>{TAB_ICON[route.name]}</Text>
+                  ),
                 })}
-              />
-              <Tab.Screen name="我的" component={ProfileScreen} />
-            </Tab.Navigator>
-          </NavigationContainer>
-        </ReaderProvider>
-      </BottomSheetModalProvider>
-    </GestureHandlerRootView>
+              >
+                <Tab.Screen
+                  name="书架"
+                  component={BookshelfStackScreen}
+                  options={({ route }) => ({ tabBarStyle: getTabBarStyle(route, tabBarStyle) })}
+                />
+                <Tab.Screen
+                  name="划线复盘"
+                  component={ReviewStackScreen}
+                  options={({ route }) => ({
+                    tabBarStyle: getTabBarStyle(route, tabBarStyle),
+                    // 切到别的tab再切回来，要回到总览列表，不能停在上次看的详情页。
+                    // 上一版用的 unmountOnBlur 在装的这个 react-navigation 版本里
+                    // 根本不存在（凭记忆写的，没查证，等于没修）——查了源码
+                    // （@react-navigation/bottom-tabs 的 BottomTabView.js）确认
+                    // popToTopOnBlur 才是这个版本真正支持、专门给"tab下面挂了个
+                    // stack 导航"这种场景设计的选项：离开这个tab时把嵌套的 stack
+                    // pop 回第一页（ReviewHome）。
+                    popToTopOnBlur: true,
+                  })}
+                />
+                <Tab.Screen name="我的" component={ProfileScreen} />
+              </Tab.Navigator>
+            </NavigationContainer>
+          </ReaderProvider>
+        </BottomSheetModalProvider>
+      </GestureHandlerRootView>
+    </SafeAreaProvider>
   );
 }
