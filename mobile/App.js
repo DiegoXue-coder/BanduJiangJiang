@@ -1,5 +1,4 @@
 import React from 'react';
-import { Text } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { BottomSheetModalProvider } from '@gorhom/bottom-sheet';
@@ -8,6 +7,7 @@ import { NavigationContainer, getFocusedRouteNameFromRoute } from '@react-naviga
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { ReaderProvider } from '@epubjs-react-native/core';
+import { IconBooks, IconHighlight, IconUserCircle } from '@tabler/icons-react-native';
 
 import BookshelfScreen from './screens/BookshelfScreen';
 import ReaderScreen from './screens/ReaderScreen';
@@ -17,7 +17,8 @@ import ReviewDetailScreen from './screens/ReviewDetailScreen';
 import ProfileScreen from './screens/ProfileScreen';
 import { useTheme } from './theme';
 
-const TAB_ICON = { 书架: '📚', 划线复盘: '✍️', 我的: '👤' };
+// 阶段十一：底部tab从emoji换成Tabler Icons（MIT协议，免费商用）
+const TAB_ICON_COMPONENT = { 书架: IconBooks, 划线复盘: IconHighlight, 我的: IconUserCircle };
 
 const Tab = createBottomTabNavigator();
 const BookshelfStack = createNativeStackNavigator();
@@ -69,9 +70,10 @@ export default function App() {
                   tabBarActiveTintColor: theme.accent,
                   tabBarInactiveTintColor: theme.textMuted,
                   tabBarStyle,
-                  tabBarIcon: ({ color }) => (
-                    <Text style={{ fontSize: 18, color }}>{TAB_ICON[route.name]}</Text>
-                  ),
+                  tabBarIcon: ({ color, size }) => {
+                    const IconComponent = TAB_ICON_COMPONENT[route.name];
+                    return <IconComponent color={color} size={size} stroke={1.75} />;
+                  },
                 })}
               >
                 <Tab.Screen
