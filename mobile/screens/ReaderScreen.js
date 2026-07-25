@@ -72,10 +72,10 @@ function ReaderInner({
   // chatParams 存这次要问的划线原文+cfi，present() 弹出面板时用。
   const [chatParams, setChatParams] = useState({ selection: '', cfiRange: '' });
   const chatSheetRef = useRef(null);
-  // 临时诊断：先固定给一个明显够大的单一高度，排查"默认高度不够"还是
-  // "别的更深层的定位/裁切问题"——排查完确定方向后要按验收标准的
-  // 65%~78%范围改回去，这不是最终值。
-  const chatSnapPoints = useMemo(() => ['85%'], []);
+  // 诊断确认过：默认65%装不下完整内容，85%可以——回到验收标准要求的
+  // 65%~78%区间，默认打开用较高的78%那档（78%比诊断用的85%略矮，但比
+  // 原来不够用的65%高很多），两档保留，用户仍然可以手动拖拽到较矮的65%。
+  const chatSnapPoints = useMemo(() => ['65%', '78%'], []);
   // 章节目录：epub.js 自动生成的导航页只有第一次打开书时会经过，选了某一章
   // 之后就没有入口再回去挑别的章节——加一个常驻的目录按钮，不依赖那个只会
   // 出现一次的自动导航页
@@ -260,7 +260,7 @@ function ReaderInner({
       <BottomSheetModal
         ref={chatSheetRef}
         snapPoints={chatSnapPoints}
-        index={0}
+        index={1}
         enableDynamicSizing={false}
         enablePanDownToClose
         backgroundStyle={{ backgroundColor: uiTheme.bg, borderTopLeftRadius: 16, borderTopRightRadius: 16 }}

@@ -512,7 +512,7 @@ export default function BookChatScreen({
       {/* 输入区绝对定位钉在面板底部——不依赖上面几层容器 flex 高度算得准不准，
           消息区多长都不会把它挤走。msgContent 的 paddingBottom 留够这块的高度，
           避免最后几条消息被这里挡住。 */}
-      <View style={[styles.footerGroup, { backgroundColor: '#FF00FF', bottom: keyboardHeight }]}>
+      <View style={[styles.footerGroup, { backgroundColor: theme.bg, bottom: keyboardHeight }]}>
         {!!status && <Text style={[styles.status, { color: theme.textMuted }]} numberOfLines={2}>{status}</Text>}
 
         {(isThinking || isSpeaking) && (
