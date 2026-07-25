@@ -3,7 +3,7 @@ import {
   View, Text, TouchableOpacity, StyleSheet, ActivityIndicator, Alert,
   Modal, FlatList,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Reader, useReader } from '@epubjs-react-native/core';
 import { useFileSystem } from '@epubjs-react-native/expo-file-system';
 import { BottomSheetModal, BottomSheetBackdrop } from '@gorhom/bottom-sheet';
@@ -64,6 +64,7 @@ function ReaderInner({
     `);
   }
   const uiTheme = useTheme();
+  const insets = useSafeAreaInsets();
   const [themeName, setThemeName] = useState('light');
   const [currentSectionTitle, setCurrentSectionTitle] = useState('');
   const [isReady, setIsReady] = useState(false);
@@ -143,8 +144,8 @@ function ReaderInner({
   }
 
   return (
-    <SafeAreaView style={[styles.safe, { backgroundColor: THEMES[themeName].body.background }]}>
-      <View style={[styles.header, { backgroundColor: uiTheme.accent }]}>
+    <SafeAreaView edges={['bottom', 'left', 'right']} style={[styles.safe, { backgroundColor: THEMES[themeName].body.background }]}>
+      <View style={[styles.header, { backgroundColor: uiTheme.accent, paddingTop: insets.top + 10 }]}>
         <TouchableOpacity onPress={() => navigation.goBack()} style={styles.headerBtn}>
           <Text style={[styles.headerBtnText, { color: uiTheme.textOnAccent }]}>‹ 书架</Text>
         </TouchableOpacity>

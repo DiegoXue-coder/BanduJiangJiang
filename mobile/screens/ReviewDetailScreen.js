@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import {
-  View, Text, ScrollView, TouchableOpacity, StyleSheet, SafeAreaView, Alert,
+  View, Text, ScrollView, TouchableOpacity, StyleSheet, Alert,
 } from 'react-native';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { deleteHighlight } from '../lib/api';
 import { useTheme } from '../theme';
 
@@ -13,6 +14,7 @@ function formatTime(iso) {
 
 export default function ReviewDetailScreen({ route, navigation }) {
   const theme = useTheme();
+  const insets = useSafeAreaInsets();
   const { item } = route.params;
   const isQa = item.type === 'qa';
   const [deleting, setDeleting] = useState(false);
@@ -52,8 +54,8 @@ export default function ReviewDetailScreen({ route, navigation }) {
   }
 
   return (
-    <SafeAreaView style={[styles.safe, { backgroundColor: theme.bg }]}>
-      <View style={[styles.header, { backgroundColor: theme.accent }]}>
+    <SafeAreaView edges={['bottom', 'left', 'right']} style={[styles.safe, { backgroundColor: theme.bg }]}>
+      <View style={[styles.header, { backgroundColor: theme.accent, paddingTop: insets.top + 10 }]}>
         <TouchableOpacity onPress={() => navigation.goBack()} style={styles.headerBtn}>
           <Text style={[styles.headerBtnText, { color: theme.textOnAccent }]}>‹ 返回</Text>
         </TouchableOpacity>

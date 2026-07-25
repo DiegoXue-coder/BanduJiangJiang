@@ -1,8 +1,9 @@
 import React, { useCallback, useMemo, useState } from 'react';
 import {
   View, Text, FlatList, StyleSheet,
-  ActivityIndicator, RefreshControl, SafeAreaView, TouchableOpacity,
+  ActivityIndicator, RefreshControl, TouchableOpacity,
 } from 'react-native';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import { getReview } from '../lib/api';
 import { ReviewCard, formatTime } from '../components/ReviewCard';
@@ -62,6 +63,7 @@ function BookCard({ group, onPress, theme }) {
 
 export default function ReviewScreen({ navigation }) {
   const theme = useTheme();
+  const insets = useSafeAreaInsets();
   const [items, setItems]     = useState(null); // null = 加载中
   const [error, setError]     = useState('');
   const [refreshing, setRefreshing] = useState(false);
@@ -114,8 +116,8 @@ export default function ReviewScreen({ navigation }) {
 
   if (items === null && !error) {
     return (
-      <SafeAreaView style={[styles.safe, { backgroundColor: theme.bg }]}>
-        <View style={[styles.header, { backgroundColor: theme.accent }]}>
+      <SafeAreaView edges={['bottom', 'left', 'right']} style={[styles.safe, { backgroundColor: theme.bg }]}>
+        <View style={[styles.header, { backgroundColor: theme.accent, paddingTop: insets.top + 14 }]}>
           <Text style={[styles.headerTitle, { color: theme.textOnAccent }]}>划线复盘</Text>
         </View>
         <View style={styles.centerBox}>
@@ -127,8 +129,8 @@ export default function ReviewScreen({ navigation }) {
 
   if (error && items === null) {
     return (
-      <SafeAreaView style={[styles.safe, { backgroundColor: theme.bg }]}>
-        <View style={[styles.header, { backgroundColor: theme.accent }]}>
+      <SafeAreaView edges={['bottom', 'left', 'right']} style={[styles.safe, { backgroundColor: theme.bg }]}>
+        <View style={[styles.header, { backgroundColor: theme.accent, paddingTop: insets.top + 14 }]}>
           <Text style={[styles.headerTitle, { color: theme.textOnAccent }]}>划线复盘</Text>
         </View>
         <View style={styles.centerBox}>
@@ -142,8 +144,8 @@ export default function ReviewScreen({ navigation }) {
   }
 
   return (
-    <SafeAreaView style={[styles.safe, { backgroundColor: theme.bg }]}>
-      <View style={[styles.header, { backgroundColor: theme.accent }]}>
+    <SafeAreaView edges={['bottom', 'left', 'right']} style={[styles.safe, { backgroundColor: theme.bg }]}>
+      <View style={[styles.header, { backgroundColor: theme.accent, paddingTop: insets.top + 14 }]}>
         <Text style={[styles.headerTitle, { color: theme.textOnAccent }]}>划线复盘</Text>
       </View>
       {tabBar}

@@ -1,8 +1,9 @@
 import React, { useCallback, useState } from 'react';
 import {
   View, Text, FlatList, TouchableOpacity, StyleSheet,
-  ActivityIndicator, RefreshControl, SafeAreaView,
+  ActivityIndicator, RefreshControl,
 } from 'react-native';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import { getLibrary } from '../lib/api';
 import { useTheme } from '../theme';
@@ -34,6 +35,7 @@ function BookCard({ book, onPress, theme }) {
 
 export default function BookshelfScreen({ navigation }) {
   const theme = useTheme();
+  const insets = useSafeAreaInsets();
   const [books, setBooks]   = useState(null); // null = 加载中
   const [error, setError]   = useState('');
   const [refreshing, setRefreshing] = useState(false);
@@ -78,8 +80,8 @@ export default function BookshelfScreen({ navigation }) {
   }
 
   return (
-    <SafeAreaView style={[styles.safe, { backgroundColor: theme.bg }]}>
-      <View style={[styles.header, { backgroundColor: theme.accent }]}>
+    <SafeAreaView edges={['bottom', 'left', 'right']} style={[styles.safe, { backgroundColor: theme.bg }]}>
+      <View style={[styles.header, { backgroundColor: theme.accent, paddingTop: insets.top + 14 }]}>
         <Text style={[styles.headerTitle, { color: theme.textOnAccent }]}>书架</Text>
       </View>
       <FlatList

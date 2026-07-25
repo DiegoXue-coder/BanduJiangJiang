@@ -8,6 +8,7 @@ import {
   StyleSheet, Alert,
 } from 'react-native';
 import { BottomSheetScrollView, BottomSheetView } from '@gorhom/bottom-sheet';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Audio } from 'expo-av';
 import * as FileSystem from 'expo-file-system/legacy';
 import {
@@ -54,6 +55,7 @@ export default function BookChatScreen({
   bookId, bookTitle, author, chapterTitle, selection = '', cfiRange = '', onClose,
 }) {
   const theme = useTheme();
+  const insets = useSafeAreaInsets();
   const [messages, setMessages]     = useState([]);
   const [input, setInput]           = useState('');
   const [status, setStatus]         = useState('');
@@ -495,7 +497,10 @@ export default function BookChatScreen({
         </TouchableOpacity>
       )}
 
-      <View style={[styles.inputRow, { backgroundColor: theme.cardBg, borderTopColor: theme.cardBorder }]}>
+      <View style={[
+        styles.inputRow,
+        { backgroundColor: theme.cardBg, borderTopColor: theme.cardBorder, paddingBottom: insets.bottom + 10 },
+      ]}>
         <TouchableOpacity
           style={[styles.voiceBtn, { backgroundColor: isRecording ? theme.danger : theme.accent }]}
           onPress={toggleRecording}
@@ -588,7 +593,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center',
     paddingHorizontal: 12, paddingVertical: 10, gap: 8,
     borderTopWidth: StyleSheet.hairlineWidth,
-    paddingBottom: 24, // 面板底部留白，避免贴着手机底部安全区/home indicator
+    // 真正的底部留白改成用 insets.bottom 动态算（见渲染处的内联style），
+    // 这里的固定值只是兜底，理论上总会被内联的动态值覆盖掉
+    paddingBottom: 24,
   },
   voiceBtn: {
     width: 44, height: 44, borderRadius: 22,
