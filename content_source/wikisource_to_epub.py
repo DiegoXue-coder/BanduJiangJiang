@@ -120,10 +120,45 @@ def build_multi_page_book(index_title, dst_path, book_title, author):
     return chapters
 
 
+# 阶段十一排查"划线选字成功率因书而异"发现：《中庸》比《大学》明显更容易
+# 选字失败，对比两本书实际生成的EPUB章节HTML，两者markup结构（单个<h1>+
+# 若干<p>）完全一样，唯一实质差异是章节切分粒度——原来"每个自然段落独立成一
+# 章"这个规则不设下限，《中庸》按wikisource原文的自然分段切出34章、平均400字/
+# 章、其中4章不到100字（最短仅37字）；《大学》切出11章、平均603字/章、最短
+# 也有118字。过短的单段文字块独立成一个WebView渲染单元后，长按拖动选字明显
+# 更容易触发已知的"250ms防抖+selectionchange事件时机不稳定"这个epub.js底层
+# 限制——不是《中庸》这本书本身有什么特殊问题，是切分规则对短段落不友好。
+# 用一个最小字数合并短段落，不再无脑按每个自然段落独立切章。
+MIN_CHAPTER_CHARS = 150
+
+
+def _merge_short_paragraphs(paragraphs, min_chars=MIN_CHAPTER_CHARS):
+    """把过短的自然段落并入相邻段落，直到攒够 min_chars 才切出一章。
+    结尾如果还剩一截不够长的尾巴，并进上一章（没有上一章就单独成章，
+    避免整本书内容量本来就很少时反而合并出0章）。
+    """
+    merged = []
+    buffer = ""
+    for p in paragraphs:
+        buffer = f"{buffer}\n{p}" if buffer else p
+        if len(buffer) >= min_chars:
+            merged.append(buffer)
+            buffer = ""
+    if buffer:
+        if merged:
+            merged[-1] = f"{merged[-1]}\n{buffer}"
+        else:
+            merged.append(buffer)
+    return merged
+
+
 def build_single_page_book(page_title, dst_path, book_title, author):
-    """《大学》《中庸》这种：单页原文，按API返回的自然段落切成章节。"""
+    """《大学》《中庸》这种：单页原文，按API返回的自然段落切成章节，段落
+    过短的先合并（见 MIN_CHAPTER_CHARS 注释），避免切出选字体验很差的短章节。
+    """
     text = fetch_extract(page_title)
     paragraphs = [p.strip() for p in text.split("\n") if p.strip()]
+    paragraphs = _merge_short_paragraphs(paragraphs)
     chapters = [(f"第{i+1}节", p) for i, p in enumerate(paragraphs)]
     build_epub(dst_path, book_title, author, chapters)
     return chapters
