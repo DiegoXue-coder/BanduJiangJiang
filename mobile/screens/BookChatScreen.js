@@ -15,6 +15,7 @@ import {
   streamAsk, getTtsPlayUrl, transcribeAudio, saveQaHistory, getHighlights, saveHighlight,
 } from '../lib/api';
 import { useTheme } from '../theme';
+import { FONTS } from '../fonts';
 
 // 按中文/英文句末标点切句——流式回答边生成边攒 buffer，攒够一整句就送去TTS，
 // 不用等全部回答生成完才开口。
@@ -591,7 +592,8 @@ const styles = StyleSheet.create({
     marginHorizontal: 16, marginBottom: 8, padding: 10,
     borderWidth: 0.5, borderRadius: 8,
   },
-  selectionText: { flex: 1, fontSize: 13, fontStyle: 'italic' },
+  // 阶段十一：划线原文（正文引用）用思源宋体，跟对话界面其余部分的黑体区分开
+  selectionText: { flex: 1, fontSize: 13, fontStyle: 'italic', fontFamily: FONTS.serifRegular },
   saveHighlightBtn: { paddingHorizontal: 10, paddingVertical: 6 },
   saveHighlightText: { fontSize: 12, fontWeight: '600' },
 
@@ -641,9 +643,12 @@ const styles = StyleSheet.create({
   },
   voiceIcon: { fontSize: 18 },
 
+  // 阶段十一：这是全App唯一一处TextInput，直接指定字体，没必要为了这一处
+  // 单独打patch改TextInput.js内部逻辑（Text.js那个patch是因为Text用得
+  // 到处都是，不改内部逻辑没法全局生效；这里量级完全不一样）
   textInput: {
     flex: 1, height: 44, paddingHorizontal: 12,
-    fontSize: 14, borderWidth: 1.5,
+    fontSize: 14, borderWidth: 1.5, fontFamily: FONTS.sansRegular,
   },
   sendBtn: {
     height: 44, paddingHorizontal: 16,

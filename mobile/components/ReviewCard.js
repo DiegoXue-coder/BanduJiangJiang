@@ -5,6 +5,7 @@
 import React from 'react';
 import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
 import { useTheme } from '../theme';
+import { FONTS } from '../fonts';
 
 export function formatTime(iso) {
   const d = new Date(iso);
@@ -71,7 +72,8 @@ const styles = StyleSheet.create({
   tagText: { fontSize: 11, fontWeight: '700' },
   bookTitle: { flex: 1, fontSize: 13, fontWeight: '600' },
 
-  quoteText: { fontSize: 15, lineHeight: 22, fontStyle: 'italic' },
+  // 阶段十一：原文引用用思源宋体（衬线体），跟界面其余部分的黑体区分开
+  quoteText: { fontSize: 15, lineHeight: 22, fontStyle: 'italic', fontFamily: FONTS.serifRegular },
 
   answerBox: { marginTop: 8, paddingTop: 8, borderTopWidth: 0.5 },
   answerText: { fontSize: 13, lineHeight: 19 },

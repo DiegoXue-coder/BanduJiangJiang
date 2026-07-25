@@ -8,11 +8,21 @@ import { Reader, useReader } from '@epubjs-react-native/core';
 import { useFileSystem } from '@epubjs-react-native/expo-file-system';
 import { BottomSheetModal, BottomSheetBackdrop } from '@gorhom/bottom-sheet';
 import { IconList, IconMessageCircle, IconBrightness, IconTextSize } from '@tabler/icons-react-native';
+import { Asset } from 'expo-asset';
 import {
   getBookContext, getBookFileUrl, getHighlights, saveHighlight, updateProgress,
 } from '../lib/api';
 import { useTheme } from '../theme';
+import { FONT_ASSETS, FONTS } from '../fonts';
 import BookChatScreen from './BookChatScreen';
+
+// 阶段十一：epub正文（书本原文内容）换成思源宋体——这部分渲染在
+// react-native-webview内部，不是普通RN Text，普通expo-font的useFonts()
+// 对它不生效，需要单独往WebView里注入@font-face引用字体文件的本地路径。
+// 这部分是这次字体改造里唯一没法在任何预览环境验证的部分（epub渲染本身
+// 在这个项目的沙盒预览里一直不稳定，是这个会话里反复记录过的已知限制），
+// 需要真机确认实际效果，若加载失败WebView会静默回退到默认字体，不会白屏。
+const EPUB_SERIF_FONT_FAMILY = 'SourceHanSerifSC';
 
 // 三套主题：亮色 / 暖纸色（护眼） / 深色，对应范围声明里确认的阅读体验要求
 const THEMES = {
@@ -39,7 +49,7 @@ function ReaderInner({
   bookId, bookTitle, author, initialLocation, initialAnnotations, navigation,
   jumpToCfi, jumpNonce,
 }) {
-  const { addAnnotation, changeTheme, changeFontSize, toc, goToLocation, injectJavascript } = useReader();
+  const { addAnnotation, changeTheme, changeFontSize, changeFontFamily, toc, goToLocation, injectJavascript } = useReader();
 
   // 目录跳转不能直接把 toc 里的 href（形如"chap_005.xhtml"）丢给 goToLocation——
   // 那个函数最终是调 epub.js 的 rendition.display(target)，虽然理论上支持
@@ -126,6 +136,32 @@ function ReaderInner({
       addAnnotation('highlight', h.cfi_location, { id: h.id }, { color: '#ffd54f' });
     }
   }
+
+  // 正文换思源宋体：往WebView文档头部插一段@font-face引用字体文件的本地
+  // 资源地址，再用changeFontFamily把它设成正文字体。字体文件是expo静态
+  // 资源，Asset.fromModule().uri开发模式下是Metro的本地HTTP地址、生产
+  // 包里是打包后的本地路径，两种情况WebView都能按URL正常发起请求加载。
+  useEffect(() => {
+    if (!isReady) return;
+    let cancelled = false;
+    Asset.fromModule(FONT_ASSETS[FONTS.serifRegular]).downloadAsync().then((asset) => {
+      if (cancelled || !asset.localUri && !asset.uri) return;
+      const fontUrl = asset.localUri || asset.uri;
+      injectJavascript(`
+        (function() {
+          try {
+            var style = document.createElement('style');
+            style.innerHTML = '@font-face { font-family: "${EPUB_SERIF_FONT_FAMILY}"; src: url("${fontUrl}"); font-weight: normal; }';
+            document.head.appendChild(style);
+          } catch (e) {}
+        })();
+        true;
+      `);
+      changeFontFamily(EPUB_SERIF_FONT_FAMILY);
+    }).catch(() => {}); // 加载失败就静默保留默认字体，不影响阅读
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isReady]);
 
   // "跳转到原文位置"从划线复盘详情页过来——如果这本书已经打开过（Reader 还
   // 挂载在书架堆栈里），只传 initialLocation 不会生效，那个属性很多阅读器

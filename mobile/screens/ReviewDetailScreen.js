@@ -5,6 +5,7 @@ import {
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { deleteHighlight } from '../lib/api';
 import { useTheme } from '../theme';
+import { FONTS } from '../fonts';
 
 function formatTime(iso) {
   const d = new Date(iso);
@@ -136,7 +137,8 @@ const styles = StyleSheet.create({
   tag: { alignSelf: 'flex-start', paddingHorizontal: 8, paddingVertical: 3, marginBottom: 14 },
   tagText: { fontSize: 12, fontWeight: '700' },
 
-  quoteText: { fontSize: 17, lineHeight: 27, fontStyle: 'italic', marginBottom: 20 },
+  // 阶段十一：原文引用用思源宋体（衬线体），跟界面其余部分的黑体区分开
+  quoteText: { fontSize: 17, lineHeight: 27, fontStyle: 'italic', marginBottom: 20, fontFamily: FONTS.serifRegular },
 
   sectionLabel: { fontSize: 12, fontWeight: '700', marginBottom: 6, marginTop: 12 },
   turnDivider: { marginTop: 16, paddingTop: 16, borderTopWidth: 0.5 },

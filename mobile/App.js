@@ -1,8 +1,10 @@
 import React from 'react';
+import { View, ActivityIndicator } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { BottomSheetModalProvider } from '@gorhom/bottom-sheet';
 import { StatusBar } from 'expo-status-bar';
+import { useFonts } from 'expo-font';
 import { NavigationContainer, getFocusedRouteNameFromRoute } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
@@ -16,9 +18,20 @@ import ReviewBookScreen from './screens/ReviewBookScreen';
 import ReviewDetailScreen from './screens/ReviewDetailScreen';
 import ProfileScreen from './screens/ProfileScreen';
 import { useTheme } from './theme';
+import { FONT_ASSETS } from './fonts';
 
 // 阶段十一：底部tab从emoji换成Tabler Icons（MIT协议，免费商用）
 const TAB_ICON_COMPONENT = { 书架: IconBooks, 划线复盘: IconHighlight, 我的: IconUserCircle };
+
+// 全局字体替换——界面元素统一用思源黑体。原来这里想用 Text.defaultProps
+// 设全局默认字体，试了才发现这条路走不通：RN 0.81 的 <Text> 已经是函数组件
+// 不是class，React 19 对函数组件的 defaultProps 直接不生效了；就算生效，
+// defaultProps 也只在完全不传 style 时才顶用，这个App里几乎每个Text都自己
+// 传了style，起不到全局默认的效果。真正生效的改法是打了个patch直接改
+// node_modules/react-native/Libraries/Text/Text.js（见
+// patches/react-native+0.81.5.patch），在库内部处理完调用方自己的style后，
+// 没设fontFamily才补上默认值——只有那一处能同时覆盖"全局默认"和"看到
+// 显式指定就不覆盖"这两个要求。
 
 const Tab = createBottomTabNavigator();
 const BookshelfStack = createNativeStackNavigator();
@@ -56,7 +69,17 @@ function getTabBarStyle(route, visibleStyle) {
 
 export default function App() {
   const theme = useTheme();
+  const [fontsLoaded] = useFonts(FONT_ASSETS);
   const tabBarStyle = { backgroundColor: theme.cardBg, borderTopColor: theme.cardBorder };
+
+  if (!fontsLoaded) {
+    return (
+      <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: theme.bg }}>
+        <ActivityIndicator size="large" color={theme.accent} />
+      </View>
+    );
+  }
+
   return (
     <SafeAreaProvider>
       <GestureHandlerRootView style={{ flex: 1 }}>

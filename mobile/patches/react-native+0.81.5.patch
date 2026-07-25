@@ -1,0 +1,21 @@
+diff --git a/node_modules/react-native/Libraries/Text/Text.js b/node_modules/react-native/Libraries/Text/Text.js
+index b08b8f3..5f3fdda 100644
+--- a/node_modules/react-native/Libraries/Text/Text.js
++++ b/node_modules/react-native/Libraries/Text/Text.js
+@@ -141,6 +141,16 @@ const TextImpl: component(
+   let processedStyle = flattenStyle<TextStyleProp>(_style);
+   if (processedStyle != null) {
+     let overrides: ?{...TextStyleInternal} = null;
++    // 伴读讲讲阶段十一：全局默认字体（思源黑体）。defaultProps对函数组件在
++    // React 19下不生效（RN 0.81的Text已经是函数组件，不是class），且就算生效
++    // 也只在完全没传style时才用得上——这个App里几乎每个Text都自己传了style，
++    // 唯一能保证"没有显式指定fontFamily时才生效、指定了就不覆盖"的地方是这里，
++    // 在处理完调用方自己的style之后再补默认值。
++    if (processedStyle.fontFamily == null) {
++      overrides = overrides || ({}: {...TextStyleInternal});
++      // $FlowFixMe[incompatible-cast]
++      overrides.fontFamily = ('SourceHanSansSC-Regular': TextStyleInternal['fontFamily']);
++    }
+     if (typeof processedStyle.fontWeight === 'number') {
+       overrides = overrides || ({}: {...TextStyleInternal});
+       overrides.fontWeight =
