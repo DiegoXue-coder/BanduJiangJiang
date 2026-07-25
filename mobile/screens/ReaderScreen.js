@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View, Text, TouchableOpacity, StyleSheet, ActivityIndicator, Alert,
-  Modal, FlatList,
+  Modal, FlatList, PanResponder,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Reader, useReader } from '@epubjs-react-native/core';
@@ -90,6 +90,19 @@ function ReaderInner({
   // 之后就没有入口再回去挑别的章节——加一个常驻的目录按钮，不依赖那个只会
   // 出现一次的自动导航页
   const [showToc, setShowToc] = useState(false);
+  // 阶段十一bug修复：目录是纯 <Modal>，不挂在导航栈里，天生没有 iOS 那种
+  // "从左边缘右滑返回"的手势——跟App其他页面的返回手势体验不一致，用户
+  // 习惯性滑一下发现没反应，只能靠"完成"按钮退出。用 PanResponder 补一个
+  // 右滑关闭手势（没用 react-native-gesture-handler/reanimated 那套，
+  // 单纯检测一下拖拽距离用不着那么重，PanResponder是RN核心自带的，
+  // 少一层跟原生模块版本对不上的风险）。
+  const tocPanResponder = useMemo(() => PanResponder.create({
+    onMoveShouldSetPanResponder: (_, gesture) =>
+      Math.abs(gesture.dx) > 15 && Math.abs(gesture.dx) > Math.abs(gesture.dy) * 2,
+    onPanResponderRelease: (_, gesture) => {
+      if (gesture.dx > 80) setShowToc(false);
+    },
+  }), []);
   // 阶段十一：颜色/字号两个图标点击后弹出的是同一排header下方的横向控件
   // （不是二级菜单），同一时间只显示一个，互斥
   const [showThemePanel, setShowThemePanel] = useState(false);
@@ -245,7 +258,7 @@ function ReaderInner({
       )}
 
       <Modal visible={showToc} animationType="slide" onRequestClose={() => setShowToc(false)}>
-        <SafeAreaView style={[styles.tocSafe, { backgroundColor: uiTheme.bg }]}>
+        <SafeAreaView style={[styles.tocSafe, { backgroundColor: uiTheme.bg }]} {...tocPanResponder.panHandlers}>
           <View style={[styles.tocHeader, { borderBottomColor: uiTheme.cardBorder }]}>
             <Text style={[styles.tocHeaderTitle, { color: uiTheme.text }]}>目录</Text>
             <TouchableOpacity onPress={() => setShowToc(false)} style={styles.tocCloseBtn}>
