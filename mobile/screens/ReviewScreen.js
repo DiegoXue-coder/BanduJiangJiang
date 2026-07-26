@@ -7,18 +7,18 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useFocusEffect } from '@react-navigation/native';
 import { getReview } from '../lib/api';
 import { ReviewCard, formatTime } from '../components/ReviewCard';
+import ConceptGraph from '../components/ConceptGraph';
 import { useTheme } from '../theme';
 
 const TABS = [
   { key: 'highlight', label: '划线' },
   { key: 'qa', label: '问答' },
-  { key: 'related', label: '关联主题' },
+  { key: 'related', label: '知识图谱' },
 ];
 
 const EMPTY_HINT = {
   highlight: '还没有划线\n去书架翻开一本书试试吧',
   qa: '还没有提问记录\n去书架翻开一本书试试吧',
-  related: '暂时没有检测到关联的问答\n多问几个问题，AI 会帮你留意呼应的地方',
 };
 
 // 阶段八：划线/问答两个板块从扁平列表改成按书分卡片——把 items 按 book_id
@@ -90,11 +90,6 @@ export default function ReviewScreen({ navigation }) {
     if (!items || !isBookshelfTab) return [];
     return groupByBook(items, tab);
   }, [items, tab, isBookshelfTab]);
-
-  const relatedItems = useMemo(() => {
-    if (!items || isBookshelfTab) return [];
-    return items.filter((i) => i.type === 'qa' && !!i.related_text);
-  }, [items, isBookshelfTab]);
 
   const tabBar = (
     <View style={[styles.tabRow, { backgroundColor: theme.cardBg, borderBottomColor: theme.cardBorder }]}>
@@ -175,22 +170,7 @@ export default function ReviewScreen({ navigation }) {
           )}
         />
       ) : (
-        <FlatList
-          data={relatedItems}
-          keyExtractor={(item) => `${item.type}-${item.id}`}
-          contentContainerStyle={styles.listContent}
-          refreshControl={
-            <RefreshControl refreshing={refreshing} onRefresh={() => load(true)} />
-          }
-          ListEmptyComponent={
-            <View style={styles.centerBox}>
-              <Text style={[styles.emptyText, { color: theme.textMuted }]}>{EMPTY_HINT[tab]}</Text>
-            </View>
-          }
-          renderItem={({ item }) => (
-            <ReviewCard item={item} onPress={() => navigation.navigate('ReviewDetail', { item })} />
-          )}
-        />
+        <ConceptGraph />
       )}
     </SafeAreaView>
   );

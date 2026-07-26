@@ -169,3 +169,11 @@ export async function saveQaHistory({ bookId, bookTitle, chapterTitle, question,
 export async function getReview() {
   return appFetch('/app/review');
 }
+
+// ── 阶段十二：知识图谱 ──────────────────────────────────────────────
+// 图谱页面只读预算好的结果（概念提取/去重/关联检测是重AI调用的后台批处理，
+// 不在App里触发，由内容维护流程单独跑 POST /app/concept-graph/build）。
+
+export async function getConceptGraph() {
+  return appFetch('/app/concept-graph');
+}
