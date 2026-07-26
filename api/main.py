@@ -1545,11 +1545,17 @@ async def app_backfill_embeddings(request: Request, _=ExtAuth):
 #   2. GET  /app/concept-graph        ——图谱页面实际读的接口，只读预算好的
 #      结果，一遍简单查询，没有任何AI调用
 #
-# 复用现有的 SIMILARITY_THRESHOLD(0.72)：概念去重、概念间关联检测用的是
-# 同一套"两段文字embedding算cosine相似度"机制，没有理由为概念这个新场景
-# 另起一个阈值数字，除非以后真实使用中发现需要调。
-
-CONCEPT_SIMILARITY_THRESHOLD = SIMILARITY_THRESHOLD
+# 原计划复用 SIMILARITY_THRESHOLD(0.72)，真机实测发现要调：那个数字是
+# 给 highlights/qa_history 那种长段落比较调出来的，概念短语（2-6个字）
+# 的相似度分布整体压得更低——真实跑出159个概念后查了实际相似度分布
+# （GET /app/concept-graph/debug-similarity，诊断完就删了），最高的一对
+# "统一思想<->集权统一"只有0.7197，卡在0.72门槛下0.0003，导致159个概念
+# 一条关联边都没有。往下看0.68~0.72这个区间全是明显该关联的组合（"礼法
+# 原则<->礼法传承""内心修养<->修身为本"这种），不是噪音，是阈值本身对
+# 这个新场景定高了。改成0.65（给概念场景单独一个阈值，不再等于
+# SIMILARITY_THRESHOLD），后续如果关联页面开出来发现0.65太松/太紧，
+# 人工抽查真实案例调整（质量门槛明确写了这类质量判断不建自动化裁判）。
+CONCEPT_SIMILARITY_THRESHOLD = 0.65
 
 # 节点颜色分组按"思想流派"而不是按书——一个概念本来就可能横跨多本书
 # （这是阶段十二验收标准的核心设计要求），按书分反而会让同一个概念在视觉上
@@ -1771,25 +1777,6 @@ async def app_build_concept_graph(request: Request, background_tasks: Background
 async def app_get_concept_graph_build_status(_=ExtAuth):
     """轮询用：构建流水线还在跑没有、上一次跑完的统计结果是什么。"""
     return _concept_build_status
-
-@app.get("/app/concept-graph/debug-similarity")
-async def app_debug_concept_similarity(_=ExtAuth):
-    """临时诊断接口：0.72阈值下159个概念算出0条关联边，看看真实的相似度
-    分布是不是这个阈值本身对"概念短语"这种比较对象来说定高了（0.72是从
-    highlights/qa_history那种长段落比较沿用过来的数字，没针对概念场景
-    重新校准过）。查完就删，不是要长期留着的接口。"""
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        top_pairs = await conn.fetch("""
-            SELECT a.label AS a_label, b.label AS b_label,
-                   1 - (a.embedding <=> b.embedding) AS sim
-            FROM concepts a
-            JOIN concepts b ON b.id > a.id AND b.user_id = a.user_id
-            WHERE a.user_id = $1 AND a.embedding IS NOT NULL AND b.embedding IS NOT NULL
-            ORDER BY sim DESC
-            LIMIT 20
-        """, APP_USER_ID)
-    return [{"a": r["a_label"], "b": r["b_label"], "sim": round(r["sim"], 4)} for r in top_pairs]
 
 @app.get("/app/concept-graph")
 async def app_get_concept_graph(_=ExtAuth):
