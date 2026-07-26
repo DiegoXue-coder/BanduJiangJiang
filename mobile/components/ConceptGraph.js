@@ -3,14 +3,22 @@
 // 技术选型（决策记录，见04-开发进度记录.md）：d3-force算力导向布局的静态
 // 坐标（纯JS，无原生绑定）+ react-native-svg画图（阶段十一已验证真机能用）
 // + react-native-reanimated在静态坐标上叠加持续的漂浮动效（阶段十已验证）。
-// v1明确不支持拖拽，只支持点击。
+// 2026-07-26修订：原定"v1只支持点击、不支持拖拽"改成支持双指缩放+拖拽平移
+// +双击切换缩放（决策层真机验收时改的主意，05-验收标准.md已同步更新）。
+// 用react-native-gesture-handler（阶段三已装、App.js根节点已包过
+// GestureHandlerRootView，不新增原生依赖）在外层包一个Animated.View做
+// 缩放平移变换，SVG内部各节点/连线自己的onPress保持不变、不用重新做
+// 命中测试。
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   View, Text, StyleSheet, ActivityIndicator, TouchableOpacity,
   Pressable, ScrollView,
 } from 'react-native';
 import Svg, { Circle, Line, Text as SvgText, G } from 'react-native-svg';
-import Animated, { useSharedValue, useAnimatedProps, withRepeat, withTiming, Easing } from 'react-native-reanimated';
+import Animated, {
+  useSharedValue, useAnimatedProps, useAnimatedStyle, withRepeat, withTiming, Easing,
+} from 'react-native-reanimated';
+import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import { forceSimulation, forceManyBody, forceLink, forceCenter, forceCollide } from 'd3-force';
 import { useFocusEffect } from '@react-navigation/native';
 import { getConceptGraph } from '../lib/api';
@@ -18,6 +26,9 @@ import { useTheme } from '../theme';
 import { FONTS } from '../fonts';
 
 const AnimatedCircle = Animated.createAnimatedComponent(Circle);
+const MIN_ZOOM = 1;
+const MAX_ZOOM = 4;
+const DOUBLE_TAP_ZOOM = 2.2;
 
 // 深色星空感背景是图谱区域自己固定的视觉风格，不跟随App的亮色/暗色主题
 // 切换——星空氛围本身就该是暗的，跟着切成亮色反而破坏设计意图。
@@ -207,16 +218,90 @@ export default function ConceptGraph() {
     if (layoutNodes.length === 0 || !containerSize) return null;
     const pad = 60; // 留出节点半径+标签文字的空间，不然边缘节点的label被切
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    let sumX = 0, sumY = 0;
     layoutNodes.forEach((n) => {
       minX = Math.min(minX, n.x); maxX = Math.max(maxX, n.x);
       minY = Math.min(minY, n.y); maxY = Math.max(maxY, n.y);
+      sumX += n.x; sumY += n.y;
     });
-    const w = Math.max(maxX - minX + pad * 2, containerSize.width);
-    const h = Math.max(maxY - minY + pad * 2, containerSize.height);
-    const cx = (minX + maxX) / 2;
-    const cy = (minY + maxY) / 2;
-    return `${cx - w / 2} ${cy - h / 2} ${w} ${h}`;
+    // 用节点质心（坐标平均值）当画布中心，不用包围盒几何中点——159个节点里
+    // 115个是孤立点（没有关联边），力导向布局收敛后视觉密度天然不对称
+    // （连线多的那一小片聚得紧、孤立点松散地飘在外围），几何中点居中会让
+    // 视觉上"密"的那一片偏向画布一侧、留白看起来不对称（真机截图复现过
+    // 这个现象：上方大片空白、下方紧贴边缘没留白）。质心按视觉重量对齐，
+    // 半径取"质心到最远节点"的距离对称展开，保证居中的同时也不裁掉节点。
+    const centroidX = sumX / layoutNodes.length;
+    const centroidY = sumY / layoutNodes.length;
+    const halfW = Math.max(maxX - centroidX, centroidX - minX) + pad;
+    const halfH = Math.max(maxY - centroidY, centroidY - minY) + pad;
+    const w = Math.max(halfW * 2, containerSize.width);
+    const h = Math.max(halfH * 2, containerSize.height);
+    return `${centroidX - w / 2} ${centroidY - h / 2} ${w} ${h}`;
   }, [layoutNodes, containerSize]);
+
+  // 双指缩放/拖拽平移的手势状态——默认(scale=1, translate=0)就是上面viewBox
+  // 算出来的"全部节点适配进屏幕"这个默认视图，缩放平移是叠加在这个默认帧
+  // 之上的图层变换（外层Animated.View的transform），不影响内部SVG自己的
+  // viewBox坐标系，所以内部各节点/连线的onPress命中测试完全不用改。
+  const scale = useSharedValue(1);
+  const savedScale = useSharedValue(1);
+  const translateX = useSharedValue(0);
+  const savedTranslateX = useSharedValue(0);
+  const translateY = useSharedValue(0);
+  const savedTranslateY = useSharedValue(0);
+
+  useEffect(() => {
+    // 每次重新拉取图谱数据（比如新增了划线触发重新构建）都回到默认视图，
+    // 不残留上一次的缩放/平移状态。
+    scale.value = 1; savedScale.value = 1;
+    translateX.value = 0; savedTranslateX.value = 0;
+    translateY.value = 0; savedTranslateY.value = 0;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data]);
+
+  const pinchGesture = useMemo(() => Gesture.Pinch()
+    .onUpdate((e) => {
+      scale.value = Math.min(Math.max(savedScale.value * e.scale, MIN_ZOOM), MAX_ZOOM);
+    })
+    .onEnd(() => {
+      savedScale.value = scale.value;
+    }), []);
+
+  const panGesture = useMemo(() => Gesture.Pan()
+    .onUpdate((e) => {
+      translateX.value = savedTranslateX.value + e.translationX;
+      translateY.value = savedTranslateY.value + e.translationY;
+    })
+    .onEnd(() => {
+      savedTranslateX.value = translateX.value;
+      savedTranslateY.value = translateY.value;
+    }), []);
+
+  const doubleTapGesture = useMemo(() => Gesture.Tap()
+    .numberOfTaps(2)
+    .onEnd(() => {
+      const zoomedIn = scale.value > 1.05;
+      const nextScale = zoomedIn ? MIN_ZOOM : DOUBLE_TAP_ZOOM;
+      scale.value = withTiming(nextScale, { duration: 220 });
+      translateX.value = withTiming(0, { duration: 220 });
+      translateY.value = withTiming(0, { duration: 220 });
+      savedScale.value = nextScale;
+      savedTranslateX.value = 0;
+      savedTranslateY.value = 0;
+    }), []);
+
+  const composedGesture = useMemo(
+    () => Gesture.Exclusive(doubleTapGesture, Gesture.Simultaneous(pinchGesture, panGesture)),
+    [doubleTapGesture, pinchGesture, panGesture],
+  );
+
+  const animatedTransformStyle = useAnimatedStyle(() => ({
+    transform: [
+      { translateX: translateX.value },
+      { translateY: translateY.value },
+      { scale: scale.value },
+    ],
+  }));
 
   if (data === null && !error) {
     return (
@@ -264,43 +349,47 @@ export default function ConceptGraph() {
       }}
     >
       {containerSize && viewBox && (
-        <Svg width={containerSize.width} height={containerSize.height} viewBox={viewBox} preserveAspectRatio="xMidYMid meet">
-          {starsRef.current.map((s, i) => (
-            <Circle key={`star-${i}`} cx={s.x} cy={s.y} r={s.r} fill={STAR_COLOR} />
-          ))}
-          {data.edges.map((e, i) => {
-            const a = nodeById.get(e.source);
-            const b = nodeById.get(e.target);
-            if (!a || !b) return null;
-            return (
-              <G key={`edge-${i}`}>
-                <Line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={EDGE_COLOR} strokeWidth={1} />
-                {/* 加宽的透明命中区域，手指点细线不好点准 */}
-                <Line
-                  x1={a.x} y1={a.y} x2={b.x} y2={b.y}
-                  stroke="transparent" strokeWidth={22}
-                  onPress={() => setSelectedEdge(e)}
-                />
-              </G>
-            );
-          })}
-          {layoutNodes.map((n) => (
-            <SvgText
-              key={`label-${n.id}`}
-              x={n.x}
-              y={n.y + 10 + Math.min(n.size, 8) * 2.5 + 14}
-              fill="rgba(255,255,255,0.75)"
-              fontSize={11}
-              fontFamily={FONTS.sansRegular}
-              textAnchor="middle"
-            >
-              {n.label}
-            </SvgText>
-          ))}
-          {layoutNodes.map((n) => (
-            <FloatingNode key={n.id} node={n} onPress={setSelectedNode} />
-          ))}
-        </Svg>
+        <GestureDetector gesture={composedGesture}>
+          <Animated.View style={[{ width: containerSize.width, height: containerSize.height }, animatedTransformStyle]}>
+            <Svg width={containerSize.width} height={containerSize.height} viewBox={viewBox} preserveAspectRatio="xMidYMid meet">
+              {starsRef.current.map((s, i) => (
+                <Circle key={`star-${i}`} cx={s.x} cy={s.y} r={s.r} fill={STAR_COLOR} />
+              ))}
+              {data.edges.map((e, i) => {
+                const a = nodeById.get(e.source);
+                const b = nodeById.get(e.target);
+                if (!a || !b) return null;
+                return (
+                  <G key={`edge-${i}`}>
+                    <Line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={EDGE_COLOR} strokeWidth={1} />
+                    {/* 加宽的透明命中区域，手指点细线不好点准 */}
+                    <Line
+                      x1={a.x} y1={a.y} x2={b.x} y2={b.y}
+                      stroke="transparent" strokeWidth={22}
+                      onPress={() => setSelectedEdge(e)}
+                    />
+                  </G>
+                );
+              })}
+              {layoutNodes.map((n) => (
+                <SvgText
+                  key={`label-${n.id}`}
+                  x={n.x}
+                  y={n.y + 10 + Math.min(n.size, 8) * 2.5 + 14}
+                  fill="rgba(255,255,255,0.75)"
+                  fontSize={11}
+                  fontFamily={FONTS.sansRegular}
+                  textAnchor="middle"
+                >
+                  {n.label}
+                </SvgText>
+              ))}
+              {layoutNodes.map((n) => (
+                <FloatingNode key={n.id} node={n} onPress={setSelectedNode} />
+              ))}
+            </Svg>
+          </Animated.View>
+        </GestureDetector>
       )}
 
       {selectedNode && (
