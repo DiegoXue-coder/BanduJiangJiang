@@ -4,10 +4,10 @@
 // 坐标（纯JS，无原生绑定）+ react-native-svg画图（阶段十一已验证真机能用）
 // + react-native-reanimated在静态坐标上叠加持续的漂浮动效（阶段十已验证）。
 // v1明确不支持拖拽，只支持点击。
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   View, Text, StyleSheet, ActivityIndicator, TouchableOpacity,
-  Dimensions, Pressable, ScrollView,
+  Pressable, ScrollView,
 } from 'react-native';
 import Svg, { Circle, Line, Text as SvgText, G } from 'react-native-svg';
 import Animated, { useSharedValue, useAnimatedProps, withRepeat, withTiming, Easing } from 'react-native-reanimated';
@@ -33,18 +33,6 @@ const CATEGORY_COLOR = {
   '墨家': '#A48FD1',
   '其他': '#8B96AC',
 };
-
-const { width: SCREEN_W } = Dimensions.get('window');
-const GRAPH_HEIGHT = 480;
-
-// 固定种子的"星星"装饰点——极简、不做发光/渐变，纯静态小圆点，只在组件
-// 第一次渲染时生成一次，不随节点数据刷新重新随机（避免每次重新加载图谱
-// 星星位置跳动）。
-const STARS = Array.from({ length: 50 }, () => ({
-  x: Math.random() * SCREEN_W,
-  y: Math.random() * GRAPH_HEIGHT,
-  r: 0.5 + Math.random() * 1,
-}));
 
 function computeLayout(nodes, edges) {
   if (nodes.length === 0) return [];
@@ -181,6 +169,11 @@ export default function ConceptGraph() {
   const [error, setError] = useState('');
   const [selectedNode, setSelectedNode] = useState(null);
   const [selectedEdge, setSelectedEdge] = useState(null);
+  // 容器实际可用尺寸——之前写死480高度，在真机上比"划线复盘"页头部+
+  // tab栏之下真正剩余的空间矮了一大截，下面空出一整块背景色，靠onLayout
+  // 量真实尺寸才对得上。
+  const [containerSize, setContainerSize] = useState(null);
+  const starsRef = useRef(null);
 
   const load = useCallback(async () => {
     setError('');
@@ -204,6 +197,26 @@ export default function ConceptGraph() {
     layoutNodes.forEach((n) => m.set(n.id, n));
     return m;
   }, [layoutNodes]);
+
+  // 力导向布局算出来的坐标范围可能比容器宽/高得多（159个节点铺得很开），
+  // 之前直接用SCREEN_W×固定高度当画布、没设viewBox，超出这个像素范围的
+  // 节点全部被裁掉看不见——159个节点只露出了一小撮。改成按算出来的节点
+  // 坐标包围盒设viewBox+preserveAspectRatio="xMidYMid meet"，整张图谱
+  // 缩放适配到容器里，不管布局实际多大，全部节点都保证在可视范围内。
+  const viewBox = useMemo(() => {
+    if (layoutNodes.length === 0 || !containerSize) return null;
+    const pad = 60; // 留出节点半径+标签文字的空间，不然边缘节点的label被切
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    layoutNodes.forEach((n) => {
+      minX = Math.min(minX, n.x); maxX = Math.max(maxX, n.x);
+      minY = Math.min(minY, n.y); maxY = Math.max(maxY, n.y);
+    });
+    const w = Math.max(maxX - minX + pad * 2, containerSize.width);
+    const h = Math.max(maxY - minY + pad * 2, containerSize.height);
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+    return `${cx - w / 2} ${cy - h / 2} ${w} ${h}`;
+  }, [layoutNodes, containerSize]);
 
   if (data === null && !error) {
     return (
@@ -234,16 +247,27 @@ export default function ConceptGraph() {
     );
   }
 
-  const cx = SCREEN_W / 2;
-  const cy = GRAPH_HEIGHT / 2;
+  if (containerSize && !starsRef.current) {
+    starsRef.current = Array.from({ length: 60 }, () => ({
+      x: Math.random() * containerSize.width,
+      y: Math.random() * containerSize.height,
+      r: 0.5 + Math.random() * 1,
+    }));
+  }
 
   return (
-    <View style={[styles.container, { backgroundColor: SPACE_BG }]}>
-      <Svg width={SCREEN_W} height={GRAPH_HEIGHT}>
-        {STARS.map((s, i) => (
-          <Circle key={`star-${i}`} cx={s.x} cy={s.y} r={s.r} fill={STAR_COLOR} />
-        ))}
-        <G x={cx} y={cy}>
+    <View
+      style={[styles.container, { backgroundColor: SPACE_BG }]}
+      onLayout={(e) => {
+        const { width, height } = e.nativeEvent.layout;
+        setContainerSize((prev) => (prev && prev.width === width && prev.height === height ? prev : { width, height }));
+      }}
+    >
+      {containerSize && viewBox && (
+        <Svg width={containerSize.width} height={containerSize.height} viewBox={viewBox} preserveAspectRatio="xMidYMid meet">
+          {starsRef.current.map((s, i) => (
+            <Circle key={`star-${i}`} cx={s.x} cy={s.y} r={s.r} fill={STAR_COLOR} />
+          ))}
           {data.edges.map((e, i) => {
             const a = nodeById.get(e.source);
             const b = nodeById.get(e.target);
@@ -276,8 +300,8 @@ export default function ConceptGraph() {
           {layoutNodes.map((n) => (
             <FloatingNode key={n.id} node={n} onPress={setSelectedNode} />
           ))}
-        </G>
-      </Svg>
+        </Svg>
+      )}
 
       {selectedNode && (
         <NodeDetailModal node={selectedNode} theme={theme} onClose={() => setSelectedNode(null)} />
@@ -296,8 +320,8 @@ export default function ConceptGraph() {
 }
 
 const styles = StyleSheet.create({
-  container: { width: '100%', height: GRAPH_HEIGHT },
-  centerBox: { flex: 1, minHeight: GRAPH_HEIGHT, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 24, gap: 12 },
+  container: { flex: 1, width: '100%' },
+  centerBox: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 24, gap: 12 },
   emptyText: { color: 'rgba(255,255,255,0.55)', fontSize: 14, textAlign: 'center', lineHeight: 22 },
   errorText: { fontSize: 14, textAlign: 'center' },
   retryBtn: { paddingHorizontal: 20, paddingVertical: 10 },
