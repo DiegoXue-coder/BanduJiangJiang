@@ -131,6 +131,47 @@ async def init_db():
                 PRIMARY KEY (user_id, book_id)
             )
         """)
+        # 阶段十二：知识图谱。concepts 是去重合并后的canonical概念节点（不是每条
+        # 划线/问答一个节点），concept_sources 记录"这个概念是从哪些原始记录提炼
+        # 出来的"（一条划线/问答可以对应1-3个概念，一个概念可以对应来自不同书的
+        # 多条记录——这是设计要求，不是"一个节点一本书"），concept_relations 是
+        # 概念节点之间的关联边，带AI生成的"共同点"+"各自如何呼应"解释文本。
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS concepts (
+                id         BIGSERIAL PRIMARY KEY,
+                user_id    BIGINT NOT NULL REFERENCES users(id),
+                label      TEXT NOT NULL,
+                embedding  vector(1024),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS concept_sources (
+                id           BIGSERIAL PRIMARY KEY,
+                concept_id   BIGINT NOT NULL REFERENCES concepts(id) ON DELETE CASCADE,
+                source_type  TEXT NOT NULL,
+                source_id    BIGINT NOT NULL,
+                book_id      BIGINT,
+                book_title   TEXT NOT NULL DEFAULT '',
+                excerpt      TEXT NOT NULL DEFAULT '',
+                explanation  TEXT NOT NULL DEFAULT '',
+                created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                UNIQUE (source_type, source_id, concept_id)
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS concept_relations (
+                id             BIGSERIAL PRIMARY KEY,
+                concept_a_id   BIGINT NOT NULL REFERENCES concepts(id) ON DELETE CASCADE,
+                concept_b_id   BIGINT NOT NULL REFERENCES concepts(id) ON DELETE CASCADE,
+                similarity     REAL NOT NULL DEFAULT 0,
+                common_point   TEXT NOT NULL DEFAULT '',
+                explanation_a  TEXT NOT NULL DEFAULT '',
+                explanation_b  TEXT NOT NULL DEFAULT '',
+                created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                UNIQUE (concept_a_id, concept_b_id)
+            )
+        """)
     print("[DB] 初始化完成，pgvector 已启用")
 
 @asynccontextmanager
@@ -1495,3 +1536,261 @@ async def app_backfill_embeddings(request: Request, _=ExtAuth):
             failed.append(r["id"])
 
     return {"total": len(rows), "updated": updated, "failed": failed}
+
+# ── 阶段十二：知识图谱——概念提取 + 去重合并 + 关联检测 ──────────────
+#
+# 整条流水线分两段，都是重AI调用的批处理工作，不能放在图谱页面每次打开时
+# 同步跑（质量门槛要求首屏3秒内）：
+#   1. POST /app/concept-graph/build  ——手动/定期触发，做提取+去重+关联
+#   2. GET  /app/concept-graph        ——图谱页面实际读的接口，只读预算好的
+#      结果，一遍简单查询，没有任何AI调用
+#
+# 复用现有的 SIMILARITY_THRESHOLD(0.72)：概念去重、概念间关联检测用的是
+# 同一套"两段文字embedding算cosine相似度"机制，没有理由为概念这个新场景
+# 另起一个阈值数字，除非以后真实使用中发现需要调。
+
+CONCEPT_SIMILARITY_THRESHOLD = SIMILARITY_THRESHOLD
+
+# 节点颜色分组按"思想流派"而不是按书——一个概念本来就可能横跨多本书
+# （这是阶段十二验收标准的核心设计要求），按书分反而会让同一个概念在视觉上
+# 被切成好几种颜色。7本书目前只涉及三个流派，写死映射够用，以后书库变大了
+# 再考虑要不要挪到数据库里配置。
+BOOK_SCHOOL = {
+    "道德经": "道家", "庄子": "道家",
+    "论语": "儒家", "孟子": "儒家", "大学": "儒家", "中庸": "儒家",
+    "墨子": "墨家",
+}
+
+def _ds_client_server() -> OpenAI | None:
+    """概念提取/关联解释是服务端批处理任务，不是某次用户请求触发的实时对话，
+    用服务器自己配置的 DEEPSEEK_API_KEY，不依赖请求头里的用户key（跟 /ask
+    那条给用户自带key开后门的路径是两回事，这里始终是服务端自己的key）。"""
+    key = os.environ.get("DEEPSEEK_API_KEY", "")
+    return _make_ds(key) if key else None
+
+def _parse_json_response(content: str) -> dict:
+    """DeepSeek 有时会在 JSON 前后包一层解释文字，找第一个 { 到最后一个 } 之间
+    的内容再 parse，比单纯信任提示词里"只输出JSON"这一句话更稳，双保险。"""
+    content = content.strip()
+    start, end = content.find("{"), content.rfind("}")
+    if start == -1 or end == -1:
+        raise ValueError(f"响应里找不到JSON: {content[:200]}")
+    return json.loads(content[start:end + 1])
+
+async def _extract_concepts(text: str, ds: OpenAI) -> list[dict]:
+    """给一段划线原文/问答内容，提炼1-3个核心概念词+每个概念"为什么算这个
+    概念"的一句话解释——同一次DeepSeek调用里一起产出，不是先提概念再单独
+    问原因（验收标准明确要求不算额外调用）。"""
+    prompt = f"""你是文言文经典阅读的概念提炼助手。给定一段用户的划线原文或问答内容，
+提炼出1到3个核心概念词——用简洁现代的说法概括这段内容涉及的思想/主题（2-6个字为宜，
+比如"无为""仁爱""中庸之道"），不要照抄原文的生僻词句。
+
+对每个概念词，额外给一句话解释"这段内容为什么算这个概念"。
+
+严格按以下JSON格式输出，不要输出任何其他文字或markdown标记：
+{{"concepts": [{{"label": "概念词", "reason": "一句话解释"}}]}}
+
+内容：
+\"\"\"
+{text[:800]}
+\"\"\""""
+    resp = await asyncio.to_thread(
+        lambda: ds.chat.completions.create(
+            model="deepseek-chat",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+        )
+    )
+    data = _parse_json_response(resp.choices[0].message.content)
+    concepts = data.get("concepts", [])
+    return [c for c in concepts if c.get("label")][:3]
+
+async def _explain_concept_relation(label_a: str, label_b: str, ds: OpenAI) -> dict:
+    """两个概念节点之间的连线要展示的思维导图式内容：共同点+各自如何呼应。"""
+    prompt = f"""给定两个从古典文献阅读中提炼出的概念，请判断它们之间的共同点，并分别解释
+每个概念是如何呼应这个共同点的，各一句话。
+
+概念A："{label_a}"
+概念B："{label_b}"
+
+严格按以下JSON格式输出，不要输出任何其他文字：
+{{"common_point": "共同点一句话总结", "explanation_a": "概念A如何呼应共同点", "explanation_b": "概念B如何呼应共同点"}}"""
+    resp = await asyncio.to_thread(
+        lambda: ds.chat.completions.create(
+            model="deepseek-chat",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+        )
+    )
+    return _parse_json_response(resp.choices[0].message.content)
+
+async def _find_or_create_concept(conn, user_id: int, label: str, sf) -> tuple[int, bool]:
+    """概念去重合并：新概念词先算embedding，跟这个用户已有的概念做相似度
+    比较，够相似就并入已有节点（返回它的id），不够相似才新建一个节点。
+    返回 (concept_id, 是不是新建的) ，调用方用这个布尔值统计创建/复用数量。
+    """
+    label_emb = _vec_to_str(await _embed(label, sf))
+    existing = await conn.fetchrow("""
+        SELECT id, 1 - (embedding <=> $1::vector) AS sim
+        FROM concepts
+        WHERE user_id = $2 AND embedding IS NOT NULL
+        ORDER BY embedding <=> $1::vector
+        LIMIT 1
+    """, label_emb, user_id)
+    if existing and existing["sim"] >= CONCEPT_SIMILARITY_THRESHOLD:
+        return existing["id"], False
+    row = await conn.fetchrow("""
+        INSERT INTO concepts (user_id, label, embedding)
+        VALUES ($1, $2, $3::vector)
+        RETURNING id
+    """, user_id, label, label_emb)
+    return row["id"], True
+
+@app.post("/app/concept-graph/build")
+async def app_build_concept_graph(request: Request, _=ExtAuth):
+    """知识图谱构建流水线，手动/定期触发，不是图谱页面打开时同步跑的。"""
+    ds = _ds_client_server()
+    if not ds:
+        raise HTTPException(status_code=401, detail="服务器未配置 DEEPSEEK_API_KEY")
+    sf = _make_sf(_sf_key(request)) or sf_client
+    if not sf:
+        raise HTTPException(status_code=401, detail="缺少 SiliconFlow API Key")
+
+    pool = await get_pool()
+    stats = {"extracted": 0, "concepts_created": 0, "concepts_reused": 0,
+              "relations_created": 0, "failed": []}
+
+    # 第一段：给还没提炼过概念的记录跑提取+去重合并。左连接concept_sources，
+    # 没有匹配的就是没处理过——这样重复调用这个接口只处理新增量，不会对
+    # 已经提炼过的老记录重复花钱调AI。
+    async with pool.acquire() as conn:
+        pending_highlights = await conn.fetch("""
+            SELECT h.id, h.highlighted_text AS excerpt, h.highlighted_text AS extract_input,
+                   b.id AS book_id, b.title AS book_title
+            FROM highlights h
+            JOIN books b ON b.id = h.book_id
+            LEFT JOIN concept_sources cs ON cs.source_type = 'highlight' AND cs.source_id = h.id
+            WHERE h.user_id = $1 AND cs.id IS NULL
+        """, APP_USER_ID)
+        pending_qa = await conn.fetch("""
+            SELECT q.id, q.selection AS excerpt,
+                   (q.selection || ' ' || q.question || ' ' || q.answer) AS extract_input,
+                   b.id AS book_id, b.title AS book_title
+            FROM qa_history q
+            JOIN books b ON b.id::text = q.book_id
+            LEFT JOIN concept_sources cs ON cs.source_type = 'qa' AND cs.source_id = q.id
+            WHERE q.user_id = $1 AND cs.id IS NULL
+        """, APP_USER_ID)
+
+    pending = [("highlight", r) for r in pending_highlights] + [("qa", r) for r in pending_qa]
+
+    for source_type, r in pending:
+        try:
+            concepts = await _extract_concepts(r["extract_input"], ds)
+            excerpt = r["excerpt"] if len(r["excerpt"]) <= 80 else r["excerpt"][:80] + "…"
+            async with pool.acquire() as conn:
+                async with conn.transaction():
+                    for c in concepts:
+                        concept_id, created = await _find_or_create_concept(conn, APP_USER_ID, c["label"], sf)
+                        stats["concepts_created" if created else "concepts_reused"] += 1
+                        await conn.execute("""
+                            INSERT INTO concept_sources
+                                (concept_id, source_type, source_id, book_id, book_title, excerpt, explanation)
+                            VALUES ($1, $2, $3, $4, $5, $6, $7)
+                            ON CONFLICT (source_type, source_id, concept_id) DO NOTHING
+                        """, concept_id, source_type, r["id"], r["book_id"], r["book_title"],
+                             excerpt, c.get("reason", ""))
+            stats["extracted"] += 1
+        except Exception as e:
+            print(f"[概念提取] {source_type} id={r['id']} 失败: {e}")
+            stats["failed"].append({"type": source_type, "id": r["id"]})
+
+    # 第二段：概念两两算相似度，超过阈值的生成关联解释。已经存在的边跳过，
+    # 避免重复调用AI——概念数量不大的情况下才用这种O(n²)全量比较，等以后
+    # 数量真的很多了再考虑增量/索引优化，现在提前做是过度设计。
+    async with pool.acquire() as conn:
+        concepts = await conn.fetch(
+            "SELECT id, label FROM concepts WHERE user_id = $1 AND embedding IS NOT NULL", APP_USER_ID
+        )
+        for i, a in enumerate(concepts):
+            for b in concepts[i + 1:]:
+                exists = await conn.fetchval("""
+                    SELECT 1 FROM concept_relations
+                    WHERE (concept_a_id = $1 AND concept_b_id = $2)
+                       OR (concept_a_id = $2 AND concept_b_id = $1)
+                """, a["id"], b["id"])
+                if exists:
+                    continue
+                sim = await conn.fetchval("""
+                    SELECT 1 - (ca.embedding <=> cb.embedding)
+                    FROM concepts ca, concepts cb WHERE ca.id = $1 AND cb.id = $2
+                """, a["id"], b["id"])
+                if sim is None or sim < CONCEPT_SIMILARITY_THRESHOLD:
+                    continue
+                try:
+                    explain = await _explain_concept_relation(a["label"], b["label"], ds)
+                    await conn.execute("""
+                        INSERT INTO concept_relations
+                            (concept_a_id, concept_b_id, similarity, common_point, explanation_a, explanation_b)
+                        VALUES ($1, $2, $3, $4, $5, $6)
+                        ON CONFLICT (concept_a_id, concept_b_id) DO NOTHING
+                    """, a["id"], b["id"], sim, explain["common_point"],
+                         explain["explanation_a"], explain["explanation_b"])
+                    stats["relations_created"] += 1
+                except Exception as e:
+                    print(f"[概念关联] {a['label']}<->{b['label']} 失败: {e}")
+
+    return stats
+
+@app.get("/app/concept-graph")
+async def app_get_concept_graph(_=ExtAuth):
+    """图谱页面实际读的接口——只读 build 接口已经算好的结果，没有任何AI调用，
+    满足"首屏3秒内"的门槛。孤立节点（没有任何关联边）也要正常返回，不能
+    因为没有连线就被过滤掉——前端拿到全部nodes后自己决定怎么摆放/渲染。"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        concept_rows = await conn.fetch(
+            "SELECT id, label FROM concepts WHERE user_id = $1 ORDER BY id", APP_USER_ID
+        )
+        source_rows = await conn.fetch("""
+            SELECT cs.concept_id, cs.source_type, cs.source_id, cs.book_title, cs.excerpt, cs.explanation
+            FROM concept_sources cs
+            JOIN concepts c ON c.id = cs.concept_id
+            WHERE c.user_id = $1
+            ORDER BY cs.concept_id, cs.created_at
+        """, APP_USER_ID)
+        relation_rows = await conn.fetch("""
+            SELECT cr.concept_a_id, cr.concept_b_id, cr.common_point, cr.explanation_a, cr.explanation_b
+            FROM concept_relations cr
+            JOIN concepts ca ON ca.id = cr.concept_a_id
+            WHERE ca.user_id = $1
+        """, APP_USER_ID)
+
+    sources_by_concept: dict[int, list[dict]] = defaultdict(list)
+    schools_by_concept: dict[int, list[str]] = defaultdict(list)
+    for r in source_rows:
+        sources_by_concept[r["concept_id"]].append({
+            "type": r["source_type"], "id": r["source_id"],
+            "book_title": r["book_title"], "excerpt": r["excerpt"], "explanation": r["explanation"],
+        })
+        schools_by_concept[r["concept_id"]].append(BOOK_SCHOOL.get(r["book_title"], "其他"))
+
+    nodes = []
+    for c in concept_rows:
+        schools = schools_by_concept.get(c["id"], [])
+        category = max(set(schools), key=schools.count) if schools else "其他"
+        nodes.append({
+            "id": c["id"],
+            "label": c["label"],
+            "size": len(sources_by_concept.get(c["id"], [])),
+            "category": category,
+            "sources": sources_by_concept.get(c["id"], []),
+        })
+
+    edges = [{
+        "source": r["concept_a_id"], "target": r["concept_b_id"],
+        "common_point": r["common_point"],
+        "explanation_a": r["explanation_a"], "explanation_b": r["explanation_b"],
+    } for r in relation_rows]
+
+    return {"nodes": nodes, "edges": edges}
