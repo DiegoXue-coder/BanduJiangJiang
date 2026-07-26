@@ -138,10 +138,21 @@ function hitTestWorklet(px, py, nodes, rotY, rotX, zoom, focusedStarId, cx, cy, 
 // 数据准备：球面Fibonacci均匀分布 + 用真实关联边算连通分量分级出
 // 恒星/行星 + 给每颗恒星的行星们分配环绕角度。只在图谱数据变化时算
 // 一次（useMemo），不是每帧都重算。
+//
+// 这里特意只留下投影/手势真正要用到的字段（id/label/size/category+
+// 算出来的球面坐标和恒星行星分级），不带每个节点原本的`sources`
+// 数组——那里面是完整的划线原文+AI解释，累计起来是不小的一段中文
+// 长文本。这份"精简版"节点会被reanimated worklet（每个节点自己的
+// useDerivedValue、双击手势的命中测试）捕获闭包变量，worklet捕获
+// 的数据要整份复制到UI线程自己的运行环境里，带着大段文本反复复制
+// 是完全没必要的开销。详情弹窗要用的完整数据（含sources）单独留在
+// 下面的fullById里，只在JS线程的点击回调里查一次，不进worklet。
 function prepareGraph(nodes, edges) {
-  if (!nodes || nodes.length === 0) return { nodes: [], edges: [], byId: {} };
+  if (!nodes || nodes.length === 0) return { nodes: [], edges: [], byId: {}, fullById: {} };
   const byId = {};
-  const prepared = nodes.map((n) => ({ ...n }));
+  const fullById = {};
+  nodes.forEach((n) => { fullById[n.id] = n; });
+  const prepared = nodes.map((n) => ({ id: n.id, label: n.label, size: n.size, category: n.category }));
   prepared.forEach((n) => { byId[n.id] = n; });
 
   const N = prepared.length;
@@ -200,7 +211,7 @@ function prepareGraph(nodes, edges) {
     });
   });
 
-  return { nodes: prepared, edges: validEdges, byId };
+  return { nodes: prepared, edges: validEdges, byId, fullById };
 }
 
 // 每个节点的球面投影（projectNode）只在这一个useDerivedValue里算一次，
@@ -286,7 +297,8 @@ function GraphNodeGroup({ node, byId, rotY, rotX, zoom, focusedStarId, center, r
       >
         {node.label}
       </AnimatedSvgText>
-      <AnimatedCircle animatedProps={circleProps} fill={color} onPress={() => onPressNode(node)} />
+      {/* node是精简版（不带sources），详情弹窗要看完整来源，靠id去fullById查 */}
+      <AnimatedCircle animatedProps={circleProps} fill={color} onPress={() => onPressNode(node.id)} />
     </>
   );
 }
@@ -429,7 +441,7 @@ export default function ConceptGraph() {
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
   const graph = useMemo(() => {
-    if (!data) return { nodes: [], edges: [], byId: {} };
+    if (!data) return { nodes: [], edges: [], byId: {}, fullById: {} };
     return prepareGraph(data.nodes, data.edges);
   }, [data]);
 
@@ -598,7 +610,7 @@ export default function ConceptGraph() {
                 node={n} byId={graph.byId}
                 rotY={rotY} rotX={rotX} zoom={zoom} focusedStarId={focusedStarId}
                 center={center} radius={baseRadius}
-                onPressNode={setSelectedNode}
+                onPressNode={(id) => setSelectedNode(graph.fullById[id])}
               />
             ))}
           </Svg>
@@ -611,8 +623,8 @@ export default function ConceptGraph() {
       {selectedEdge && (
         <EdgeDetailModal
           edge={selectedEdge}
-          nodeA={graph.byId[selectedEdge.source]}
-          nodeB={graph.byId[selectedEdge.target]}
+          nodeA={graph.fullById[selectedEdge.source]}
+          nodeB={graph.fullById[selectedEdge.target]}
           theme={theme}
           onClose={() => setSelectedEdge(null)}
         />
