@@ -1,40 +1,53 @@
 // 阶段十二：知识图谱 v1——替换"关联主题"扁平列表。
 //
-// 技术选型（决策记录，见04-开发进度记录.md）：d3-force算力导向布局的静态
-// 坐标（纯JS，无原生绑定）+ react-native-svg画图（阶段十一已验证真机能用）
-// + react-native-reanimated在静态坐标上叠加持续的漂浮动效（阶段十已验证）。
-// 2026-07-26修订：原定"v1只支持点击、不支持拖拽"改成支持双指缩放+拖拽平移
-// +双击切换缩放（决策层真机验收时改的主意，05-验收标准.md已同步更新）。
-// 用react-native-gesture-handler（阶段三已装、App.js根节点已包过
-// GestureHandlerRootView，不新增原生依赖）在外层包一个Animated.View做
-// 缩放平移变换，SVG内部各节点/连线自己的onPress保持不变、不用重新做
-// 命中测试。
+// 2026-07-26二次重做：原来的"d3-force扁平布局+2D平移缩放"方案被决策层
+// 用效果图（HTML/Canvas原型，在浏览器里实测过手势）否掉，改成真正的
+// 3D球面旋转——节点分布在一个虚拟球面上，拖动旋转、双指缩放；节点按
+// 关联边的连通分量分"恒星"（每个分量里连接数最多的）和"行星"（其余），
+// 默认只有恒星保持清晰，行星画得很小很暗当背景纹理（全局连线始终都在，
+// 不是整个隐藏），双击带光环的恒星才会展开——它的行星被拉到恒星当前
+// 屏幕位置周围的固定环上、变亮变大，同时镜头转到正对着这颗恒星、精确
+// 居中（水平靠rotY、垂直靠rotX两个方向都解，不是只解水平那一个方向）。
+// 再双击一次收起。单击（走react-native-svg原生onPress，不是手势库）
+// 永远只弹来源详情卡片，不牵动镜头，跟双击的展开/聚焦互不冲突。
+// 这一整套投影/连通分量/居中数学是先在一个独立HTML原型里用真实生产
+// 数据反复验证过的，这里是照那份验证过的公式搬过来，不是重新猜的。
+//
+// 技术选型：球面投影+旋转是纯数学，不依赖d3-force——原来那个依赖已经
+// 从package.json里删掉了。react-native-svg（阶段十一验证过）+
+// react-native-gesture-handler（阶段三装的，App.js已包GestureHandlerRootView）
+// + reanimated共享变量（阶段十验证过），三个库都是已经在用的，没有新增
+// 原生依赖。所有节点的位置计算（球面投影、行星展开环、漂浮偏移）都写成
+// worklet在UI线程跑，拖拽/缩放这种要求60fps连续更新的交互不会因为要
+// 过JS线程桥而卡顿；只有单击弹卡片这个低频交互还是走JS线程的原生onPress。
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   View, Text, StyleSheet, ActivityIndicator, TouchableOpacity,
   Pressable, ScrollView,
 } from 'react-native';
-import Svg, { Circle, Line, Text as SvgText, G } from 'react-native-svg';
+import Svg, { Circle, Line, Text as SvgText } from 'react-native-svg';
 import Animated, {
-  useSharedValue, useAnimatedProps, useAnimatedStyle, withRepeat, withTiming, Easing,
+  useSharedValue, useAnimatedProps, withRepeat, withTiming, withDecay, Easing,
 } from 'react-native-reanimated';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
-import { forceSimulation, forceManyBody, forceLink, forceCenter, forceCollide } from 'd3-force';
 import { useFocusEffect } from '@react-navigation/native';
 import { getConceptGraph } from '../lib/api';
 import { useTheme } from '../theme';
 import { FONTS } from '../fonts';
 
 const AnimatedCircle = Animated.createAnimatedComponent(Circle);
-const MIN_ZOOM = 1;
-const MAX_ZOOM = 4;
-const DOUBLE_TAP_ZOOM = 2.2;
+const AnimatedLine = Animated.createAnimatedComponent(Line);
+const AnimatedSvgText = Animated.createAnimatedComponent(SvgText);
+
+const ZOOM_MIN = 0.6;
+const ZOOM_MAX = 3.2;
+const FOCUS_ZOOM = 1.9;
 
 // 深色星空感背景是图谱区域自己固定的视觉风格，不跟随App的亮色/暗色主题
 // 切换——星空氛围本身就该是暗的，跟着切成亮色反而破坏设计意图。
 const SPACE_BG = '#12141F';
 const STAR_COLOR = 'rgba(255,255,255,0.18)';
-const EDGE_COLOR = 'rgba(200,195,220,0.22)';
+const EDGE_COLOR = 'rgb(200,195,220)';
 
 // 节点颜色按思想流派分组（不是按书——一个概念可能横跨多本书），三个流派
 // 目前够用，颜色数量卡在2-3个之内，避免每本书一个颜色导致的视觉噪音。
@@ -45,35 +58,158 @@ const CATEGORY_COLOR = {
   '其他': '#8B96AC',
 };
 
-function computeLayout(nodes, edges) {
-  if (nodes.length === 0) return [];
-  const simNodes = nodes.map((n) => ({ ...n }));
-  const simLinks = edges
-    .map((e) => ({ source: e.source, target: e.target }))
-    // d3-force 的 forceLink 要求 source/target 能在节点数组里找到对应id，
-    // 后端理论上不会返回悬空引用，但防御一下避免脏数据直接让模拟崩掉
-    .filter((l) => simNodes.some((n) => n.id === l.source) && simNodes.some((n) => n.id === l.target));
-
-  const sim = forceSimulation(simNodes)
-    .force('charge', forceManyBody().strength(-90))
-    .force('link', forceLink(simLinks).id((d) => d.id).distance(75))
-    .force('center', forceCenter(0, 0))
-    .force('collide', forceCollide((d) => 16 + Math.min(d.size, 8) * 2.5))
-    .stop();
-  // 力导向布局是v1的静态排布，不是每帧都在跑的实时物理——收敛到稳定位置
-  // 后就停，节省性能，跟"漂浮动效"（reanimated负责，见FloatingNode）是
-  // 两套完全独立的动画层
-  for (let i = 0; i < 300; i += 1) sim.tick();
-  return simNodes;
+function nodeRadius(n) {
+  'worklet';
+  return 10 + Math.min(n.size, 8) * 2.5;
 }
 
-// 每个节点在算好的静态坐标之上，叠加一个独立、参数各自随机的漂浮偏移
-// 动画——幅度小（4-8px）、周期长且互不相同（2.6-4.4秒），看起来是自然
-// 漂浮不是同步机械抖动。
-function FloatingNode({ node, onPress }) {
+// 球面旋转+投影，加上"双击展开的行星贴在恒星旁边环绕"这条特殊分支——
+// 单击/双击手势的命中测试、每个节点自己的位置动画，全部复用这同一个
+// 函数，保证"眼睛看到哪、手指点哪"和"实际画在哪"永远是同一套计算，
+// 不会出现两边算法不一致导致点不准的情况。
+function projectNode(node, rotY, rotX, zoom, focusedStarId, cx, cy, R, byId) {
+  'worklet';
+  const cosY = Math.cos(rotY);
+  const sinY = Math.sin(rotY);
+  const cosX = Math.cos(rotX);
+  const sinX = Math.sin(rotX);
+  function proj(ux, uy, uz) {
+    const x1 = ux * cosY + uz * sinY;
+    const z1 = -ux * sinY + uz * cosY;
+    const y2 = uy * cosX - z1 * sinX;
+    const z2 = uy * sinX + z1 * cosX;
+    return { x: x1, y: y2, depth: z2 };
+  }
+  const isFocusedPlanet = !node.isStar && focusedStarId === node.starId;
+  if (isFocusedPlanet) {
+    const star = byId[node.starId];
+    const sp = proj(star.ux, star.uy, star.uz);
+    const starScale = 0.32 + 0.78 * ((sp.depth + 1) / 2);
+    const starSx = cx + sp.x * R;
+    const starSy = cy + sp.y * R;
+    const starSr = nodeRadius(star) * starScale * 0.62;
+    const ringR = starSr + 46;
+    return {
+      sx: starSx + Math.cos(node.planetAngle) * ringR,
+      sy: starSy + Math.sin(node.planetAngle) * ringR * 0.9,
+      sr: Math.max(9, nodeRadius(node) * 0.5),
+      opacity: 1,
+      depth: 1,
+    };
+  }
+  const p = proj(node.ux, node.uy, node.uz);
+  const ambient = !node.isStar;
+  const sizeMul = ambient ? 0.34 : 1;
+  const scale = (0.32 + 0.78 * ((p.depth + 1) / 2)) * sizeMul;
+  const opacity = (0.12 + 0.85 * ((p.depth + 1) / 2)) * (ambient ? 0.4 : 1);
+  return {
+    sx: cx + p.x * R,
+    sy: cy + p.y * R,
+    sr: nodeRadius(node) * scale * 0.62,
+    opacity,
+    depth: p.depth,
+  };
+}
+
+function normalizeAngleWorklet(a) {
+  'worklet';
+  let v = a;
+  while (v > Math.PI) v -= Math.PI * 2;
+  while (v < -Math.PI) v += Math.PI * 2;
+  return v;
+}
+
+function hitTestWorklet(px, py, nodes, rotY, rotX, zoom, focusedStarId, cx, cy, R, byId) {
+  'worklet';
+  let best = null;
+  let bestD = Infinity;
+  for (let i = 0; i < nodes.length; i += 1) {
+    const n = nodes[i];
+    const p = projectNode(n, rotY, rotX, zoom, focusedStarId, cx, cy, R, byId);
+    const dx = px - p.sx;
+    const dy = py - p.sy;
+    const d = Math.sqrt(dx * dx + dy * dy);
+    const hitR = Math.max(14, p.sr) + 6;
+    if (d < hitR && d < bestD) { bestD = d; best = n; }
+  }
+  return best;
+}
+
+// 数据准备：球面Fibonacci均匀分布 + 用真实关联边算连通分量分级出
+// 恒星/行星 + 给每颗恒星的行星们分配环绕角度。只在图谱数据变化时算
+// 一次（useMemo），不是每帧都重算。
+function prepareGraph(nodes, edges) {
+  if (!nodes || nodes.length === 0) return { nodes: [], edges: [], byId: {} };
+  const byId = {};
+  const prepared = nodes.map((n) => ({ ...n }));
+  prepared.forEach((n) => { byId[n.id] = n; });
+
+  const N = prepared.length;
+  const golden = Math.PI * (3 - Math.sqrt(5));
+  prepared.forEach((n, i) => {
+    const y = N > 1 ? 1 - (i / (N - 1)) * 2 : 0;
+    const rY = Math.sqrt(Math.max(0, 1 - y * y));
+    const theta = golden * i;
+    n.ux = Math.cos(theta) * rY;
+    n.uy = y;
+    n.uz = Math.sin(theta) * rY;
+  });
+
+  const parent = {};
+  prepared.forEach((n) => { parent[n.id] = n.id; });
+  const find = (x) => {
+    let v = x;
+    while (parent[v] !== v) { parent[v] = parent[parent[v]]; v = parent[v]; }
+    return v;
+  };
+  const union = (a, b) => {
+    const ra = find(a);
+    const rb = find(b);
+    if (ra !== rb) parent[ra] = rb;
+  };
+  const degree = {};
+  prepared.forEach((n) => { degree[n.id] = 0; });
+  const validEdges = edges.filter((e) => byId[e.source] && byId[e.target]);
+  validEdges.forEach((e) => {
+    union(e.source, e.target);
+    degree[e.source] = (degree[e.source] || 0) + 1;
+    degree[e.target] = (degree[e.target] || 0) + 1;
+  });
+
+  const componentMembers = {};
+  prepared.forEach((n) => {
+    const r = find(n.id);
+    (componentMembers[r] = componentMembers[r] || []).push(n.id);
+  });
+  Object.keys(componentMembers).forEach((root) => {
+    const members = componentMembers[root];
+    const hub = members.reduce((best, id) => {
+      if (best === null) return id;
+      if (degree[id] > degree[best]) return id;
+      if (degree[id] === degree[best] && byId[id].size > byId[best].size) return id;
+      return best;
+    }, null);
+    members.forEach((id) => {
+      byId[id].starId = hub;
+      byId[id].isStar = id === hub;
+      byId[id].hasPlanets = id === hub && members.length > 1;
+    });
+    const planetIds = members.filter((id) => id !== hub);
+    planetIds.forEach((id, i) => {
+      byId[id].planetAngle = (i / planetIds.length) * Math.PI * 2 - Math.PI / 2;
+    });
+  });
+
+  return { nodes: prepared, edges: validEdges, byId };
+}
+
+// 每个节点在算好的球面投影坐标之上，叠加一个独立、参数各自随机的漂浮
+// 偏移动画——幅度小、周期长且互不相同，看起来是自然漂浮不是机械抖动。
+// 跟球面旋转（拖拽驱动）是两套独立的动画层，叠加生效。
+function GraphNode({ node, byId, rotY, rotX, zoom, focusedStarId, center, radius, onPress }) {
   const phase = useMemo(() => Math.random() * Math.PI * 2, []);
   const duration = useMemo(() => 2600 + Math.random() * 1800, []);
-  const amplitude = useMemo(() => 4 + Math.random() * 4, []);
+  const amplitude = useMemo(() => 3 + Math.random() * 3, []);
   const t = useSharedValue(0);
 
   useEffect(() => {
@@ -87,24 +223,113 @@ function FloatingNode({ node, onPress }) {
 
   const animatedProps = useAnimatedProps(() => {
     'worklet';
-    const angle = phase + t.value * Math.PI * 2;
+    const p = projectNode(node, rotY.value, rotX.value, zoom.value, focusedStarId.value, center.x, center.y, radius, byId);
+    const floatAngle = phase + t.value * Math.PI * 2;
     return {
-      cx: node.x + Math.cos(angle) * amplitude,
-      cy: node.y + Math.sin(angle) * amplitude,
+      cx: p.sx + Math.cos(floatAngle) * amplitude,
+      cy: p.sy + Math.sin(floatAngle) * amplitude,
+      r: Math.max(1, p.sr),
+      opacity: p.opacity,
     };
   });
-
-  const radius = 10 + Math.min(node.size, 8) * 2.5;
-  const color = CATEGORY_COLOR[node.category] || CATEGORY_COLOR['其他'];
 
   return (
     <AnimatedCircle
       animatedProps={animatedProps}
-      r={radius}
-      fill={color}
-      opacity={0.88}
+      fill={CATEGORY_COLOR[node.category] || CATEGORY_COLOR['其他']}
       onPress={() => onPress(node)}
     />
+  );
+}
+
+// 带光环的圈——提示"这颗恒星双击可以展开"，展开之后（它自己就是当前
+// focusedStarId）就不再画光环，行星本身已经清晰环绕在旁边了。
+function StarHalo({ node, byId, rotY, rotX, zoom, focusedStarId, center, radius }) {
+  const animatedProps = useAnimatedProps(() => {
+    'worklet';
+    const p = projectNode(node, rotY.value, rotX.value, zoom.value, focusedStarId.value, center.x, center.y, radius, byId);
+    const show = focusedStarId.value !== node.id;
+    return {
+      cx: p.sx,
+      cy: p.sy,
+      r: Math.max(1, p.sr) + 4,
+      opacity: show ? p.opacity * 0.55 : 0,
+    };
+  });
+  return (
+    <AnimatedCircle
+      animatedProps={animatedProps}
+      fill="transparent"
+      stroke={CATEGORY_COLOR[node.category] || CATEGORY_COLOR['其他']}
+      strokeWidth={1.5}
+    />
+  );
+}
+
+function GraphEdge({ edge, a, b, byId, rotY, rotX, zoom, focusedStarId, center, radius, onPress }) {
+  const visibleProps = useAnimatedProps(() => {
+    'worklet';
+    const pa = projectNode(a, rotY.value, rotX.value, zoom.value, focusedStarId.value, center.x, center.y, radius, byId);
+    const pb = projectNode(b, rotY.value, rotX.value, zoom.value, focusedStarId.value, center.x, center.y, radius, byId);
+    const avgDepth = (pa.depth + pb.depth) / 2;
+    const bright = focusedStarId.value !== -1 && (a.id === focusedStarId.value || b.id === focusedStarId.value);
+    const baseOp = bright ? 0.42 : 0.12;
+    const op = avgDepth < -0.6 ? 0 : Math.max(0, baseOp * ((avgDepth + 1) / 2));
+    return {
+      x1: pa.sx, y1: pa.sy, x2: pb.sx, y2: pb.sy,
+      strokeOpacity: op,
+      strokeWidth: bright ? 1.4 : 0.8,
+    };
+  });
+  // 加宽的透明命中区域只跟着同一对端点位置动，不带可见线那份透明度/
+  // 粗细动画（不然strokeWidth会被两边worklet互相覆盖，命中区域也会跟着
+  // 变细变窄）。单击它弹思维导图式的关联详情——跟双击展开恒星是完全
+  // 不同的手势，走的还是react-native-svg原生onPress，不会被外层
+  // GestureDetector的双击/拖拽手势抢走。
+  const hitProps = useAnimatedProps(() => {
+    'worklet';
+    const pa = projectNode(a, rotY.value, rotX.value, zoom.value, focusedStarId.value, center.x, center.y, radius, byId);
+    const pb = projectNode(b, rotY.value, rotX.value, zoom.value, focusedStarId.value, center.x, center.y, radius, byId);
+    return { x1: pa.sx, y1: pa.sy, x2: pb.sx, y2: pb.sy };
+  });
+  return (
+    <>
+      <AnimatedLine animatedProps={visibleProps} stroke={EDGE_COLOR} />
+      <AnimatedLine
+        animatedProps={hitProps}
+        stroke="transparent"
+        strokeWidth={22}
+        onPress={() => onPress(edge)}
+      />
+    </>
+  );
+}
+
+// 标签：恒星正对镜头时（depth>0.55）才显示；行星只有在被展开、贴到
+// 环上（这时projectNode把它的depth强制记成1）才显示，平时当背景纹理的
+// 暗淡行星不带标签，避免密密麻麻看不清。
+function GraphLabel({ node, byId, rotY, rotX, zoom, focusedStarId, center, radius }) {
+  const animatedProps = useAnimatedProps(() => {
+    'worklet';
+    const p = projectNode(node, rotY.value, rotX.value, zoom.value, focusedStarId.value, center.x, center.y, radius, byId);
+    const ambientPlanet = !node.isStar && focusedStarId.value !== node.starId;
+    const show = !ambientPlanet && p.depth > 0.55;
+    return {
+      x: p.sx,
+      y: p.sy + p.sr + 12,
+      opacity: show ? Math.min(0.9, p.opacity + 0.1) : 0,
+    };
+  });
+  return (
+    <AnimatedSvgText
+      animatedProps={animatedProps}
+      fill="rgba(255,255,255,0.85)"
+      fontSize={11}
+      fontFamily={FONTS.sansRegular}
+      textAnchor="middle"
+    >
+      {node.label}
+    </AnimatedSvgText>
   );
 }
 
@@ -180,9 +405,6 @@ export default function ConceptGraph() {
   const [error, setError] = useState('');
   const [selectedNode, setSelectedNode] = useState(null);
   const [selectedEdge, setSelectedEdge] = useState(null);
-  // 容器实际可用尺寸——之前写死480高度，在真机上比"划线复盘"页头部+
-  // tab栏之下真正剩余的空间矮了一大截，下面空出一整块背景色，靠onLayout
-  // 量真实尺寸才对得上。
   const [containerSize, setContainerSize] = useState(null);
   const starsRef = useRef(null);
 
@@ -198,110 +420,96 @@ export default function ConceptGraph() {
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
-  const layoutNodes = useMemo(() => {
-    if (!data) return [];
-    return computeLayout(data.nodes, data.edges);
+  const graph = useMemo(() => {
+    if (!data) return { nodes: [], edges: [], byId: {} };
+    return prepareGraph(data.nodes, data.edges);
   }, [data]);
 
-  const nodeById = useMemo(() => {
-    const m = new Map();
-    layoutNodes.forEach((n) => m.set(n.id, n));
-    return m;
-  }, [layoutNodes]);
+  const center = useMemo(
+    () => (containerSize ? { x: containerSize.width / 2, y: containerSize.height / 2 } : { x: 0, y: 0 }),
+    [containerSize],
+  );
+  const baseRadius = useMemo(
+    () => (containerSize ? Math.min(containerSize.width, containerSize.height) * 0.34 : 0),
+    [containerSize],
+  );
 
-  // 力导向布局算出来的坐标范围可能比容器宽/高得多（159个节点铺得很开），
-  // 之前直接用SCREEN_W×固定高度当画布、没设viewBox，超出这个像素范围的
-  // 节点全部被裁掉看不见——159个节点只露出了一小撮。改成按算出来的节点
-  // 坐标包围盒设viewBox+preserveAspectRatio="xMidYMid meet"，整张图谱
-  // 缩放适配到容器里，不管布局实际多大，全部节点都保证在可视范围内。
-  const viewBox = useMemo(() => {
-    if (layoutNodes.length === 0 || !containerSize) return null;
-    const pad = 60; // 留出节点半径+标签文字的空间，不然边缘节点的label被切
-    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-    let sumX = 0, sumY = 0;
-    layoutNodes.forEach((n) => {
-      minX = Math.min(minX, n.x); maxX = Math.max(maxX, n.x);
-      minY = Math.min(minY, n.y); maxY = Math.max(maxY, n.y);
-      sumX += n.x; sumY += n.y;
-    });
-    // 用节点质心（坐标平均值）当画布中心，不用包围盒几何中点——159个节点里
-    // 115个是孤立点（没有关联边），力导向布局收敛后视觉密度天然不对称
-    // （连线多的那一小片聚得紧、孤立点松散地飘在外围），几何中点居中会让
-    // 视觉上"密"的那一片偏向画布一侧、留白看起来不对称（真机截图复现过
-    // 这个现象：上方大片空白、下方紧贴边缘没留白）。质心按视觉重量对齐，
-    // 半径取"质心到最远节点"的距离对称展开，保证居中的同时也不裁掉节点。
-    const centroidX = sumX / layoutNodes.length;
-    const centroidY = sumY / layoutNodes.length;
-    const halfW = Math.max(maxX - centroidX, centroidX - minX) + pad;
-    const halfH = Math.max(maxY - centroidY, centroidY - minY) + pad;
-    const w = Math.max(halfW * 2, containerSize.width);
-    const h = Math.max(halfH * 2, containerSize.height);
-    return `${centroidX - w / 2} ${centroidY - h / 2} ${w} ${h}`;
-  }, [layoutNodes, containerSize]);
-
-  // 双指缩放/拖拽平移的手势状态——默认(scale=1, translate=0)就是上面viewBox
-  // 算出来的"全部节点适配进屏幕"这个默认视图，缩放平移是叠加在这个默认帧
-  // 之上的图层变换（外层Animated.View的transform），不影响内部SVG自己的
-  // viewBox坐标系，所以内部各节点/连线的onPress命中测试完全不用改。
-  const scale = useSharedValue(1);
-  const savedScale = useSharedValue(1);
-  const translateX = useSharedValue(0);
-  const savedTranslateX = useSharedValue(0);
-  const translateY = useSharedValue(0);
-  const savedTranslateY = useSharedValue(0);
+  // 球面旋转/缩放/展开状态——全部是reanimated共享变量，直接在UI线程被
+  // 手势更新、被每个节点的位置worklet读取，中间不经过JS线程，拖拽/双指
+  // 缩放这种要求连续60fps更新的交互不会卡。
+  const rotY = useSharedValue(0.4);
+  const rotX = useSharedValue(-0.25);
+  const zoom = useSharedValue(1);
+  const savedZoom = useSharedValue(1);
+  const focusedStarId = useSharedValue(-1);
 
   useEffect(() => {
-    // 每次重新拉取图谱数据（比如新增了划线触发重新构建）都回到默认视图，
-    // 不残留上一次的缩放/平移状态。
-    scale.value = 1; savedScale.value = 1;
-    translateX.value = 0; savedTranslateX.value = 0;
-    translateY.value = 0; savedTranslateY.value = 0;
+    // 每次重新拉取图谱数据都回到默认视图，不残留上一次的旋转/缩放/展开状态。
+    rotY.value = 0.4; rotX.value = -0.25; zoom.value = 1; savedZoom.value = 1; focusedStarId.value = -1;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data]);
 
-  const pinchGesture = useMemo(() => Gesture.Pinch()
-    .onUpdate((e) => {
-      scale.value = Math.min(Math.max(savedScale.value * e.scale, MIN_ZOOM), MAX_ZOOM);
-    })
-    .onEnd(() => {
-      savedScale.value = scale.value;
-    }), []);
-
   const panGesture = useMemo(() => Gesture.Pan()
     .onUpdate((e) => {
-      translateX.value = savedTranslateX.value + e.translationX;
-      translateY.value = savedTranslateY.value + e.translationY;
+      rotY.value += e.changeX * 0.008;
+      rotX.value = Math.max(-1.1, Math.min(1.1, rotX.value - e.changeY * 0.008));
     })
-    .onEnd(() => {
-      savedTranslateX.value = translateX.value;
-      savedTranslateY.value = translateY.value;
+    .onEnd((e) => {
+      // 松手带一点惯性继续转，像真的在拨一个球，不是拖到哪停到哪。
+      rotY.value = withDecay({ velocity: e.velocityX * 0.008, deceleration: 0.997 });
+      rotX.value = withDecay({ velocity: -e.velocityY * 0.008, deceleration: 0.997, clamp: [-1.1, 1.1] });
     }), []);
 
+  const pinchGesture = useMemo(() => Gesture.Pinch()
+    .onUpdate((e) => {
+      zoom.value = Math.min(Math.max(savedZoom.value * e.scale, ZOOM_MIN), ZOOM_MAX);
+    })
+    .onEnd(() => {
+      savedZoom.value = zoom.value;
+    }), []);
+
+  // 双击：在带光环的恒星上=展开它的行星（拉到环上、变亮）+ 镜头转到正对
+  // 着它、精确居中；再双击一次=收起。在空白处双击=收起当前展开的恒星。
+  // 命中测试和渲染用的是同一个projectNode，点哪看哪不会对不上。
   const doubleTapGesture = useMemo(() => Gesture.Tap()
     .numberOfTaps(2)
-    .onEnd(() => {
-      const zoomedIn = scale.value > 1.05;
-      const nextScale = zoomedIn ? MIN_ZOOM : DOUBLE_TAP_ZOOM;
-      scale.value = withTiming(nextScale, { duration: 220 });
-      translateX.value = withTiming(0, { duration: 220 });
-      translateY.value = withTiming(0, { duration: 220 });
-      savedScale.value = nextScale;
-      savedTranslateX.value = 0;
-      savedTranslateY.value = 0;
-    }), []);
+    .onEnd((e) => {
+      'worklet';
+      const hit = hitTestWorklet(
+        e.x, e.y, graph.nodes, rotY.value, rotX.value, zoom.value, focusedStarId.value,
+        center.x, center.y, baseRadius, graph.byId,
+      );
+      if (!hit) {
+        if (focusedStarId.value !== -1) {
+          focusedStarId.value = -1;
+          zoom.value = withTiming(1, { duration: 380 });
+        }
+        return;
+      }
+      if (hit.hasPlanets) {
+        if (focusedStarId.value === hit.id) {
+          focusedStarId.value = -1;
+          zoom.value = withTiming(1, { duration: 380 });
+          return;
+        }
+        focusedStarId.value = hit.id;
+      }
+      // 把命中节点的单位向量转到正对镜头：先解水平（rotY让x1=0，
+      // z1必为sqrt(ux²+uz²)正值），再用这个z1解垂直（rotX让y2=0）——
+      // 两个方向都解才是真正居中，只解水平那一版真机上明显偏上/偏下。
+      const mag = Math.sqrt(hit.ux * hit.ux + hit.uz * hit.uz) || 0.0001;
+      const targetRotY = Math.atan2(-hit.ux, hit.uz);
+      const targetRotX = Math.atan2(hit.uy, mag);
+      const deltaY = normalizeAngleWorklet(targetRotY - rotY.value);
+      rotY.value = withTiming(rotY.value + deltaY, { duration: 420 });
+      rotX.value = withTiming(targetRotX, { duration: 420 });
+      zoom.value = withTiming(FOCUS_ZOOM, { duration: 420 });
+    }), [graph, center, baseRadius]);
 
   const composedGesture = useMemo(
     () => Gesture.Exclusive(doubleTapGesture, Gesture.Simultaneous(pinchGesture, panGesture)),
     [doubleTapGesture, pinchGesture, panGesture],
   );
-
-  const animatedTransformStyle = useAnimatedStyle(() => ({
-    transform: [
-      { translateX: translateX.value },
-      { translateY: translateY.value },
-      { scale: scale.value },
-    ],
-  }));
 
   if (data === null && !error) {
     return (
@@ -333,7 +541,7 @@ export default function ConceptGraph() {
   }
 
   if (containerSize && !starsRef.current) {
-    starsRef.current = Array.from({ length: 60 }, () => ({
+    starsRef.current = Array.from({ length: 70 }, () => ({
       x: Math.random() * containerSize.width,
       y: Math.random() * containerSize.height,
       r: 0.5 + Math.random() * 1,
@@ -348,47 +556,52 @@ export default function ConceptGraph() {
         setContainerSize((prev) => (prev && prev.width === width && prev.height === height ? prev : { width, height }));
       }}
     >
-      {containerSize && viewBox && (
+      {containerSize && graph.nodes.length > 0 && (
         <GestureDetector gesture={composedGesture}>
-          <Animated.View style={[{ width: containerSize.width, height: containerSize.height }, animatedTransformStyle]}>
-            <Svg width={containerSize.width} height={containerSize.height} viewBox={viewBox} preserveAspectRatio="xMidYMid meet">
-              {starsRef.current.map((s, i) => (
-                <Circle key={`star-${i}`} cx={s.x} cy={s.y} r={s.r} fill={STAR_COLOR} />
-              ))}
-              {data.edges.map((e, i) => {
-                const a = nodeById.get(e.source);
-                const b = nodeById.get(e.target);
-                if (!a || !b) return null;
-                return (
-                  <G key={`edge-${i}`}>
-                    <Line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={EDGE_COLOR} strokeWidth={1} />
-                    {/* 加宽的透明命中区域，手指点细线不好点准 */}
-                    <Line
-                      x1={a.x} y1={a.y} x2={b.x} y2={b.y}
-                      stroke="transparent" strokeWidth={22}
-                      onPress={() => setSelectedEdge(e)}
-                    />
-                  </G>
-                );
-              })}
-              {layoutNodes.map((n) => (
-                <SvgText
-                  key={`label-${n.id}`}
-                  x={n.x}
-                  y={n.y + 10 + Math.min(n.size, 8) * 2.5 + 14}
-                  fill="rgba(255,255,255,0.75)"
-                  fontSize={11}
-                  fontFamily={FONTS.sansRegular}
-                  textAnchor="middle"
-                >
-                  {n.label}
-                </SvgText>
-              ))}
-              {layoutNodes.map((n) => (
-                <FloatingNode key={n.id} node={n} onPress={setSelectedNode} />
-              ))}
-            </Svg>
-          </Animated.View>
+          <Svg width={containerSize.width} height={containerSize.height}>
+            {starsRef.current.map((s, i) => (
+              <Circle key={`star-${i}`} cx={s.x} cy={s.y} r={s.r} fill={STAR_COLOR} />
+            ))}
+            {graph.edges.map((e, i) => {
+              const a = graph.byId[e.source];
+              const b = graph.byId[e.target];
+              if (!a || !b) return null;
+              return (
+                <GraphEdge
+                  key={`edge-${i}`}
+                  edge={e} a={a} b={b} byId={graph.byId}
+                  rotY={rotY} rotX={rotX} zoom={zoom} focusedStarId={focusedStarId}
+                  center={center} radius={baseRadius}
+                  onPress={setSelectedEdge}
+                />
+              );
+            })}
+            {graph.nodes.filter((n) => n.hasPlanets).map((n) => (
+              <StarHalo
+                key={`halo-${n.id}`}
+                node={n} byId={graph.byId}
+                rotY={rotY} rotX={rotX} zoom={zoom} focusedStarId={focusedStarId}
+                center={center} radius={baseRadius}
+              />
+            ))}
+            {graph.nodes.map((n) => (
+              <GraphLabel
+                key={`label-${n.id}`}
+                node={n} byId={graph.byId}
+                rotY={rotY} rotX={rotX} zoom={zoom} focusedStarId={focusedStarId}
+                center={center} radius={baseRadius}
+              />
+            ))}
+            {graph.nodes.map((n) => (
+              <GraphNode
+                key={n.id}
+                node={n} byId={graph.byId}
+                rotY={rotY} rotX={rotX} zoom={zoom} focusedStarId={focusedStarId}
+                center={center} radius={baseRadius}
+                onPress={setSelectedNode}
+              />
+            ))}
+          </Svg>
         </GestureDetector>
       )}
 
@@ -398,8 +611,8 @@ export default function ConceptGraph() {
       {selectedEdge && (
         <EdgeDetailModal
           edge={selectedEdge}
-          nodeA={nodeById.get(selectedEdge.source)}
-          nodeB={nodeById.get(selectedEdge.target)}
+          nodeA={graph.byId[selectedEdge.source]}
+          nodeB={graph.byId[selectedEdge.target]}
           theme={theme}
           onClose={() => setSelectedEdge(null)}
         />
