@@ -8,10 +8,10 @@
 // 不是整个隐藏），双击带光环的恒星才会展开——它的行星被拉到恒星当前
 // 屏幕位置周围的固定环上、变亮变大，同时镜头转到正对着这颗恒星、精确
 // 居中（水平靠rotY、垂直靠rotX两个方向都解，不是只解水平那一个方向）。
-// 再双击一次收起。单击（走react-native-svg原生onPress，不是手势库）
-// 永远只弹来源详情卡片，不牵动镜头，跟双击的展开/聚焦互不冲突。
-// 这一整套投影/连通分量/居中数学是先在一个独立HTML原型里用真实生产
-// 数据反复验证过的，这里是照那份验证过的公式搬过来，不是重新猜的。
+// 再双击一次收起。单击永远只弹来源详情卡片，不牵动镜头，跟双击的展开/
+// 聚焦互不冲突。这一整套投影/连通分量/居中数学是先在一个独立HTML原型里
+// 用真实生产数据反复验证过的，这里是照那份验证过的公式搬过来，不是重新
+// 猜的。
 //
 // 技术选型：球面投影+旋转是纯数学，不依赖d3-force——原来那个依赖已经
 // 从package.json里删掉了。react-native-svg（阶段十一验证过）+
@@ -19,7 +19,15 @@
 // + reanimated共享变量（阶段十验证过），三个库都是已经在用的，没有新增
 // 原生依赖。所有节点的位置计算（球面投影、行星展开环、漂浮偏移）都写成
 // worklet在UI线程跑，拖拽/缩放这种要求60fps连续更新的交互不会因为要
-// 过JS线程桥而卡顿；只有单击弹卡片这个低频交互还是走JS线程的原生onPress。
+// 过JS线程桥而卡顿。
+// 2026-07-27三次修订：真机反馈"一滑动就黑屏"，几轮性能优化（去重计算、
+// 剥离worklet闭包里的大文本）都没能解决，说明根因大概率不是计算量，是
+// 结构性的——单击原来走react-native-svg自己的原生onPress（旧的、基于
+// responder的触摸系统），跟外层GestureDetector的Pan/Pinch/双击（新的
+// 手势识别系统）同时作用在同一批SVG元素上，这两套触摸系统本来就是社区
+// 里公认容易互相冲突的组合。这次把单击也改成用同一套projectNode+命中
+// 测试逻辑、通过手势库识别（不再用SVG原生onPress），全部触摸交互统一
+// 到一个系统里，不再有两套系统同时抢同一批元素的情况。
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   View, Text, StyleSheet, ActivityIndicator, TouchableOpacity,
@@ -27,7 +35,7 @@ import {
 } from 'react-native';
 import Svg, { Circle, Line, Text as SvgText } from 'react-native-svg';
 import Animated, {
-  useSharedValue, useDerivedValue, useAnimatedProps, withRepeat, withTiming, withDecay, Easing,
+  useSharedValue, useDerivedValue, useAnimatedProps, withRepeat, withTiming, withDecay, Easing, runOnJS,
 } from 'react-native-reanimated';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import { useFocusEffect } from '@react-navigation/native';
@@ -122,11 +130,8 @@ function normalizeAngleWorklet(a) {
   return v;
 }
 
-function hitTestWorklet(px, py, nodes, rotY, rotX, zoom, focusedStarId, cx, cy, R, byId) {
+function nodeHitTestWorklet(px, py, nodes, trig, zoom, focusedStarId, cx, cy, R, byId) {
   'worklet';
-  // 命中测试是一次性的（点一下才跑一次），不是每帧都跑，这里现算一次
-  // trig就够了，不需要接外层那份每帧共享的trig。
-  const trig = { cosY: Math.cos(rotY), sinY: Math.sin(rotY), cosX: Math.cos(rotX), sinX: Math.sin(rotX) };
   let best = null;
   let bestD = Infinity;
   for (let i = 0; i < nodes.length; i += 1) {
@@ -139,6 +144,50 @@ function hitTestWorklet(px, py, nodes, rotY, rotX, zoom, focusedStarId, cx, cy, 
     if (d < hitR && d < bestD) { bestD = d; best = n; }
   }
   return best;
+}
+
+function distToSegmentWorklet(px, py, x1, y1, x2, y2) {
+  'worklet';
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const lenSq = dx * dx + dy * dy;
+  let t = lenSq > 0 ? ((px - x1) * dx + (py - y1) * dy) / lenSq : 0;
+  t = Math.max(0, Math.min(1, t));
+  const cx = x1 + t * dx;
+  const cy = y1 + t * dy;
+  const ddx = px - cx;
+  const ddy = py - cy;
+  return Math.sqrt(ddx * ddx + ddy * ddy);
+}
+
+function edgeHitTestWorklet(px, py, edges, byId, trig, zoom, focusedStarId, cx, cy, R) {
+  'worklet';
+  let best = null;
+  let bestD = Infinity;
+  for (let i = 0; i < edges.length; i += 1) {
+    const e = edges[i];
+    const a = byId[e.source];
+    const b = byId[e.target];
+    if (!a || !b) continue;
+    const pa = projectNode(a, trig, zoom, focusedStarId, cx, cy, R, byId);
+    const pb = projectNode(b, trig, zoom, focusedStarId, cx, cy, R, byId);
+    const d = distToSegmentWorklet(px, py, pa.sx, pa.sy, pb.sx, pb.sy);
+    if (d < 16 && d < bestD) { bestD = d; best = e; }
+  }
+  return best;
+}
+
+// 单击/双击共用的统一命中测试——先测节点（画在最上面、优先级更高），
+// 没点中节点再测连线。命中测试本身是一次性的（点一下才跑一次），不是
+// 每帧都跑，这里现算一次trig就够了，不用接外层那份每帧共享的trig。
+function hitTestAllWorklet(px, py, nodes, edges, byId, rotY, rotX, zoom, focusedStarId, cx, cy, R) {
+  'worklet';
+  const trig = { cosY: Math.cos(rotY), sinY: Math.sin(rotY), cosX: Math.cos(rotX), sinX: Math.sin(rotX) };
+  const node = nodeHitTestWorklet(px, py, nodes, trig, zoom, focusedStarId, cx, cy, R, byId);
+  if (node) return { type: 'node', node };
+  const edge = edgeHitTestWorklet(px, py, edges, byId, trig, zoom, focusedStarId, cx, cy, R);
+  if (edge) return { type: 'edge', edge };
+  return null;
 }
 
 // 数据准备：球面Fibonacci均匀分布 + 用真实关联边算连通分量分级出
@@ -225,7 +274,7 @@ function prepareGraph(nodes, edges) {
 // 三角函数——一个节点原来最多被独立投影3次，159个节点+44条边（每条边
 // 又牵两个端点）在拖拽时每帧要跑的worklet次数相当可观，合并成算一次、
 // 多处共享，直接把这部分计算量砍掉三分之二左右。
-function GraphNodeGroup({ node, byId, trig, zoom, focusedStarId, center, radius, onPressNode }) {
+function GraphNodeGroup({ node, byId, trig, zoom, focusedStarId, center, radius }) {
   const phase = useMemo(() => Math.random() * Math.PI * 2, []);
   const duration = useMemo(() => 2600 + Math.random() * 1800, []);
   const amplitude = useMemo(() => 3 + Math.random() * 3, []);
@@ -311,15 +360,16 @@ function GraphNodeGroup({ node, byId, trig, zoom, focusedStarId, center, radius,
       >
         {node.label}
       </AnimatedSvgText>
-      {/* node是精简版（不带sources），详情弹窗要看完整来源，靠id去fullById查 */}
-      <AnimatedCircle animatedProps={circleProps} fill={color} onPress={() => onPressNode(node.id)} />
+      <AnimatedCircle animatedProps={circleProps} fill={color} />
     </>
   );
 }
 
-function GraphEdge({ edge, a, b, byId, trig, zoom, focusedStarId, center, radius, onPress }) {
-  // 两个端点各自的投影只算一次（useDerivedValue），下面两条Line（可见的
-  // 细线+加宽的透明命中区域）共用同一份结果，不用各自重复算一遍三角函数。
+// 单击连线弹思维导图式详情走的是统一的单击手势（跟单击节点、双击展开
+// 恒星同一套系统），不再用react-native-svg自己的原生onPress+加宽透明
+// 命中线那套——两套触摸系统同时作用在同一批SVG元素上是真机"一拖拽就
+// 黑屏"的头号疑点，这次统一成一套，GraphEdge只需要画出可见的那条线。
+function GraphEdge({ a, b, byId, trig, zoom, focusedStarId, center, radius }) {
   const projA = useDerivedValue(() => {
     'worklet';
     return projectNode(a, trig.value, zoom.value, focusedStarId.value, center.x, center.y, radius, byId);
@@ -343,28 +393,7 @@ function GraphEdge({ edge, a, b, byId, trig, zoom, focusedStarId, center, radius
       strokeWidth: bright ? 1.4 : 0.8,
     };
   });
-  // 加宽的透明命中区域只跟着同一对端点位置动，不带可见线那份透明度/
-  // 粗细动画（不然strokeWidth会被两边worklet互相覆盖，命中区域也会跟着
-  // 变细变窄）。单击它弹思维导图式的关联详情——跟双击展开恒星是完全
-  // 不同的手势，走的还是react-native-svg原生onPress，不会被外层
-  // GestureDetector的双击/拖拽手势抢走。
-  const hitProps = useAnimatedProps(() => {
-    'worklet';
-    const pa = projA.value;
-    const pb = projB.value;
-    return { x1: pa.sx, y1: pa.sy, x2: pb.sx, y2: pb.sy };
-  });
-  return (
-    <>
-      <AnimatedLine animatedProps={visibleProps} stroke={EDGE_COLOR} />
-      <AnimatedLine
-        animatedProps={hitProps}
-        stroke="transparent"
-        strokeWidth={22}
-        onPress={() => onPress(edge)}
-      />
-    </>
-  );
+  return <AnimatedLine animatedProps={visibleProps} stroke={EDGE_COLOR} />;
 }
 
 function NodeDetailModal({ node, theme, onClose }) {
@@ -468,6 +497,12 @@ export default function ConceptGraph() {
     [containerSize],
   );
 
+  // 单击手势worklet命中测试之后，用runOnJS桥回JS线程调这三个普通函数——
+  // 只在这里查一次fullById拿完整来源数据，不会把大段文本带进任何worklet闭包。
+  const openNode = useCallback((id) => setSelectedNode(graph.fullById[id]), [graph]);
+  const openEdge = useCallback((edge) => setSelectedEdge(edge), []);
+  const closeCards = useCallback(() => { setSelectedNode(null); setSelectedEdge(null); }, []);
+
   // 球面旋转/缩放/展开状态——全部是reanimated共享变量，直接在UI线程被
   // 手势更新、被每个节点的位置worklet读取，中间不经过JS线程，拖拽/双指
   // 缩放这种要求连续60fps更新的交互不会卡。
@@ -529,8 +564,9 @@ export default function ConceptGraph() {
     .numberOfTaps(2)
     .onEnd((e) => {
       'worklet';
-      const hit = hitTestWorklet(
-        e.x, e.y, graph.nodes, rotY.value, rotX.value, zoom.value, focusedStarId.value,
+      const tapTrig = { cosY: Math.cos(rotY.value), sinY: Math.sin(rotY.value), cosX: Math.cos(rotX.value), sinX: Math.sin(rotX.value) };
+      const hit = nodeHitTestWorklet(
+        e.x, e.y, graph.nodes, tapTrig, zoom.value, focusedStarId.value,
         center.x, center.y, baseRadius, graph.byId,
       );
       if (!hit) {
@@ -560,9 +596,39 @@ export default function ConceptGraph() {
       zoom.value = withTiming(FOCUS_ZOOM, { duration: 420 });
     }), [graph, center, baseRadius]);
 
+  // 单击：命中节点弹来源详情卡片，命中连线弹思维导图式关联详情，都不
+  // 命中就关掉当前打开的卡片。这三件事原来分别走react-native-svg节点
+  // 自己的onPress、连线自己的加宽透明命中线onPress——跟双击/拖拽/缩放
+  // 这条走手势库的路径是两套完全独立的触摸系统，同时作用在同一批SVG
+  // 元素上。真机反馈"一拖拽就黑屏"这个问题在好几轮性能优化后依然存在，
+  // 说明根因大概率不是算得慢，是这两套系统本身的冲突——统一改成单击也
+  // 走手势库+同一个命中测试函数，JS线程这边只需要runOnJS桥一次"点中了
+  // 什么"，不再有任何SVG元素挂原生onPress。
+  const singleTapGesture = useMemo(() => Gesture.Tap()
+    .maxDuration(250)
+    .onEnd((e) => {
+      'worklet';
+      const hit = hitTestAllWorklet(
+        e.x, e.y, graph.nodes, graph.edges, graph.byId,
+        rotY.value, rotX.value, zoom.value, focusedStarId.value,
+        center.x, center.y, baseRadius,
+      );
+      if (hit && hit.type === 'node') {
+        runOnJS(openNode)(hit.node.id);
+      } else if (hit && hit.type === 'edge') {
+        runOnJS(openEdge)(hit.edge);
+      } else {
+        runOnJS(closeCards)();
+      }
+    }), [graph, center, baseRadius, openNode, openEdge, closeCards]);
+
   const composedGesture = useMemo(
-    () => Gesture.Exclusive(doubleTapGesture, Gesture.Simultaneous(pinchGesture, panGesture)),
-    [doubleTapGesture, pinchGesture, panGesture],
+    () => Gesture.Simultaneous(
+      Gesture.Exclusive(doubleTapGesture, singleTapGesture),
+      pinchGesture,
+      panGesture,
+    ),
+    [doubleTapGesture, singleTapGesture, pinchGesture, panGesture],
   );
 
   if (data === null && !error) {
@@ -612,34 +678,37 @@ export default function ConceptGraph() {
     >
       {containerSize && graph.nodes.length > 0 && (
         <GestureDetector gesture={composedGesture}>
-          <Svg width={containerSize.width} height={containerSize.height}>
-            {starsRef.current.map((s, i) => (
-              <Circle key={`star-${i}`} cx={s.x} cy={s.y} r={s.r} fill={STAR_COLOR} />
-            ))}
-            {graph.edges.map((e, i) => {
-              const a = graph.byId[e.source];
-              const b = graph.byId[e.target];
-              if (!a || !b) return null;
-              return (
-                <GraphEdge
-                  key={`edge-${i}`}
-                  edge={e} a={a} b={b} byId={graph.byId}
+          {/* GestureDetector包一层普通View（不是直接包Svg）——之前的写法是
+              直接把GestureDetector套在Svg外面，这次统一单击手势的同时顺手
+              改成更常规的写法，减少一个不必要的变量。 */}
+          <View style={{ width: containerSize.width, height: containerSize.height }}>
+            <Svg width={containerSize.width} height={containerSize.height}>
+              {starsRef.current.map((s, i) => (
+                <Circle key={`star-${i}`} cx={s.x} cy={s.y} r={s.r} fill={STAR_COLOR} />
+              ))}
+              {graph.edges.map((e, i) => {
+                const a = graph.byId[e.source];
+                const b = graph.byId[e.target];
+                if (!a || !b) return null;
+                return (
+                  <GraphEdge
+                    key={`edge-${i}`}
+                    a={a} b={b} byId={graph.byId}
+                    trig={trig} zoom={zoom} focusedStarId={focusedStarId}
+                    center={center} radius={baseRadius}
+                  />
+                );
+              })}
+              {graph.nodes.map((n) => (
+                <GraphNodeGroup
+                  key={n.id}
+                  node={n} byId={graph.byId}
                   trig={trig} zoom={zoom} focusedStarId={focusedStarId}
                   center={center} radius={baseRadius}
-                  onPress={setSelectedEdge}
                 />
-              );
-            })}
-            {graph.nodes.map((n) => (
-              <GraphNodeGroup
-                key={n.id}
-                node={n} byId={graph.byId}
-                trig={trig} zoom={zoom} focusedStarId={focusedStarId}
-                center={center} radius={baseRadius}
-                onPressNode={(id) => setSelectedNode(graph.fullById[id])}
-              />
-            ))}
-          </Svg>
+              ))}
+            </Svg>
+          </View>
         </GestureDetector>
       )}
 
