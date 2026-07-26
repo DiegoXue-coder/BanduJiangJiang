@@ -1183,6 +1183,33 @@ async def app_replace_book(book_id: int, file: UploadFile = File(...), _=ExtAuth
 
     return BookOut(id=book_id, title=title, author=author, added_at=updated["added_at"])
 
+@app.delete("/app/books/{book_id}")
+async def app_delete_book(book_id: int, _=ExtAuth):
+    """整本删除（书+章节+划线+阅读进度），用于内容纠错场景（比如章节切分规则
+    改过、需要用不同章节数的新EPUB整体替换旧版本——这种情况下不能用上面的
+    `/replace`接口，那个接口要求新旧章节数量必须一致）。v1没有"用户在书架里
+    删除一本书"这个产品功能，这个接口是给内容维护用的管理操作，不对应任何
+    前端入口。
+
+    books/chapters/highlights/reading_progress 之间的外键都设了 ON DELETE
+    CASCADE，删 books 这一行会自动带走其余三张表里的关联记录。但
+    qa_history.book_id 是普通 TEXT 字段（阶段一为了兼容 Chrome 扩展那边的
+    字符串型书籍ID，没有建外键约束），删 books 不会级联到它，这里手动补上。
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            book = await conn.fetchrow("SELECT file_path FROM books WHERE id = $1", book_id)
+            if not book:
+                raise HTTPException(status_code=404, detail="书本不存在")
+            await conn.execute("DELETE FROM qa_history WHERE book_id = $1", str(book_id))
+            await conn.execute("DELETE FROM books WHERE id = $1", book_id)
+    try:
+        os.remove(book["file_path"])
+    except OSError:
+        pass
+    return {"deleted": True, "book_id": book_id}
+
 @app.get("/app/books", response_model=list[BookOut])
 async def app_get_library(_=ExtAuth):
     """书架：返回当前用户的所有书本，附带各自的阅读进度。"""
