@@ -1596,9 +1596,10 @@ async def _extract_concepts(text: str, ds: OpenAI) -> list[dict]:
 \"\"\""""
     resp = await asyncio.to_thread(
         lambda: ds.chat.completions.create(
-            model="deepseek-chat",
+            model="deepseek-v4-flash",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3,
+            extra_body={"thinking": {"type": "disabled"}},
         )
     )
     data = _parse_json_response(resp.choices[0].message.content)
@@ -1617,9 +1618,10 @@ async def _explain_concept_relation(label_a: str, label_b: str, ds: OpenAI) -> d
 {{"common_point": "共同点一句话总结", "explanation_a": "概念A如何呼应共同点", "explanation_b": "概念B如何呼应共同点"}}"""
     resp = await asyncio.to_thread(
         lambda: ds.chat.completions.create(
-            model="deepseek-chat",
+            model="deepseek-v4-flash",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3,
+            extra_body={"thinking": {"type": "disabled"}},
         )
     )
     return _parse_json_response(resp.choices[0].message.content)
