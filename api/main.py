@@ -1772,6 +1772,25 @@ async def app_get_concept_graph_build_status(_=ExtAuth):
     """轮询用：构建流水线还在跑没有、上一次跑完的统计结果是什么。"""
     return _concept_build_status
 
+@app.get("/app/concept-graph/debug-similarity")
+async def app_debug_concept_similarity(_=ExtAuth):
+    """临时诊断接口：0.72阈值下159个概念算出0条关联边，看看真实的相似度
+    分布是不是这个阈值本身对"概念短语"这种比较对象来说定高了（0.72是从
+    highlights/qa_history那种长段落比较沿用过来的数字，没针对概念场景
+    重新校准过）。查完就删，不是要长期留着的接口。"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        top_pairs = await conn.fetch("""
+            SELECT a.label AS a_label, b.label AS b_label,
+                   1 - (a.embedding <=> b.embedding) AS sim
+            FROM concepts a
+            JOIN concepts b ON b.id > a.id AND b.user_id = a.user_id
+            WHERE a.user_id = $1 AND a.embedding IS NOT NULL AND b.embedding IS NOT NULL
+            ORDER BY sim DESC
+            LIMIT 20
+        """, APP_USER_ID)
+    return [{"a": r["a_label"], "b": r["b_label"], "sim": round(r["sim"], 4)} for r in top_pairs]
+
 @app.get("/app/concept-graph")
 async def app_get_concept_graph(_=ExtAuth):
     """图谱页面实际读的接口——只读 build 接口已经算好的结果，没有任何AI调用，
