@@ -16,7 +16,7 @@ from contextlib import asynccontextmanager
 
 import asyncpg
 
-from fastapi import FastAPI, HTTPException, Request, Depends, File, UploadFile
+from fastapi import FastAPI, HTTPException, Request, Depends, File, UploadFile, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, FileResponse, StreamingResponse
 from pydantic import BaseModel
@@ -1561,13 +1561,6 @@ BOOK_SCHOOL = {
     "墨子": "墨家",
 }
 
-def _ds_client_server() -> OpenAI | None:
-    """概念提取/关联解释是服务端批处理任务，不是某次用户请求触发的实时对话，
-    用服务器自己配置的 DEEPSEEK_API_KEY，不依赖请求头里的用户key（跟 /ask
-    那条给用户自带key开后门的路径是两回事，这里始终是服务端自己的key）。"""
-    key = os.environ.get("DEEPSEEK_API_KEY", "")
-    return _make_ds(key) if key else None
-
 def _parse_json_response(content: str) -> dict:
     """DeepSeek 有时会在 JSON 前后包一层解释文字，找第一个 { 到最后一个 } 之间
     的内容再 parse，比单纯信任提示词里"只输出JSON"这一句话更稳，双保险。"""
@@ -1648,101 +1641,136 @@ async def _find_or_create_concept(conn, user_id: int, label: str, sf) -> tuple[i
     """, user_id, label, label_emb)
     return row["id"], True
 
-@app.post("/app/concept-graph/build")
-async def app_build_concept_graph(request: Request, _=ExtAuth):
-    """知识图谱构建流水线，手动/定期触发，不是图谱页面打开时同步跑的。"""
-    ds = _ds_client_server()
-    if not ds:
-        raise HTTPException(status_code=401, detail="服务器未配置 DEEPSEEK_API_KEY")
-    sf = _make_sf(_sf_key(request)) or sf_client
-    if not sf:
-        raise HTTPException(status_code=401, detail="缺少 SiliconFlow API Key")
+_concept_build_status = {"running": False, "last_result": None, "last_error": None}
 
-    pool = await get_pool()
+async def _run_concept_graph_pipeline(ds_key: str, sf_key: str):
+    """真正干活的地方——从 app_build_concept_graph 里剥离出来，不依赖请求
+    上下文（Request对象请求结束就失效了，key在起后台任务前就先取出来传参）。
+    第一次真机跑这个流水线时踩了坑：整段逻辑直接放在HTTP handler里同步跑，
+    127条记录挨个调DeepSeek，跑到一半 Railway 反向代理自己的超时把连接
+    掐断（跟客户端设多长的 --max-time 没关系，是网关那一层的限制），返回
+    502——但服务端进程本身在处理中途就被砍掉了，同一批数据要重新处理。
+    改成 BackgroundTasks 触发，HTTP请求立刻返回，这个函数在后台继续跑，
+    不再受制于任何一层反向代理的请求级超时。
+    """
+    global _concept_build_status
+    _concept_build_status = {"running": True, "last_result": None, "last_error": None}
+    ds = _make_ds(ds_key)
+    sf = _make_sf(sf_key) or sf_client
     stats = {"extracted": 0, "concepts_created": 0, "concepts_reused": 0,
               "relations_created": 0, "failed": []}
+    try:
+        pool = await get_pool()
 
-    # 第一段：给还没提炼过概念的记录跑提取+去重合并。左连接concept_sources，
-    # 没有匹配的就是没处理过——这样重复调用这个接口只处理新增量，不会对
-    # 已经提炼过的老记录重复花钱调AI。
-    async with pool.acquire() as conn:
-        pending_highlights = await conn.fetch("""
-            SELECT h.id, h.highlighted_text AS excerpt, h.highlighted_text AS extract_input,
-                   b.id AS book_id, b.title AS book_title
-            FROM highlights h
-            JOIN books b ON b.id = h.book_id
-            LEFT JOIN concept_sources cs ON cs.source_type = 'highlight' AND cs.source_id = h.id
-            WHERE h.user_id = $1 AND cs.id IS NULL
-        """, APP_USER_ID)
-        pending_qa = await conn.fetch("""
-            SELECT q.id, q.selection AS excerpt,
-                   (q.selection || ' ' || q.question || ' ' || q.answer) AS extract_input,
-                   b.id AS book_id, b.title AS book_title
-            FROM qa_history q
-            JOIN books b ON b.id::text = q.book_id
-            LEFT JOIN concept_sources cs ON cs.source_type = 'qa' AND cs.source_id = q.id
-            WHERE q.user_id = $1 AND cs.id IS NULL
-        """, APP_USER_ID)
+        # 第一段：给还没提炼过概念的记录跑提取+去重合并。左连接concept_sources，
+        # 没有匹配的就是没处理过——这样重复调用这个接口只处理新增量，不会对
+        # 已经提炼过的老记录重复花钱调AI。
+        async with pool.acquire() as conn:
+            pending_highlights = await conn.fetch("""
+                SELECT h.id, h.highlighted_text AS excerpt, h.highlighted_text AS extract_input,
+                       b.id AS book_id, b.title AS book_title
+                FROM highlights h
+                JOIN books b ON b.id = h.book_id
+                LEFT JOIN concept_sources cs ON cs.source_type = 'highlight' AND cs.source_id = h.id
+                WHERE h.user_id = $1 AND cs.id IS NULL
+            """, APP_USER_ID)
+            pending_qa = await conn.fetch("""
+                SELECT q.id, q.selection AS excerpt,
+                       (q.selection || ' ' || q.question || ' ' || q.answer) AS extract_input,
+                       b.id AS book_id, b.title AS book_title
+                FROM qa_history q
+                JOIN books b ON b.id::text = q.book_id
+                LEFT JOIN concept_sources cs ON cs.source_type = 'qa' AND cs.source_id = q.id
+                WHERE q.user_id = $1 AND cs.id IS NULL
+            """, APP_USER_ID)
 
-    pending = [("highlight", r) for r in pending_highlights] + [("qa", r) for r in pending_qa]
+        pending = [("highlight", r) for r in pending_highlights] + [("qa", r) for r in pending_qa]
 
-    for source_type, r in pending:
-        try:
-            concepts = await _extract_concepts(r["extract_input"], ds)
-            excerpt = r["excerpt"] if len(r["excerpt"]) <= 80 else r["excerpt"][:80] + "…"
-            async with pool.acquire() as conn:
-                async with conn.transaction():
-                    for c in concepts:
-                        concept_id, created = await _find_or_create_concept(conn, APP_USER_ID, c["label"], sf)
-                        stats["concepts_created" if created else "concepts_reused"] += 1
-                        await conn.execute("""
-                            INSERT INTO concept_sources
-                                (concept_id, source_type, source_id, book_id, book_title, excerpt, explanation)
-                            VALUES ($1, $2, $3, $4, $5, $6, $7)
-                            ON CONFLICT (source_type, source_id, concept_id) DO NOTHING
-                        """, concept_id, source_type, r["id"], r["book_id"], r["book_title"],
-                             excerpt, c.get("reason", ""))
-            stats["extracted"] += 1
-        except Exception as e:
-            print(f"[概念提取] {source_type} id={r['id']} 失败: {e}")
-            stats["failed"].append({"type": source_type, "id": r["id"]})
+        for source_type, r in pending:
+            try:
+                concepts = await _extract_concepts(r["extract_input"], ds)
+                excerpt = r["excerpt"] if len(r["excerpt"]) <= 80 else r["excerpt"][:80] + "…"
+                async with pool.acquire() as conn:
+                    async with conn.transaction():
+                        for c in concepts:
+                            concept_id, created = await _find_or_create_concept(conn, APP_USER_ID, c["label"], sf)
+                            stats["concepts_created" if created else "concepts_reused"] += 1
+                            await conn.execute("""
+                                INSERT INTO concept_sources
+                                    (concept_id, source_type, source_id, book_id, book_title, excerpt, explanation)
+                                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                                ON CONFLICT (source_type, source_id, concept_id) DO NOTHING
+                            """, concept_id, source_type, r["id"], r["book_id"], r["book_title"],
+                                 excerpt, c.get("reason", ""))
+                stats["extracted"] += 1
+            except Exception as e:
+                print(f"[概念提取] {source_type} id={r['id']} 失败: {e}")
+                stats["failed"].append({"type": source_type, "id": r["id"]})
 
-    # 第二段：概念两两算相似度，超过阈值的生成关联解释。已经存在的边跳过，
-    # 避免重复调用AI——概念数量不大的情况下才用这种O(n²)全量比较，等以后
-    # 数量真的很多了再考虑增量/索引优化，现在提前做是过度设计。
-    async with pool.acquire() as conn:
-        concepts = await conn.fetch(
-            "SELECT id, label FROM concepts WHERE user_id = $1 AND embedding IS NOT NULL", APP_USER_ID
-        )
-        for i, a in enumerate(concepts):
-            for b in concepts[i + 1:]:
-                exists = await conn.fetchval("""
-                    SELECT 1 FROM concept_relations
-                    WHERE (concept_a_id = $1 AND concept_b_id = $2)
-                       OR (concept_a_id = $2 AND concept_b_id = $1)
-                """, a["id"], b["id"])
-                if exists:
-                    continue
-                sim = await conn.fetchval("""
-                    SELECT 1 - (ca.embedding <=> cb.embedding)
-                    FROM concepts ca, concepts cb WHERE ca.id = $1 AND cb.id = $2
-                """, a["id"], b["id"])
-                if sim is None or sim < CONCEPT_SIMILARITY_THRESHOLD:
-                    continue
-                try:
-                    explain = await _explain_concept_relation(a["label"], b["label"], ds)
+        # 第二段：概念两两算相似度。第一次实现时这里每一对都单独发两条SQL
+        # （查是否已存在边 + 查相似度），159个概念≈12,600对，2万5千次网络
+        # 往返——不是被DeepSeek拖慢，是被这个查询方式本身拖垮的。改成一条
+        # SQL用cross join一次性算完所有pair的相似度、顺带用NOT EXISTS过滤
+        # 掉已经有边的pair，Postgres算这种量级的cross join是毫秒级的事，
+        # O(n²)的是"要不要调AI生成解释"这一步（数量不大的情况下才这么做，
+        # 等以后概念数真的很多了再考虑增量方案，现在提前优化是过度设计）。
+        async with pool.acquire() as conn:
+            candidate_pairs = await conn.fetch("""
+                SELECT a.id AS a_id, a.label AS a_label, b.id AS b_id, b.label AS b_label,
+                       1 - (a.embedding <=> b.embedding) AS sim
+                FROM concepts a
+                JOIN concepts b ON b.id > a.id AND b.user_id = a.user_id
+                WHERE a.user_id = $1 AND a.embedding IS NOT NULL AND b.embedding IS NOT NULL
+                  AND 1 - (a.embedding <=> b.embedding) >= $2
+                  AND NOT EXISTS (
+                      SELECT 1 FROM concept_relations cr
+                      WHERE (cr.concept_a_id = a.id AND cr.concept_b_id = b.id)
+                         OR (cr.concept_a_id = b.id AND cr.concept_b_id = a.id)
+                  )
+                ORDER BY sim DESC
+            """, APP_USER_ID, CONCEPT_SIMILARITY_THRESHOLD)
+
+        for pair in candidate_pairs:
+            try:
+                explain = await _explain_concept_relation(pair["a_label"], pair["b_label"], ds)
+                async with pool.acquire() as conn:
                     await conn.execute("""
                         INSERT INTO concept_relations
                             (concept_a_id, concept_b_id, similarity, common_point, explanation_a, explanation_b)
                         VALUES ($1, $2, $3, $4, $5, $6)
                         ON CONFLICT (concept_a_id, concept_b_id) DO NOTHING
-                    """, a["id"], b["id"], sim, explain["common_point"],
+                    """, pair["a_id"], pair["b_id"], pair["sim"], explain["common_point"],
                          explain["explanation_a"], explain["explanation_b"])
-                    stats["relations_created"] += 1
-                except Exception as e:
-                    print(f"[概念关联] {a['label']}<->{b['label']} 失败: {e}")
+                stats["relations_created"] += 1
+            except Exception as e:
+                print(f"[概念关联] {pair['a_label']}<->{pair['b_label']} 失败: {e}")
 
-    return stats
+        _concept_build_status = {"running": False, "last_result": stats, "last_error": None}
+    except Exception as e:
+        print(f"[知识图谱构建] 流水线整体失败: {e}")
+        _concept_build_status = {"running": False, "last_result": stats, "last_error": str(e)}
+
+@app.post("/app/concept-graph/build")
+async def app_build_concept_graph(request: Request, background_tasks: BackgroundTasks, _=ExtAuth):
+    """触发知识图谱构建流水线——立刻返回，真正的处理在后台任务里跑（原因见
+    _run_concept_graph_pipeline 的注释：同步跑在一次HTTP请求里会被 Railway
+    反向代理的超时机制掐断）。进度通过 GET /app/concept-graph/build-status
+    轮询查看。"""
+    if _concept_build_status["running"]:
+        return {"status": "already_running"}
+    ds_key = os.environ.get("DEEPSEEK_API_KEY", "")
+    sf_key = _sf_key(request) or _env_sf_key
+    if not ds_key:
+        raise HTTPException(status_code=401, detail="服务器未配置 DEEPSEEK_API_KEY")
+    if not sf_key:
+        raise HTTPException(status_code=401, detail="缺少 SiliconFlow API Key")
+    background_tasks.add_task(_run_concept_graph_pipeline, ds_key, sf_key)
+    return {"status": "started"}
+
+@app.get("/app/concept-graph/build-status")
+async def app_get_concept_graph_build_status(_=ExtAuth):
+    """轮询用：构建流水线还在跑没有、上一次跑完的统计结果是什么。"""
+    return _concept_build_status
 
 @app.get("/app/concept-graph")
 async def app_get_concept_graph(_=ExtAuth):
