@@ -3,11 +3,10 @@
 // 2026-07-26二次重做：原来的"d3-force扁平布局+2D平移缩放"方案被决策层
 // 用效果图（HTML/Canvas原型，在浏览器里实测过手势）否掉，改成真正的
 // 3D球面旋转——节点分布在一个虚拟球面上，拖动旋转、双指缩放；节点按
-// 关联边的连通分量分"恒星"（每个分量里连接数最多的）和"行星"（其余），
-// 默认只有恒星保持清晰，行星画得很小很暗当背景纹理（全局连线始终都在，
-// 不是整个隐藏），双击带光环的恒星才会展开——它的行星被拉到恒星当前
-// 屏幕位置周围的固定环上、变亮变大，同时镜头转到正对着这颗恒星、精确
-// 居中（水平靠rotY、垂直靠rotX两个方向都解，不是只解水平那一个方向）。
+// 关联边的连通分量分"恒星"（每个分量里连接数最多的）和"行星"（其余）。
+// 双击带光环的恒星才会展开——它的行星被拉到恒星当前屏幕位置周围的固定
+// 环上、变亮变大，同时镜头转到正对着这颗恒星、精确居中（水平靠rotY、
+// 垂直靠rotX两个方向都解，不是只解水平那一个方向）。
 // 再双击一次收起。单击永远只弹来源详情卡片，不牵动镜头，跟双击的展开/
 // 聚焦互不冲突。这一整套投影/连通分量/居中数学是先在一个独立HTML原型里
 // 用真实生产数据反复验证过的，这里是照那份验证过的公式搬过来，不是重新
@@ -28,6 +27,17 @@
 // 里公认容易互相冲突的组合。这次把单击也改成用同一套projectNode+命中
 // 测试逻辑、通过手势库识别（不再用SVG原生onPress），全部触摸交互统一
 // 到一个系统里，不再有两套系统同时抢同一批元素的情况。
+// 2026-07-27四次修订（跟决策层认真讨论过根因之后的方案A）：单击/双击
+// 统一之后真机反馈依然会黑屏，说明问题更可能是"react-native-svg这套
+// 保留模式渲染，同时扛不住这么多元素每帧都要更新"这个结构性天花板，
+// 不是某个具体的touch冲突逻辑。之前的做法是全部159个节点（119恒星+
+// 40行星）永久挂载渲染、行星只是调暗当背景纹理——调暗不等于不用算，
+// 该走的投影/漂浮worklet一个都没少。这次改成行星真正不挂载、不参与
+// 任何每帧计算，只有双击展开对应恒星的那一刻才会临时创建出来（React
+// 层面的条件渲染，不是隐藏/透明）；同时全局边也不再永久挂载，只画
+// 当前展开的恒星到它自己行星的那几条边。默认状态下同时活着的动画
+// 元素从159节点+44边砍到119颗恒星（没有任何边）——这是拿"看得到全局
+// 连线密度"这个体验换性能的一次明确取舍，决策层认可先这样。
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   View, Text, StyleSheet, ActivityIndicator, TouchableOpacity,
@@ -108,11 +118,16 @@ function projectNode(node, trig, zoom, focusedStarId, cx, cy, R, byId) {
       depth: 1,
     };
   }
+  // 2026-07-27四次修订（性能重做）：行星不再永久挂载渲染，只有对应的
+  // 恒星被双击展开时才会出现在渲染树里——出现的那一刻走的必然是上面
+  // isFocusedPlanet那个分支，所以这条"路人行星"分支理论上再也走不到了。
+  // 保留这条分支纯粹是防御性的（万一以后某处误传了没展开的行星进来，
+  // 不会直接崩，只是按恒星的正常投影逻辑处理，不再有"暗淡背景纹理"
+  // 那份特殊处理——那份处理是给"永久挂载但暗淡"的场景设计的，现在已经
+  // 不存在了）。
   const p = proj(node.ux, node.uy, node.uz);
-  const ambient = !node.isStar;
-  const sizeMul = ambient ? 0.34 : 1;
-  const scale = (0.32 + 0.78 * ((p.depth + 1) / 2)) * sizeMul;
-  const opacity = (0.12 + 0.85 * ((p.depth + 1) / 2)) * (ambient ? 0.4 : 1);
+  const scale = 0.32 + 0.78 * ((p.depth + 1) / 2);
+  const opacity = 0.12 + 0.85 * ((p.depth + 1) / 2);
   return {
     sx: cx + p.x * R,
     sy: cy + p.y * R,
@@ -281,11 +296,12 @@ function GraphNodeGroup({ node, byId, trig, zoom, focusedStarId, center, radius 
   const t = useSharedValue(0);
 
   useEffect(() => {
-    // 漂浮动效只给恒星开——119颗恒星已经不少了，行星平时又小又暗（背景
-    // 纹理），这份漂浮肉眼基本看不出来，但它背后是一个持续在跑的独立
-    // 动画时钟，40个行星各自常驻一个用不上的时钟纯粹是浪费，真机拖拽卡顿
-    // 这块一并砍掉。
-    if (!node.isStar) return undefined;
+    // 2026-07-27四次修订：GraphNodeGroup现在只会被用来渲染"恒星"（永久
+    // 挂载）或者"当前展开的那颗恒星的行星"（临时挂载，双击才出现）——
+    // 两种情况都是画面上此刻真正看得见、值得有漂浮感的节点，所以漂浮
+    // 动效不再区分恒星/行星，统一都开。之前"行星平时太小太暗不用漂浮"
+    // 那个理由已经不成立了，因为平时根本不渲染行星，行星出现的时候都是
+    // 展开态、又大又亮。
     t.value = withRepeat(
       withTiming(1, { duration, easing: Easing.inOut(Easing.sin) }),
       -1,
@@ -302,9 +318,6 @@ function GraphNodeGroup({ node, byId, trig, zoom, focusedStarId, center, radius 
   const circleProps = useAnimatedProps(() => {
     'worklet';
     const p = projection.value;
-    if (!node.isStar) {
-      return { cx: p.sx, cy: p.sy, r: Math.max(1, p.sr), opacity: p.opacity };
-    }
     const floatAngle = phase + t.value * Math.PI * 2;
     return {
       cx: p.sx + Math.cos(floatAngle) * amplitude,
@@ -503,6 +516,15 @@ export default function ConceptGraph() {
   const openEdge = useCallback((edge) => setSelectedEdge(edge), []);
   const closeCards = useCallback(() => { setSelectedNode(null); setSelectedEdge(null); }, []);
 
+  // focusedStarId有两份：一份是下面的shared value（UI线程用，worklet
+  // 里直接读，驱动镜头旋转/缩放这些每帧都要更新的动画）；这份是普通
+  // React state（JS线程用，决定"要不要临时创建出这颗恒星的行星+连线
+  // 这几个React元素"）。双击手势在UI线程改shared value的同时，用
+  // runOnJS把同一个值同步到这份state上——两份必须保持一致，任何一处
+  // 改shared value都要记得同步调这个函数。
+  const [focusedStarIdState, setFocusedStarIdState] = useState(null);
+  const syncFocusedStar = useCallback((id) => setFocusedStarIdState(id), []);
+
   // 球面旋转/缩放/展开状态——全部是reanimated共享变量，直接在UI线程被
   // 手势更新、被每个节点的位置worklet读取，中间不经过JS线程，拖拽/双指
   // 缩放这种要求连续60fps更新的交互不会卡。
@@ -527,6 +549,7 @@ export default function ConceptGraph() {
   useEffect(() => {
     // 每次重新拉取图谱数据都回到默认视图，不残留上一次的旋转/缩放/展开状态。
     rotY.value = 0.4; rotX.value = -0.25; zoom.value = 1; savedZoom.value = 1; focusedStarId.value = -1;
+    setFocusedStarIdState(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data]);
 
@@ -572,6 +595,7 @@ export default function ConceptGraph() {
       if (!hit) {
         if (focusedStarId.value !== -1) {
           focusedStarId.value = -1;
+          runOnJS(syncFocusedStar)(null);
           zoom.value = withTiming(1, { duration: 380 });
         }
         return;
@@ -579,10 +603,15 @@ export default function ConceptGraph() {
       if (hit.hasPlanets) {
         if (focusedStarId.value === hit.id) {
           focusedStarId.value = -1;
+          runOnJS(syncFocusedStar)(null);
           zoom.value = withTiming(1, { duration: 380 });
           return;
         }
         focusedStarId.value = hit.id;
+        // shared value驱动镜头动画，普通state驱动"要不要临时创建行星+
+        // 连线这几个React元素"——双击展开的那一刻两边一起同步，行星才
+        // 会真正出现在渲染树里（不是一直挂载着只是变亮）。
+        runOnJS(syncFocusedStar)(hit.id);
       }
       // 把命中节点的单位向量转到正对镜头：先解水平（rotY让x1=0，
       // z1必为sqrt(ux²+uz²)正值），再用这个z1解垂直（rotX让y2=0）——
@@ -594,7 +623,7 @@ export default function ConceptGraph() {
       rotY.value = withTiming(rotY.value + deltaY, { duration: 420 });
       rotX.value = withTiming(targetRotX, { duration: 420 });
       zoom.value = withTiming(FOCUS_ZOOM, { duration: 420 });
-    }), [graph, center, baseRadius]);
+    }), [graph, center, baseRadius, syncFocusedStar]);
 
   // 单击：命中节点弹来源详情卡片，命中连线弹思维导图式关联详情，都不
   // 命中就关掉当前打开的卡片。这三件事原来分别走react-native-svg节点
@@ -686,20 +715,29 @@ export default function ConceptGraph() {
               {starsRef.current.map((s, i) => (
                 <Circle key={`star-${i}`} cx={s.x} cy={s.y} r={s.r} fill={STAR_COLOR} />
               ))}
-              {graph.edges.map((e, i) => {
-                const a = graph.byId[e.source];
-                const b = graph.byId[e.target];
-                if (!a || !b) return null;
-                return (
-                  <GraphEdge
-                    key={`edge-${i}`}
-                    a={a} b={b} byId={graph.byId}
-                    trig={trig} zoom={zoom} focusedStarId={focusedStarId}
-                    center={center} radius={baseRadius}
-                  />
-                );
-              })}
-              {graph.nodes.map((n) => (
+              {/* 展开的那颗恒星自己的行星+它们各自到恒星的连线——只有
+                  focusedStarIdState非空时才会真的出现在渲染树里，双击收起
+                  后就彻底卸载掉，不是隐藏。 */}
+              {focusedStarIdState !== null && graph.nodes
+                .filter((n) => !n.isStar && n.starId === focusedStarIdState)
+                .map((planet) => (
+                  <React.Fragment key={`planet-${planet.id}`}>
+                    <GraphEdge
+                      a={graph.byId[focusedStarIdState]} b={planet} byId={graph.byId}
+                      trig={trig} zoom={zoom} focusedStarId={focusedStarId}
+                      center={center} radius={baseRadius}
+                    />
+                    <GraphNodeGroup
+                      node={planet} byId={graph.byId}
+                      trig={trig} zoom={zoom} focusedStarId={focusedStarId}
+                      center={center} radius={baseRadius}
+                    />
+                  </React.Fragment>
+                ))}
+              {/* 恒星永久挂载——119颗，行星/边不在这里，只有展开的那颗
+                  恒星的行星才会临时创建（见上面那块），默认状态下同时
+                  参与每帧计算的动画元素从159节点+44边砍到119颗恒星。 */}
+              {graph.nodes.filter((n) => n.isStar).map((n) => (
                 <GraphNodeGroup
                   key={n.id}
                   node={n} byId={graph.byId}
