@@ -67,12 +67,15 @@ function nodeRadius(n) {
 // 单击/双击手势的命中测试、每个节点自己的位置动画，全部复用这同一个
 // 函数，保证"眼睛看到哪、手指点哪"和"实际画在哪"永远是同一套计算，
 // 不会出现两边算法不一致导致点不准的情况。
-function projectNode(node, rotY, rotX, zoom, focusedStarId, cx, cy, R, byId) {
+// trig是{cosY,sinY,cosX,sinX}——之前这四个三角函数在每个节点自己的
+// projectNode调用里各自重算一遍，159个节点+边端点每帧要跑好几百次
+// cos/sin，是真机拖拽卡顿的一个真实原因（不是唯一原因，但是确定存在
+// 且能直接去掉的一块）。现在这四个值每帧只在最外层算一次（见下面
+// ConceptGraph组件里的trig useDerivedValue），所有节点共用同一份，
+// 传进来的是算好的trig而不是原始的rotY/rotX角度。
+function projectNode(node, trig, zoom, focusedStarId, cx, cy, R, byId) {
   'worklet';
-  const cosY = Math.cos(rotY);
-  const sinY = Math.sin(rotY);
-  const cosX = Math.cos(rotX);
-  const sinX = Math.sin(rotX);
+  const { cosY, sinY, cosX, sinX } = trig;
   function proj(ux, uy, uz) {
     const x1 = ux * cosY + uz * sinY;
     const z1 = -ux * sinY + uz * cosY;
@@ -121,11 +124,14 @@ function normalizeAngleWorklet(a) {
 
 function hitTestWorklet(px, py, nodes, rotY, rotX, zoom, focusedStarId, cx, cy, R, byId) {
   'worklet';
+  // 命中测试是一次性的（点一下才跑一次），不是每帧都跑，这里现算一次
+  // trig就够了，不需要接外层那份每帧共享的trig。
+  const trig = { cosY: Math.cos(rotY), sinY: Math.sin(rotY), cosX: Math.cos(rotX), sinX: Math.sin(rotX) };
   let best = null;
   let bestD = Infinity;
   for (let i = 0; i < nodes.length; i += 1) {
     const n = nodes[i];
-    const p = projectNode(n, rotY, rotX, zoom, focusedStarId, cx, cy, R, byId);
+    const p = projectNode(n, trig, zoom, focusedStarId, cx, cy, R, byId);
     const dx = px - p.sx;
     const dy = py - p.sy;
     const d = Math.sqrt(dx * dx + dy * dy);
@@ -219,13 +225,18 @@ function prepareGraph(nodes, edges) {
 // 三角函数——一个节点原来最多被独立投影3次，159个节点+44条边（每条边
 // 又牵两个端点）在拖拽时每帧要跑的worklet次数相当可观，合并成算一次、
 // 多处共享，直接把这部分计算量砍掉三分之二左右。
-function GraphNodeGroup({ node, byId, rotY, rotX, zoom, focusedStarId, center, radius, onPressNode }) {
+function GraphNodeGroup({ node, byId, trig, zoom, focusedStarId, center, radius, onPressNode }) {
   const phase = useMemo(() => Math.random() * Math.PI * 2, []);
   const duration = useMemo(() => 2600 + Math.random() * 1800, []);
   const amplitude = useMemo(() => 3 + Math.random() * 3, []);
   const t = useSharedValue(0);
 
   useEffect(() => {
+    // 漂浮动效只给恒星开——119颗恒星已经不少了，行星平时又小又暗（背景
+    // 纹理），这份漂浮肉眼基本看不出来，但它背后是一个持续在跑的独立
+    // 动画时钟，40个行星各自常驻一个用不上的时钟纯粹是浪费，真机拖拽卡顿
+    // 这块一并砍掉。
+    if (!node.isStar) return undefined;
     t.value = withRepeat(
       withTiming(1, { duration, easing: Easing.inOut(Easing.sin) }),
       -1,
@@ -236,12 +247,15 @@ function GraphNodeGroup({ node, byId, rotY, rotX, zoom, focusedStarId, center, r
 
   const projection = useDerivedValue(() => {
     'worklet';
-    return projectNode(node, rotY.value, rotX.value, zoom.value, focusedStarId.value, center.x, center.y, radius, byId);
+    return projectNode(node, trig.value, zoom.value, focusedStarId.value, center.x, center.y, radius, byId);
   });
 
   const circleProps = useAnimatedProps(() => {
     'worklet';
     const p = projection.value;
+    if (!node.isStar) {
+      return { cx: p.sx, cy: p.sy, r: Math.max(1, p.sr), opacity: p.opacity };
+    }
     const floatAngle = phase + t.value * Math.PI * 2;
     return {
       cx: p.sx + Math.cos(floatAngle) * amplitude,
@@ -267,13 +281,13 @@ function GraphNodeGroup({ node, byId, rotY, rotX, zoom, focusedStarId, center, r
     'worklet';
     const p = projection.value;
     const ambientPlanet = !node.isStar && focusedStarId.value !== node.starId;
-    // 恒星要非常正对镜头（depth>0.86，大致是球面正前方一小片）才显示标签，
-    // 不是随便露一点脸就显示——119颗恒星里如果四分之一同时露脸+挂标签，
-    // 手机屏幕这么小的画布上密密麻麻全部重叠在一起完全看不清（真机截图
-    // 复现过），提到0.86之后同一时刻大概只有几颗最靠近正中的恒星挂标签。
-    // 展开的行星走的是环绕分支（projectNode把它的depth强制记成1），
-    // 不受这个提高后的门槛影响，永远清楚可读。
-    const show = !ambientPlanet && p.depth > 0.86;
+    // depth>0.86那版真机反馈还是"一次性显示的字特别多"——0.86对应约7%的
+    // 球面正面积，119颗恒星里同时约8-9颗挂标签，对手机这么小的画布还是
+    // 太多。再提到0.94（约3%面积，119颗里同时大概3-4颗），只有最靠近
+    // 正中心的那几颗才挂标签，其余恒星本身还在，只是没显示文字，双击
+    // 转到正中间照样能看清楚。展开的行星走环绕分支（projectNode把它的
+    // depth强制记成1），不受这个门槛影响，永远清楚可读。
+    const show = !ambientPlanet && p.depth > 0.94;
     return {
       x: p.sx,
       y: p.sy + p.sr + 12,
@@ -303,16 +317,16 @@ function GraphNodeGroup({ node, byId, rotY, rotX, zoom, focusedStarId, center, r
   );
 }
 
-function GraphEdge({ edge, a, b, byId, rotY, rotX, zoom, focusedStarId, center, radius, onPress }) {
+function GraphEdge({ edge, a, b, byId, trig, zoom, focusedStarId, center, radius, onPress }) {
   // 两个端点各自的投影只算一次（useDerivedValue），下面两条Line（可见的
   // 细线+加宽的透明命中区域）共用同一份结果，不用各自重复算一遍三角函数。
   const projA = useDerivedValue(() => {
     'worklet';
-    return projectNode(a, rotY.value, rotX.value, zoom.value, focusedStarId.value, center.x, center.y, radius, byId);
+    return projectNode(a, trig.value, zoom.value, focusedStarId.value, center.x, center.y, radius, byId);
   });
   const projB = useDerivedValue(() => {
     'worklet';
-    return projectNode(b, rotY.value, rotX.value, zoom.value, focusedStarId.value, center.x, center.y, radius, byId);
+    return projectNode(b, trig.value, zoom.value, focusedStarId.value, center.x, center.y, radius, byId);
   });
 
   const visibleProps = useAnimatedProps(() => {
@@ -463,6 +477,18 @@ export default function ConceptGraph() {
   const savedZoom = useSharedValue(1);
   const focusedStarId = useSharedValue(-1);
 
+  // cos/sin(rotY/rotX)之前在每个节点自己的投影worklet里各自重算一遍——
+  // 159个节点+边端点，每帧要跑好几百次三角函数，是真机拖拽卡顿一个真实
+  // 存在的原因。这四个值只跟镜头角度有关、跟具体节点无关，每帧只在这里
+  // 算一次，所有节点/边共用同一份结果。
+  const trig = useDerivedValue(() => {
+    'worklet';
+    return {
+      cosY: Math.cos(rotY.value), sinY: Math.sin(rotY.value),
+      cosX: Math.cos(rotX.value), sinX: Math.sin(rotX.value),
+    };
+  });
+
   useEffect(() => {
     // 每次重新拉取图谱数据都回到默认视图，不残留上一次的旋转/缩放/展开状态。
     rotY.value = 0.4; rotX.value = -0.25; zoom.value = 1; savedZoom.value = 1; focusedStarId.value = -1;
@@ -598,7 +624,7 @@ export default function ConceptGraph() {
                 <GraphEdge
                   key={`edge-${i}`}
                   edge={e} a={a} b={b} byId={graph.byId}
-                  rotY={rotY} rotX={rotX} zoom={zoom} focusedStarId={focusedStarId}
+                  trig={trig} zoom={zoom} focusedStarId={focusedStarId}
                   center={center} radius={baseRadius}
                   onPress={setSelectedEdge}
                 />
@@ -608,7 +634,7 @@ export default function ConceptGraph() {
               <GraphNodeGroup
                 key={n.id}
                 node={n} byId={graph.byId}
-                rotY={rotY} rotX={rotX} zoom={zoom} focusedStarId={focusedStarId}
+                trig={trig} zoom={zoom} focusedStarId={focusedStarId}
                 center={center} radius={baseRadius}
                 onPressNode={(id) => setSelectedNode(graph.fullById[id])}
               />
