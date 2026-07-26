@@ -27,7 +27,7 @@ import {
 } from 'react-native';
 import Svg, { Circle, Line, Text as SvgText } from 'react-native-svg';
 import Animated, {
-  useSharedValue, useAnimatedProps, withRepeat, withTiming, withDecay, Easing,
+  useSharedValue, useDerivedValue, useAnimatedProps, withRepeat, withTiming, withDecay, Easing,
 } from 'react-native-reanimated';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import { useFocusEffect } from '@react-navigation/native';
@@ -203,10 +203,12 @@ function prepareGraph(nodes, edges) {
   return { nodes: prepared, edges: validEdges, byId };
 }
 
-// 每个节点在算好的球面投影坐标之上，叠加一个独立、参数各自随机的漂浮
-// 偏移动画——幅度小、周期长且互不相同，看起来是自然漂浮不是机械抖动。
-// 跟球面旋转（拖拽驱动）是两套独立的动画层，叠加生效。
-function GraphNode({ node, byId, rotY, rotX, zoom, focusedStarId, center, radius, onPress }) {
+// 每个节点的球面投影（projectNode）只在这一个useDerivedValue里算一次，
+// 圆点/光环/标签三个子元素都从这同一份结果里取数，不用各自重新算一遍
+// 三角函数——一个节点原来最多被独立投影3次，159个节点+44条边（每条边
+// 又牵两个端点）在拖拽时每帧要跑的worklet次数相当可观，合并成算一次、
+// 多处共享，直接把这部分计算量砍掉三分之二左右。
+function GraphNodeGroup({ node, byId, rotY, rotX, zoom, focusedStarId, center, radius, onPressNode }) {
   const phase = useMemo(() => Math.random() * Math.PI * 2, []);
   const duration = useMemo(() => 2600 + Math.random() * 1800, []);
   const amplitude = useMemo(() => 3 + Math.random() * 3, []);
@@ -221,9 +223,14 @@ function GraphNode({ node, byId, rotY, rotX, zoom, focusedStarId, center, radius
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const animatedProps = useAnimatedProps(() => {
+  const projection = useDerivedValue(() => {
     'worklet';
-    const p = projectNode(node, rotY.value, rotX.value, zoom.value, focusedStarId.value, center.x, center.y, radius, byId);
+    return projectNode(node, rotY.value, rotX.value, zoom.value, focusedStarId.value, center.x, center.y, radius, byId);
+  });
+
+  const circleProps = useAnimatedProps(() => {
+    'worklet';
+    const p = projection.value;
     const floatAngle = phase + t.value * Math.PI * 2;
     return {
       cx: p.sx + Math.cos(floatAngle) * amplitude,
@@ -233,22 +240,10 @@ function GraphNode({ node, byId, rotY, rotX, zoom, focusedStarId, center, radius
     };
   });
 
-  return (
-    <AnimatedCircle
-      animatedProps={animatedProps}
-      fill={CATEGORY_COLOR[node.category] || CATEGORY_COLOR['其他']}
-      onPress={() => onPress(node)}
-    />
-  );
-}
-
-// 带光环的圈——提示"这颗恒星双击可以展开"，展开之后（它自己就是当前
-// focusedStarId）就不再画光环，行星本身已经清晰环绕在旁边了。
-function StarHalo({ node, byId, rotY, rotX, zoom, focusedStarId, center, radius }) {
-  const animatedProps = useAnimatedProps(() => {
+  const haloProps = useAnimatedProps(() => {
     'worklet';
-    const p = projectNode(node, rotY.value, rotX.value, zoom.value, focusedStarId.value, center.x, center.y, radius, byId);
-    const show = focusedStarId.value !== node.id;
+    const p = projection.value;
+    const show = node.hasPlanets && focusedStarId.value !== node.id;
     return {
       cx: p.sx,
       cy: p.sy,
@@ -256,21 +251,62 @@ function StarHalo({ node, byId, rotY, rotX, zoom, focusedStarId, center, radius 
       opacity: show ? p.opacity * 0.55 : 0,
     };
   });
+
+  const labelProps = useAnimatedProps(() => {
+    'worklet';
+    const p = projection.value;
+    const ambientPlanet = !node.isStar && focusedStarId.value !== node.starId;
+    // 恒星要非常正对镜头（depth>0.86，大致是球面正前方一小片）才显示标签，
+    // 不是随便露一点脸就显示——119颗恒星里如果四分之一同时露脸+挂标签，
+    // 手机屏幕这么小的画布上密密麻麻全部重叠在一起完全看不清（真机截图
+    // 复现过），提到0.86之后同一时刻大概只有几颗最靠近正中的恒星挂标签。
+    // 展开的行星走的是环绕分支（projectNode把它的depth强制记成1），
+    // 不受这个提高后的门槛影响，永远清楚可读。
+    const show = !ambientPlanet && p.depth > 0.86;
+    return {
+      x: p.sx,
+      y: p.sy + p.sr + 12,
+      opacity: show ? Math.min(0.9, p.opacity + 0.1) : 0,
+    };
+  });
+
+  const color = CATEGORY_COLOR[node.category] || CATEGORY_COLOR['其他'];
+
   return (
-    <AnimatedCircle
-      animatedProps={animatedProps}
-      fill="transparent"
-      stroke={CATEGORY_COLOR[node.category] || CATEGORY_COLOR['其他']}
-      strokeWidth={1.5}
-    />
+    <>
+      {node.hasPlanets && (
+        <AnimatedCircle animatedProps={haloProps} fill="transparent" stroke={color} strokeWidth={1.5} />
+      )}
+      <AnimatedSvgText
+        animatedProps={labelProps}
+        fill="rgba(255,255,255,0.85)"
+        fontSize={11}
+        fontFamily={FONTS.sansRegular}
+        textAnchor="middle"
+      >
+        {node.label}
+      </AnimatedSvgText>
+      <AnimatedCircle animatedProps={circleProps} fill={color} onPress={() => onPressNode(node)} />
+    </>
   );
 }
 
 function GraphEdge({ edge, a, b, byId, rotY, rotX, zoom, focusedStarId, center, radius, onPress }) {
+  // 两个端点各自的投影只算一次（useDerivedValue），下面两条Line（可见的
+  // 细线+加宽的透明命中区域）共用同一份结果，不用各自重复算一遍三角函数。
+  const projA = useDerivedValue(() => {
+    'worklet';
+    return projectNode(a, rotY.value, rotX.value, zoom.value, focusedStarId.value, center.x, center.y, radius, byId);
+  });
+  const projB = useDerivedValue(() => {
+    'worklet';
+    return projectNode(b, rotY.value, rotX.value, zoom.value, focusedStarId.value, center.x, center.y, radius, byId);
+  });
+
   const visibleProps = useAnimatedProps(() => {
     'worklet';
-    const pa = projectNode(a, rotY.value, rotX.value, zoom.value, focusedStarId.value, center.x, center.y, radius, byId);
-    const pb = projectNode(b, rotY.value, rotX.value, zoom.value, focusedStarId.value, center.x, center.y, radius, byId);
+    const pa = projA.value;
+    const pb = projB.value;
     const avgDepth = (pa.depth + pb.depth) / 2;
     const bright = focusedStarId.value !== -1 && (a.id === focusedStarId.value || b.id === focusedStarId.value);
     const baseOp = bright ? 0.42 : 0.12;
@@ -288,8 +324,8 @@ function GraphEdge({ edge, a, b, byId, rotY, rotX, zoom, focusedStarId, center, 
   // GestureDetector的双击/拖拽手势抢走。
   const hitProps = useAnimatedProps(() => {
     'worklet';
-    const pa = projectNode(a, rotY.value, rotX.value, zoom.value, focusedStarId.value, center.x, center.y, radius, byId);
-    const pb = projectNode(b, rotY.value, rotX.value, zoom.value, focusedStarId.value, center.x, center.y, radius, byId);
+    const pa = projA.value;
+    const pb = projB.value;
     return { x1: pa.sx, y1: pa.sy, x2: pb.sx, y2: pb.sy };
   });
   return (
@@ -302,34 +338,6 @@ function GraphEdge({ edge, a, b, byId, rotY, rotX, zoom, focusedStarId, center, 
         onPress={() => onPress(edge)}
       />
     </>
-  );
-}
-
-// 标签：恒星正对镜头时（depth>0.55）才显示；行星只有在被展开、贴到
-// 环上（这时projectNode把它的depth强制记成1）才显示，平时当背景纹理的
-// 暗淡行星不带标签，避免密密麻麻看不清。
-function GraphLabel({ node, byId, rotY, rotX, zoom, focusedStarId, center, radius }) {
-  const animatedProps = useAnimatedProps(() => {
-    'worklet';
-    const p = projectNode(node, rotY.value, rotX.value, zoom.value, focusedStarId.value, center.x, center.y, radius, byId);
-    const ambientPlanet = !node.isStar && focusedStarId.value !== node.starId;
-    const show = !ambientPlanet && p.depth > 0.55;
-    return {
-      x: p.sx,
-      y: p.sy + p.sr + 12,
-      opacity: show ? Math.min(0.9, p.opacity + 0.1) : 0,
-    };
-  });
-  return (
-    <AnimatedSvgText
-      animatedProps={animatedProps}
-      fill="rgba(255,255,255,0.85)"
-      fontSize={11}
-      fontFamily={FONTS.sansRegular}
-      textAnchor="middle"
-    >
-      {node.label}
-    </AnimatedSvgText>
   );
 }
 
@@ -449,12 +457,18 @@ export default function ConceptGraph() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data]);
 
+  // react-native-gesture-handler + reanimated的babel插件通常会自动把
+  // .onUpdate/.onEnd的回调识别成worklet，但这里显式写上'worklet'指令——
+  // 不依赖自动识别，排除掉"回调没被正确worklet化导致UI线程抛错"这一类
+  // 潜在问题，成本为零。
   const panGesture = useMemo(() => Gesture.Pan()
     .onUpdate((e) => {
+      'worklet';
       rotY.value += e.changeX * 0.008;
       rotX.value = Math.max(-1.1, Math.min(1.1, rotX.value - e.changeY * 0.008));
     })
     .onEnd((e) => {
+      'worklet';
       // 松手带一点惯性继续转，像真的在拨一个球，不是拖到哪停到哪。
       rotY.value = withDecay({ velocity: e.velocityX * 0.008, deceleration: 0.997 });
       rotX.value = withDecay({ velocity: -e.velocityY * 0.008, deceleration: 0.997, clamp: [-1.1, 1.1] });
@@ -462,9 +476,11 @@ export default function ConceptGraph() {
 
   const pinchGesture = useMemo(() => Gesture.Pinch()
     .onUpdate((e) => {
+      'worklet';
       zoom.value = Math.min(Math.max(savedZoom.value * e.scale, ZOOM_MIN), ZOOM_MAX);
     })
     .onEnd(() => {
+      'worklet';
       savedZoom.value = zoom.value;
     }), []);
 
@@ -576,29 +592,13 @@ export default function ConceptGraph() {
                 />
               );
             })}
-            {graph.nodes.filter((n) => n.hasPlanets).map((n) => (
-              <StarHalo
-                key={`halo-${n.id}`}
-                node={n} byId={graph.byId}
-                rotY={rotY} rotX={rotX} zoom={zoom} focusedStarId={focusedStarId}
-                center={center} radius={baseRadius}
-              />
-            ))}
             {graph.nodes.map((n) => (
-              <GraphLabel
-                key={`label-${n.id}`}
-                node={n} byId={graph.byId}
-                rotY={rotY} rotX={rotX} zoom={zoom} focusedStarId={focusedStarId}
-                center={center} radius={baseRadius}
-              />
-            ))}
-            {graph.nodes.map((n) => (
-              <GraphNode
+              <GraphNodeGroup
                 key={n.id}
                 node={n} byId={graph.byId}
                 rotY={rotY} rotX={rotX} zoom={zoom} focusedStarId={focusedStarId}
                 center={center} radius={baseRadius}
-                onPress={setSelectedNode}
+                onPressNode={setSelectedNode}
               />
             ))}
           </Svg>
