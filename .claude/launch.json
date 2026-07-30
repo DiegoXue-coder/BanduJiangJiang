@@ -18,6 +18,12 @@
       "runtimeExecutable": "npm",
       "runtimeArgs": ["--prefix", "mobile", "run", "lan"],
       "port": 8081
+    },
+    {
+      "name": "mobile-lan-clean",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "mobile", "run", "lan", "--", "--clear"],
+      "port": 8081
     }
   ]
 }
