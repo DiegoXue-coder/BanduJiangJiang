@@ -15,6 +15,8 @@ from collections import defaultdict
 from contextlib import asynccontextmanager
 
 import asyncpg
+import bcrypt
+import jwt
 
 from fastapi import FastAPI, HTTPException, Request, Depends, File, UploadFile, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -86,11 +88,22 @@ async def init_db():
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
         """)
-        # v1 单用户：写死种子用户 id=1（HMAC 会员卡式验证，不做注册登录）
+        # v1 单用户：写死种子用户 id=1（HMAC 会员卡式验证，不做注册登录）。
+        # 阶段十三加真实注册登录后，这个种子用户继续保留——它是老数据
+        # （合伙人/开发期测试数据）的归属，不影响新注册用户各自独立。
         await conn.execute("""
             INSERT INTO users (id) VALUES (1)
             ON CONFLICT (id) DO NOTHING
         """)
+        # 阶段十三：最小可用多租户，用户名+密码登录（不接短信/邮箱验证码，
+        # 不做忘记密码自动化——决策层拍板，测试阶段用不上这些成本）。
+        # 种子用户1没有用户名/密码（老数据，不需要能登录），这两列允许为空。
+        await conn.execute(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS username TEXT UNIQUE"
+        )
+        await conn.execute(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT"
+        )
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS books (
                 id         BIGSERIAL PRIMARY KEY,
@@ -205,6 +218,81 @@ def _verify_token(request: Request):
         raise HTTPException(status_code=401, detail="Invalid token")
 
 ExtAuth = Depends(_verify_token)
+
+# ── 手机端登录鉴权（阶段十三：JWT，跟插件的HMAC共享密钥并存，互不影响）──
+# 用户名+密码登录，不接短信/邮箱验证码、不做忘记密码自动化——决策层拍板，
+# 测试阶段几个人的规模配不上这些成本。密码用bcrypt哈希存储，token有效期
+# 给得比较长（180天），测试阶段用户量小，不做refresh token这套是过度设计。
+JWT_SECRET = os.environ.get("JWT_SECRET", "")
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRE_DAYS = 180
+
+class AuthRequest(BaseModel):
+    username: str
+    password: str
+
+class AuthResponse(BaseModel):
+    token: str
+    user_id: int
+    username: str
+
+def _hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+
+def _verify_password(password: str, password_hash: str) -> bool:
+    return bcrypt.checkpw(password.encode(), password_hash.encode())
+
+def _make_jwt(user_id: int, username: str) -> str:
+    payload = {
+        "user_id": user_id,
+        "username": username,
+        "exp": datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=JWT_EXPIRE_DAYS),
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+def _decode_jwt(token: str) -> dict:
+    try:
+        return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="登录已过期，请重新登录")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="登录状态无效，请重新登录")
+
+def get_current_user(request: Request) -> int:
+    """从 Authorization: Bearer <jwt> 头拿当前登录用户的 user_id；EPUB 文件
+    下载走的是 expo-file-system，不能带自定义请求头，兼容从 query string 读
+    token（跟旧的 ExtAuth 是同一个兜底套路，仅供 /app/books/{id}/file 用）。
+    """
+    if not JWT_SECRET:
+        raise HTTPException(status_code=500, detail="服务器未配置 JWT_SECRET")
+    auth_header = request.headers.get("authorization", "")
+    token = auth_header[7:] if auth_header.lower().startswith("bearer ") else ""
+    if not token:
+        token = request.query_params.get("token", "")
+    if not token:
+        raise HTTPException(status_code=401, detail="未登录")
+    payload = _decode_jwt(token)
+    return payload["user_id"]
+
+CurrentUser = Depends(get_current_user)
+
+def get_optional_user(request: Request) -> int | None:
+    """跟 get_current_user 一样解析 JWT，但缺失/无效不报错、返回 None——专给
+    `/history` 这种插件和手机端共用、鉴权仍然主要走 ExtAuth 的接口用：带了
+    有效JWT就归到真实登录用户名下，插件那边（不发JWT）完全不受影响。"""
+    if not JWT_SECRET:
+        return None
+    auth_header = request.headers.get("authorization", "")
+    token = auth_header[7:] if auth_header.lower().startswith("bearer ") else ""
+    if not token:
+        return None
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        return payload["user_id"]
+    except jwt.InvalidTokenError:
+        return None
+
+OptionalUser = Depends(get_optional_user)
 
 # ── API Key 解析 ───────────────────────────────────────────────────
 
@@ -611,7 +699,11 @@ async def get_book_context(book_id: str, request: Request):
     }
 
 @app.post("/history")
-async def save_history(req: HistorySaveRequest, request: Request, _=ExtAuth):
+async def save_history(req: HistorySaveRequest, request: Request, _=ExtAuth, user_id: int | None = OptionalUser):
+    """插件和手机端共用的保存接口，鉴权维持 ExtAuth 不变（只加不改）。阶段
+    十三新增：带了手机端登录后的JWT就按真实用户存 user_id，插件调用方式
+    完全没变（不发JWT），继续落到 qa_history.user_id 的默认值1，行为不变。
+    """
     sf = _make_sf(_sf_key(request))
     emb_str = None
     try:
@@ -631,16 +723,16 @@ async def save_history(req: HistorySaveRequest, request: Request, _=ExtAuth):
         if emb_str:
             await conn.execute("""
                 INSERT INTO qa_history
-                    (book_id, book_title, chapter_title, question, answer, selection, cfi_location, embedding)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8::vector)
-            """, req.book_id, req.book_title, req.chapter_title,
+                    (user_id, book_id, book_title, chapter_title, question, answer, selection, cfi_location, embedding)
+                VALUES (COALESCE($1, 1),$2,$3,$4,$5,$6,$7,$8,$9::vector)
+            """, user_id, req.book_id, req.book_title, req.chapter_title,
                 req.question, req.answer, req.selection, req.cfi_location, emb_str)
         else:
             await conn.execute("""
                 INSERT INTO qa_history
-                    (book_id, book_title, chapter_title, question, answer, selection, cfi_location)
-                VALUES ($1,$2,$3,$4,$5,$6,$7)
-            """, req.book_id, req.book_title, req.chapter_title,
+                    (user_id, book_id, book_title, chapter_title, question, answer, selection, cfi_location)
+                VALUES (COALESCE($1, 1),$2,$3,$4,$5,$6,$7,$8)
+            """, user_id, req.book_id, req.book_title, req.chapter_title,
                 req.question, req.answer, req.selection, req.cfi_location)
     return {"ok": True}
 
@@ -1110,10 +1202,10 @@ async def transcribe(request: Request, _=ExtAuth):
     return {"text": text}
 
 # ── 手机端 App 接口（/app 前缀，WBS 阶段一骨架）─────────────────────
-# 不涉及 AI 对话逻辑、界面样式——纯粹的地基层，鉴权复用 Chrome 插件同一套
-# HMAC 会员卡式验证（ExtAuth），v1 单用户写死 user_id=1。
+# 阶段十三之前这里鉴权是复用插件那套 HMAC（ExtAuth）、写死 user_id=1；
+# 阶段十三起改成真实用户名+密码登录，鉴权换成 CurrentUser（JWT），
+# 每个接口内部按登录用户的真实 user_id 隔离数据。
 
-APP_USER_ID = 1
 # Railway 上 /data 是挂载的持久卷（bandujiangjiang-volume），存在就用它，
 # 否则说明是本地开发环境，退回相对路径，不强制要求 /data 存在。
 _DEFAULT_EPUB_DIR = "/data/epub_storage" if os.path.isdir("/data") else "epub_storage"
@@ -1121,8 +1213,40 @@ EPUB_STORAGE_DIR  = os.environ.get("EPUB_STORAGE_DIR", _DEFAULT_EPUB_DIR)
 os.makedirs(EPUB_STORAGE_DIR, exist_ok=True)
 MAX_EPUB_BYTES    = 50 * 1024 * 1024  # 50MB
 
+@app.post("/app/auth/register", response_model=AuthResponse)
+async def app_register(body: AuthRequest):
+    username = body.username.strip()
+    if len(username) < 3:
+        raise HTTPException(status_code=400, detail="用户名至少3个字符")
+    if len(body.password) < 6:
+        raise HTTPException(status_code=400, detail="密码至少6位")
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        existing = await conn.fetchrow("SELECT id FROM users WHERE username = $1", username)
+        if existing:
+            raise HTTPException(status_code=409, detail="用户名已被占用")
+        row = await conn.fetchrow("""
+            INSERT INTO users (username, password_hash) VALUES ($1, $2)
+            RETURNING id
+        """, username, _hash_password(body.password))
+    user_id = row["id"]
+    return AuthResponse(token=_make_jwt(user_id, username), user_id=user_id, username=username)
+
+@app.post("/app/auth/login", response_model=AuthResponse)
+async def app_login(body: AuthRequest):
+    username = body.username.strip()
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT id, password_hash FROM users WHERE username = $1", username
+        )
+    if not row or not row["password_hash"] or not _verify_password(body.password, row["password_hash"]):
+        raise HTTPException(status_code=401, detail="用户名或密码错误")
+    return AuthResponse(token=_make_jwt(row["id"], username), user_id=row["id"], username=username)
+
 @app.post("/app/books/import", response_model=BookOut)
-async def app_import_book(file: UploadFile = File(...), _=ExtAuth):
+async def app_import_book(file: UploadFile = File(...), user_id: int = CurrentUser):
     """把一本 EPUB 导入书库：解析标题/作者/章节目录，写入 books + chapters。"""
     if not (file.filename or "").lower().endswith(".epub"):
         raise HTTPException(status_code=400, detail="只支持 .epub 文件")
@@ -1151,7 +1275,7 @@ async def app_import_book(file: UploadFile = File(...), _=ExtAuth):
                 INSERT INTO books (user_id, title, author, file_path)
                 VALUES ($1, $2, $3, $4)
                 RETURNING id, added_at
-            """, APP_USER_ID, title, author, file_path)
+            """, user_id, title, author, file_path)
             book_id = book_row["id"]
 
             for idx, chapter_title in enumerate(chapter_titles):
@@ -1163,7 +1287,7 @@ async def app_import_book(file: UploadFile = File(...), _=ExtAuth):
     return BookOut(id=book_id, title=title, author=author, added_at=book_row["added_at"])
 
 @app.post("/app/books/{book_id}/replace", response_model=BookOut)
-async def app_replace_book(book_id: int, file: UploadFile = File(...), _=ExtAuth):
+async def app_replace_book(book_id: int, file: UploadFile = File(...), user_id: int = CurrentUser):
     """原地替换一本书的源文件（比如阶段六的繁体转简体），不改变 book_id/chapter_id。
 
     章节数量必须和原书一致，按 order_index 一一对应更新标题——这样已有的划线
@@ -1181,7 +1305,7 @@ async def app_replace_book(book_id: int, file: UploadFile = File(...), _=ExtAuth
     pool = await get_pool()
     async with pool.acquire() as conn:
         book = await conn.fetchrow(
-            "SELECT file_path FROM books WHERE id = $1 AND user_id = $2", book_id, APP_USER_ID
+            "SELECT file_path FROM books WHERE id = $1 AND user_id = $2", book_id, user_id
         )
         if not book:
             raise HTTPException(status_code=404, detail="书本不存在")
@@ -1225,7 +1349,7 @@ async def app_replace_book(book_id: int, file: UploadFile = File(...), _=ExtAuth
     return BookOut(id=book_id, title=title, author=author, added_at=updated["added_at"])
 
 @app.delete("/app/books/{book_id}")
-async def app_delete_book(book_id: int, _=ExtAuth):
+async def app_delete_book(book_id: int, user_id: int = CurrentUser):
     """整本删除（书+章节+划线+阅读进度），用于内容纠错场景（比如章节切分规则
     改过、需要用不同章节数的新EPUB整体替换旧版本——这种情况下不能用上面的
     `/replace`接口，那个接口要求新旧章节数量必须一致）。v1没有"用户在书架里
@@ -1240,7 +1364,9 @@ async def app_delete_book(book_id: int, _=ExtAuth):
     pool = await get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
-            book = await conn.fetchrow("SELECT file_path FROM books WHERE id = $1", book_id)
+            book = await conn.fetchrow(
+                "SELECT file_path FROM books WHERE id = $1 AND user_id = $2", book_id, user_id
+            )
             if not book:
                 raise HTTPException(status_code=404, detail="书本不存在")
             await conn.execute("DELETE FROM qa_history WHERE book_id = $1", str(book_id))
@@ -1252,7 +1378,7 @@ async def app_delete_book(book_id: int, _=ExtAuth):
     return {"deleted": True, "book_id": book_id}
 
 @app.get("/app/books", response_model=list[BookOut])
-async def app_get_library(_=ExtAuth):
+async def app_get_library(user_id: int = CurrentUser):
     """书架：返回当前用户的所有书本，附带各自的阅读进度。"""
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -1264,17 +1390,17 @@ async def app_get_library(_=ExtAuth):
                    ON rp.book_id = b.id AND rp.user_id = $1
             WHERE b.user_id = $1
             ORDER BY b.added_at DESC
-        """, APP_USER_ID)
+        """, user_id)
     return [BookOut(**dict(r)) for r in rows]
 
 @app.get("/app/books/{book_id}/context", response_model=BookContextOut)
-async def app_get_book_context(book_id: int, _=ExtAuth):
+async def app_get_book_context(book_id: int, user_id: int = CurrentUser):
     """翻开一本书：书本信息 + 章节目录 + 上次读到的位置。"""
     pool = await get_pool()
     async with pool.acquire() as conn:
         book = await conn.fetchrow("""
             SELECT id, title, author FROM books WHERE id = $1 AND user_id = $2
-        """, book_id, APP_USER_ID)
+        """, book_id, user_id)
         if not book:
             raise HTTPException(status_code=404, detail="书本不存在")
 
@@ -1286,7 +1412,7 @@ async def app_get_book_context(book_id: int, _=ExtAuth):
         progress = await conn.fetchrow("""
             SELECT current_cfi_location FROM reading_progress
             WHERE book_id = $1 AND user_id = $2
-        """, book_id, APP_USER_ID)
+        """, book_id, user_id)
 
     return BookContextOut(
         id=book["id"], title=book["title"], author=book["author"],
@@ -1295,7 +1421,7 @@ async def app_get_book_context(book_id: int, _=ExtAuth):
     )
 
 @app.get("/app/books/{book_id}/file.epub")
-async def app_get_book_file(book_id: int, _=ExtAuth):
+async def app_get_book_file(book_id: int, user_id: int = CurrentUser):
     """阅读器下载原始 EPUB 文件。
 
     路径必须以 .epub 结尾——epubjs-react-native 内部靠 URL 字符串里有没有
@@ -1307,14 +1433,14 @@ async def app_get_book_file(book_id: int, _=ExtAuth):
     pool = await get_pool()
     async with pool.acquire() as conn:
         book = await conn.fetchrow(
-            "SELECT file_path FROM books WHERE id = $1 AND user_id = $2", book_id, APP_USER_ID
+            "SELECT file_path FROM books WHERE id = $1 AND user_id = $2", book_id, user_id
         )
     if not book or not os.path.isfile(book["file_path"]):
         raise HTTPException(status_code=404, detail="书本文件不存在")
     return FileResponse(book["file_path"], media_type="application/epub+zip")
 
 @app.get("/app/books/{book_id}/highlights", response_model=list[HighlightOut])
-async def app_get_highlights(book_id: int, _=ExtAuth):
+async def app_get_highlights(book_id: int, user_id: int = CurrentUser):
     """一本书的全部划线，阅读器打开时用来恢复已划的标记。"""
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -1323,16 +1449,16 @@ async def app_get_highlights(book_id: int, _=ExtAuth):
             FROM highlights
             WHERE book_id = $1 AND user_id = $2
             ORDER BY created_at
-        """, book_id, APP_USER_ID)
+        """, book_id, user_id)
     return [HighlightOut(**dict(r)) for r in rows]
 
 @app.post("/app/books/{book_id}/highlights", response_model=HighlightOut)
-async def app_save_highlight(book_id: int, body: HighlightIn, _=ExtAuth):
+async def app_save_highlight(book_id: int, body: HighlightIn, user_id: int = CurrentUser):
     """保存一条划线，顺手算好 embedding（不推迟到阶段四补算）。"""
     pool = await get_pool()
     async with pool.acquire() as conn:
         book = await conn.fetchrow(
-            "SELECT id FROM books WHERE id = $1 AND user_id = $2", book_id, APP_USER_ID
+            "SELECT id FROM books WHERE id = $1 AND user_id = $2", book_id, user_id
         )
         if not book:
             raise HTTPException(status_code=404, detail="书本不存在")
@@ -1348,20 +1474,20 @@ async def app_save_highlight(book_id: int, body: HighlightIn, _=ExtAuth):
                 (user_id, book_id, chapter_id, cfi_location, highlighted_text, note, embedding)
             VALUES ($1, $2, $3, $4, $5, $6, $7::vector)
             RETURNING id, chapter_id, cfi_location, highlighted_text, note, created_at
-        """, APP_USER_ID, book_id, body.chapter_id, body.cfi_location,
+        """, user_id, book_id, body.chapter_id, body.cfi_location,
              body.highlighted_text, body.note, embedding_str)
 
     return HighlightOut(**dict(row))
 
 @app.delete("/app/books/{book_id}/highlights/{highlight_id}")
-async def app_delete_highlight(book_id: int, highlight_id: int, _=ExtAuth):
+async def app_delete_highlight(book_id: int, highlight_id: int, user_id: int = CurrentUser):
     """删除一条划线（阶段七新增）。只按 user_id+book_id+highlight_id 三重匹配删，
     删不到（比如id对不上或者不是自己的书）不当错误，返回结果里如实说明。"""
     pool = await get_pool()
     async with pool.acquire() as conn:
         result = await conn.execute(
             "DELETE FROM highlights WHERE id = $1 AND book_id = $2 AND user_id = $3",
-            highlight_id, book_id, APP_USER_ID
+            highlight_id, book_id, user_id
         )
     deleted = result.endswith(" 1")
     if not deleted:
@@ -1369,7 +1495,7 @@ async def app_delete_highlight(book_id: int, highlight_id: int, _=ExtAuth):
     return {"ok": True}
 
 @app.post("/app/books/{book_id}/progress")
-async def app_update_progress(book_id: int, body: ProgressIn, _=ExtAuth):
+async def app_update_progress(book_id: int, body: ProgressIn, user_id: int = CurrentUser):
     """更新阅读进度（当前 CFI 位置），用于下次打开这本书时恢复到原位。"""
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -1378,18 +1504,20 @@ async def app_update_progress(book_id: int, body: ProgressIn, _=ExtAuth):
             VALUES ($1, $2, $3, NOW())
             ON CONFLICT (user_id, book_id) DO UPDATE
                 SET current_cfi_location = $3, updated_at = NOW()
-        """, APP_USER_ID, book_id, body.cfi_location)
+        """, user_id, book_id, body.cfi_location)
     return {"ok": True}
 
 @app.get("/app/review", response_model=list[ReviewItemOut])
-async def app_get_review(_=ExtAuth):
+async def app_get_review(user_id: int = CurrentUser):
     """划线复盘：跨书聚合当前用户的划线 + 问答记录，按时间倒序，附带问答记录之间的
     语义关联标注（阶段六新增，仅标注不合并不跳转）。
 
-    qa_history 是扩展和手机端共用的表，扩展写入 /history 时不区分归属（微信读书的
-    bookId 是它自己的编号）。这里靠 JOIN books 反向过滤：只有 book_id 能对上手机端
-    自己 books 表里的书，才会出现在结果里，天然排除掉扩展那边的旧数据，不用改
-    /history 接口本身（只加不改）。
+    qa_history 是扩展和手机端共用的表。扩展写入 /history 时依然不带JWT、不区分
+    归属（微信读书的 bookId 是它自己的编号，跟手机端内部 books.id 不会撞上），
+    这里继续靠 JOIN books 反向过滤把它排除掉。阶段十三给 /history 加了"带JWT就
+    按真实用户存 user_id"（可选，不影响插件），所以这里的 WHERE user_id = $1
+    现在能拿到手机端各自登录用户的真实数据了，JOIN过滤这层保留作为双重保险，
+    不去掉。
     """
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -1413,7 +1541,7 @@ async def app_get_review(_=ExtAuth):
             WHERE q.user_id = $1
 
             ORDER BY created_at DESC
-        """, APP_USER_ID)
+        """, user_id)
 
         # 关联主题：问答记录两两算向量相似度，阈值复用 /history/related
         # 那套已经调过的 SIMILARITY_THRESHOLD，不新造一个数字。每条最多标注一个
@@ -1444,7 +1572,7 @@ async def app_get_review(_=ExtAuth):
               -- 不让它进最终结果——不是删掉同书检测能力，以后想放开随时去掉这行。
               AND ba.id != bb.id
             ORDER BY a.id, (a.embedding <=> b.embedding) ASC
-        """, APP_USER_ID, SIMILARITY_THRESHOLD)
+        """, user_id, SIMILARITY_THRESHOLD)
         related_map = {r["item_id"]: r for r in related_rows}
 
         # 2026-07-22：同一次划线连续问了几轮，原来每轮都是独立一张卡片，改成
@@ -1501,7 +1629,7 @@ async def app_get_review(_=ExtAuth):
     return items
 
 @app.post("/app/backfill-embeddings")
-async def app_backfill_embeddings(request: Request, _=ExtAuth):
+async def app_backfill_embeddings(request: Request, user_id: int = CurrentUser):
     """一次性维护工具（2026-07-18）：给手机端自己的 qa_history 记录重新算
     embedding，不管旧值是不是空的，一律用新公式（selection+question+answer）
     覆盖——旧公式只用 question+answer，问题信息量低时关联检测容易把不相关的
@@ -1519,7 +1647,7 @@ async def app_backfill_embeddings(request: Request, _=ExtAuth):
             FROM qa_history q
             JOIN books b ON b.id::text = q.book_id
             WHERE q.user_id = $1
-        """, APP_USER_ID)
+        """, user_id)
 
     updated, failed = 0, []
     for r in rows:
@@ -1649,6 +1777,99 @@ async def _find_or_create_concept(conn, user_id: int, label: str, sf) -> tuple[i
 
 _concept_build_status = {"running": False, "last_result": None, "last_error": None}
 
+async def _run_concept_graph_pipeline_for_user(pool, ds, sf, user_id: int) -> dict:
+    """给单个用户跑一遍概念提取+去重合并+关联检测。阶段十三之前这段逻辑
+    直接写死单一用户 id 跑一次，现在拆成单用户函数，被下面
+    `_run_concept_graph_pipeline` 遍历所有注册用户各调一次——逻辑本身没变，
+    只是 user_id 从写死常量变成参数。"""
+    stats = {"extracted": 0, "concepts_created": 0, "concepts_reused": 0,
+              "relations_created": 0, "failed": []}
+
+    # 第一段：给还没提炼过概念的记录跑提取+去重合并。左连接concept_sources，
+    # 没有匹配的就是没处理过——这样重复调用这个接口只处理新增量，不会对
+    # 已经提炼过的老记录重复花钱调AI。
+    async with pool.acquire() as conn:
+        pending_highlights = await conn.fetch("""
+            SELECT h.id, h.highlighted_text AS excerpt, h.highlighted_text AS extract_input,
+                   b.id AS book_id, b.title AS book_title
+            FROM highlights h
+            JOIN books b ON b.id = h.book_id
+            LEFT JOIN concept_sources cs ON cs.source_type = 'highlight' AND cs.source_id = h.id
+            WHERE h.user_id = $1 AND cs.id IS NULL
+        """, user_id)
+        pending_qa = await conn.fetch("""
+            SELECT q.id, q.selection AS excerpt,
+                   (q.selection || ' ' || q.question || ' ' || q.answer) AS extract_input,
+                   b.id AS book_id, b.title AS book_title
+            FROM qa_history q
+            JOIN books b ON b.id::text = q.book_id
+            LEFT JOIN concept_sources cs ON cs.source_type = 'qa' AND cs.source_id = q.id
+            WHERE q.user_id = $1 AND cs.id IS NULL
+        """, user_id)
+
+    pending = [("highlight", r) for r in pending_highlights] + [("qa", r) for r in pending_qa]
+
+    for source_type, r in pending:
+        try:
+            concepts = await _extract_concepts(r["extract_input"], ds)
+            excerpt = r["excerpt"] if len(r["excerpt"]) <= 80 else r["excerpt"][:80] + "…"
+            async with pool.acquire() as conn:
+                async with conn.transaction():
+                    for c in concepts:
+                        concept_id, created = await _find_or_create_concept(conn, user_id, c["label"], sf)
+                        stats["concepts_created" if created else "concepts_reused"] += 1
+                        await conn.execute("""
+                            INSERT INTO concept_sources
+                                (concept_id, source_type, source_id, book_id, book_title, excerpt, explanation)
+                            VALUES ($1, $2, $3, $4, $5, $6, $7)
+                            ON CONFLICT (source_type, source_id, concept_id) DO NOTHING
+                        """, concept_id, source_type, r["id"], r["book_id"], r["book_title"],
+                             excerpt, c.get("reason", ""))
+            stats["extracted"] += 1
+        except Exception as e:
+            print(f"[概念提取] user_id={user_id} {source_type} id={r['id']} 失败: {e}")
+            stats["failed"].append({"type": source_type, "id": r["id"]})
+
+    # 第二段：概念两两算相似度。第一次实现时这里每一对都单独发两条SQL
+    # （查是否已存在边 + 查相似度），159个概念≈12,600对，2万5千次网络
+    # 往返——不是被DeepSeek拖慢，是被这个查询方式本身拖垮的。改成一条
+    # SQL用cross join一次性算完所有pair的相似度、顺带用NOT EXISTS过滤
+    # 掉已经有边的pair，Postgres算这种量级的cross join是毫秒级的事，
+    # O(n²)的是"要不要调AI生成解释"这一步（数量不大的情况下才这么做，
+    # 等以后概念数真的很多了再考虑增量方案，现在提前优化是过度设计）。
+    async with pool.acquire() as conn:
+        candidate_pairs = await conn.fetch("""
+            SELECT a.id AS a_id, a.label AS a_label, b.id AS b_id, b.label AS b_label,
+                   1 - (a.embedding <=> b.embedding) AS sim
+            FROM concepts a
+            JOIN concepts b ON b.id > a.id AND b.user_id = a.user_id
+            WHERE a.user_id = $1 AND a.embedding IS NOT NULL AND b.embedding IS NOT NULL
+              AND 1 - (a.embedding <=> b.embedding) >= $2
+              AND NOT EXISTS (
+                  SELECT 1 FROM concept_relations cr
+                  WHERE (cr.concept_a_id = a.id AND cr.concept_b_id = b.id)
+                     OR (cr.concept_a_id = b.id AND cr.concept_b_id = a.id)
+              )
+            ORDER BY sim DESC
+        """, user_id, CONCEPT_SIMILARITY_THRESHOLD)
+
+    for pair in candidate_pairs:
+        try:
+            explain = await _explain_concept_relation(pair["a_label"], pair["b_label"], ds)
+            async with pool.acquire() as conn:
+                await conn.execute("""
+                    INSERT INTO concept_relations
+                        (concept_a_id, concept_b_id, similarity, common_point, explanation_a, explanation_b)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    ON CONFLICT (concept_a_id, concept_b_id) DO NOTHING
+                """, pair["a_id"], pair["b_id"], pair["sim"], explain["common_point"],
+                     explain["explanation_a"], explain["explanation_b"])
+            stats["relations_created"] += 1
+        except Exception as e:
+            print(f"[概念关联] user_id={user_id} {pair['a_label']}<->{pair['b_label']} 失败: {e}")
+
+    return stats
+
 async def _run_concept_graph_pipeline(ds_key: str, sf_key: str):
     """真正干活的地方——从 app_build_concept_graph 里剥离出来，不依赖请求
     上下文（Request对象请求结束就失效了，key在起后台任务前就先取出来传参）。
@@ -1658,103 +1879,42 @@ async def _run_concept_graph_pipeline(ds_key: str, sf_key: str):
     502——但服务端进程本身在处理中途就被砍掉了，同一批数据要重新处理。
     改成 BackgroundTasks 触发，HTTP请求立刻返回，这个函数在后台继续跑，
     不再受制于任何一层反向代理的请求级超时。
+
+    阶段十三：内部不再写死单一用户，改成遍历 users 表里所有注册用户各跑
+    一遍 `_run_concept_graph_pipeline_for_user`——触发方式维持手动不变（决策层
+    拍板：测试阶段用户量小，不需要"新用户注册自动触发"这类自动化）。单个
+    用户的处理整体失败不影响其他用户，记录到 by_user 里但继续跑下一个。
     """
     global _concept_build_status
     _concept_build_status = {"running": True, "last_result": None, "last_error": None}
     ds = _make_ds(ds_key)
     sf = _make_sf(sf_key) or sf_client
-    stats = {"extracted": 0, "concepts_created": 0, "concepts_reused": 0,
-              "relations_created": 0, "failed": []}
+    overall = {"extracted": 0, "concepts_created": 0, "concepts_reused": 0,
+               "relations_created": 0, "failed": [], "by_user": {}}
     try:
         pool = await get_pool()
-
-        # 第一段：给还没提炼过概念的记录跑提取+去重合并。左连接concept_sources，
-        # 没有匹配的就是没处理过——这样重复调用这个接口只处理新增量，不会对
-        # 已经提炼过的老记录重复花钱调AI。
         async with pool.acquire() as conn:
-            pending_highlights = await conn.fetch("""
-                SELECT h.id, h.highlighted_text AS excerpt, h.highlighted_text AS extract_input,
-                       b.id AS book_id, b.title AS book_title
-                FROM highlights h
-                JOIN books b ON b.id = h.book_id
-                LEFT JOIN concept_sources cs ON cs.source_type = 'highlight' AND cs.source_id = h.id
-                WHERE h.user_id = $1 AND cs.id IS NULL
-            """, APP_USER_ID)
-            pending_qa = await conn.fetch("""
-                SELECT q.id, q.selection AS excerpt,
-                       (q.selection || ' ' || q.question || ' ' || q.answer) AS extract_input,
-                       b.id AS book_id, b.title AS book_title
-                FROM qa_history q
-                JOIN books b ON b.id::text = q.book_id
-                LEFT JOIN concept_sources cs ON cs.source_type = 'qa' AND cs.source_id = q.id
-                WHERE q.user_id = $1 AND cs.id IS NULL
-            """, APP_USER_ID)
+            user_rows = await conn.fetch("SELECT id FROM users ORDER BY id")
 
-        pending = [("highlight", r) for r in pending_highlights] + [("qa", r) for r in pending_qa]
-
-        for source_type, r in pending:
+        for row in user_rows:
+            uid = row["id"]
             try:
-                concepts = await _extract_concepts(r["extract_input"], ds)
-                excerpt = r["excerpt"] if len(r["excerpt"]) <= 80 else r["excerpt"][:80] + "…"
-                async with pool.acquire() as conn:
-                    async with conn.transaction():
-                        for c in concepts:
-                            concept_id, created = await _find_or_create_concept(conn, APP_USER_ID, c["label"], sf)
-                            stats["concepts_created" if created else "concepts_reused"] += 1
-                            await conn.execute("""
-                                INSERT INTO concept_sources
-                                    (concept_id, source_type, source_id, book_id, book_title, excerpt, explanation)
-                                VALUES ($1, $2, $3, $4, $5, $6, $7)
-                                ON CONFLICT (source_type, source_id, concept_id) DO NOTHING
-                            """, concept_id, source_type, r["id"], r["book_id"], r["book_title"],
-                                 excerpt, c.get("reason", ""))
-                stats["extracted"] += 1
+                user_stats = await _run_concept_graph_pipeline_for_user(pool, ds, sf, uid)
             except Exception as e:
-                print(f"[概念提取] {source_type} id={r['id']} 失败: {e}")
-                stats["failed"].append({"type": source_type, "id": r["id"]})
+                print(f"[知识图谱构建] user_id={uid} 整体失败: {e}")
+                overall["by_user"][uid] = {"error": str(e)}
+                continue
+            overall["by_user"][uid] = user_stats
+            overall["extracted"] += user_stats["extracted"]
+            overall["concepts_created"] += user_stats["concepts_created"]
+            overall["concepts_reused"] += user_stats["concepts_reused"]
+            overall["relations_created"] += user_stats["relations_created"]
+            overall["failed"].extend(user_stats["failed"])
 
-        # 第二段：概念两两算相似度。第一次实现时这里每一对都单独发两条SQL
-        # （查是否已存在边 + 查相似度），159个概念≈12,600对，2万5千次网络
-        # 往返——不是被DeepSeek拖慢，是被这个查询方式本身拖垮的。改成一条
-        # SQL用cross join一次性算完所有pair的相似度、顺带用NOT EXISTS过滤
-        # 掉已经有边的pair，Postgres算这种量级的cross join是毫秒级的事，
-        # O(n²)的是"要不要调AI生成解释"这一步（数量不大的情况下才这么做，
-        # 等以后概念数真的很多了再考虑增量方案，现在提前优化是过度设计）。
-        async with pool.acquire() as conn:
-            candidate_pairs = await conn.fetch("""
-                SELECT a.id AS a_id, a.label AS a_label, b.id AS b_id, b.label AS b_label,
-                       1 - (a.embedding <=> b.embedding) AS sim
-                FROM concepts a
-                JOIN concepts b ON b.id > a.id AND b.user_id = a.user_id
-                WHERE a.user_id = $1 AND a.embedding IS NOT NULL AND b.embedding IS NOT NULL
-                  AND 1 - (a.embedding <=> b.embedding) >= $2
-                  AND NOT EXISTS (
-                      SELECT 1 FROM concept_relations cr
-                      WHERE (cr.concept_a_id = a.id AND cr.concept_b_id = b.id)
-                         OR (cr.concept_a_id = b.id AND cr.concept_b_id = a.id)
-                  )
-                ORDER BY sim DESC
-            """, APP_USER_ID, CONCEPT_SIMILARITY_THRESHOLD)
-
-        for pair in candidate_pairs:
-            try:
-                explain = await _explain_concept_relation(pair["a_label"], pair["b_label"], ds)
-                async with pool.acquire() as conn:
-                    await conn.execute("""
-                        INSERT INTO concept_relations
-                            (concept_a_id, concept_b_id, similarity, common_point, explanation_a, explanation_b)
-                        VALUES ($1, $2, $3, $4, $5, $6)
-                        ON CONFLICT (concept_a_id, concept_b_id) DO NOTHING
-                    """, pair["a_id"], pair["b_id"], pair["sim"], explain["common_point"],
-                         explain["explanation_a"], explain["explanation_b"])
-                stats["relations_created"] += 1
-            except Exception as e:
-                print(f"[概念关联] {pair['a_label']}<->{pair['b_label']} 失败: {e}")
-
-        _concept_build_status = {"running": False, "last_result": stats, "last_error": None}
+        _concept_build_status = {"running": False, "last_result": overall, "last_error": None}
     except Exception as e:
         print(f"[知识图谱构建] 流水线整体失败: {e}")
-        _concept_build_status = {"running": False, "last_result": stats, "last_error": str(e)}
+        _concept_build_status = {"running": False, "last_result": overall, "last_error": str(e)}
 
 @app.post("/app/concept-graph/build")
 async def app_build_concept_graph(request: Request, background_tasks: BackgroundTasks, _=ExtAuth):
@@ -1779,14 +1939,14 @@ async def app_get_concept_graph_build_status(_=ExtAuth):
     return _concept_build_status
 
 @app.get("/app/concept-graph")
-async def app_get_concept_graph(_=ExtAuth):
+async def app_get_concept_graph(user_id: int = CurrentUser):
     """图谱页面实际读的接口——只读 build 接口已经算好的结果，没有任何AI调用，
     满足"首屏3秒内"的门槛。孤立节点（没有任何关联边）也要正常返回，不能
     因为没有连线就被过滤掉——前端拿到全部nodes后自己决定怎么摆放/渲染。"""
     pool = await get_pool()
     async with pool.acquire() as conn:
         concept_rows = await conn.fetch(
-            "SELECT id, label FROM concepts WHERE user_id = $1 ORDER BY id", APP_USER_ID
+            "SELECT id, label FROM concepts WHERE user_id = $1 ORDER BY id", user_id
         )
         source_rows = await conn.fetch("""
             SELECT cs.concept_id, cs.source_type, cs.source_id, cs.book_title, cs.excerpt, cs.explanation
@@ -1794,13 +1954,13 @@ async def app_get_concept_graph(_=ExtAuth):
             JOIN concepts c ON c.id = cs.concept_id
             WHERE c.user_id = $1
             ORDER BY cs.concept_id, cs.created_at
-        """, APP_USER_ID)
+        """, user_id)
         relation_rows = await conn.fetch("""
             SELECT cr.concept_a_id, cr.concept_b_id, cr.common_point, cr.explanation_a, cr.explanation_b
             FROM concept_relations cr
             JOIN concepts ca ON ca.id = cr.concept_a_id
             WHERE ca.user_id = $1
-        """, APP_USER_ID)
+        """, user_id)
 
     sources_by_concept: dict[int, list[dict]] = defaultdict(list)
     schools_by_concept: dict[int, list[str]] = defaultdict(list)

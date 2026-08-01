@@ -9,3 +9,5 @@ av>=13.0.0
 asyncpg>=0.30.0
 EbookLib>=0.18
 python-multipart>=0.0.9
+pyjwt>=2.9.0
+bcrypt>=4.2.0

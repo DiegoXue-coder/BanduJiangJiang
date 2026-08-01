@@ -143,9 +143,11 @@ function buildGraphHtml(nodes, edges) {
   // ---------- 交互状态 ----------
   var globe = { rotY:0.4, rotX:-0.25, zoom:1, velY:0, velX:0 };
   var dragging = false, lastX=0, lastY=0, moved=false;
+  var moveHistory = []; // 最近~120ms内的滑动采样，抬手时用它算真实的"甩"速度
   var pointers = {};
   var pinchStartDist = 0, pinchStartZoom = 1;
-  var lastTap = { t:0, node:null };
+  var pendingSingle = null; // 单击延迟触发的定时器状态，等一小段时间看有没有第二下跟上再决定是单击还是双击
+  var DOUBLE_TAP_MS = 300;
   var focusedStarId = null;
 
   hintEl.textContent = '拖动旋转星球 · 双指缩放 · 单击看含义 · 双击展开/聚焦';
@@ -159,7 +161,11 @@ function buildGraphHtml(nodes, edges) {
     var n = planets.length;
     planets.forEach(function(p, i){
       var angle = (i/n)*Math.PI*2 - Math.PI/2;
-      var radius = star._sr + 46;
+      // 展开环半径跟着globe.zoom缩放：之前是固定像素值，双击聚焦后哪怕
+      // 用户再用双指继续放大，行星和恒星之间的连线间距完全不会变化，
+      // 挤在一起很难精确点中某一条线。改成跟zoom挂钩后，放大能真正把
+      // 行星之间的连线拉开，用户可以自己缩放到方便点击的程度。
+      var radius = (star._sr + 46) * globe.zoom;
       p._sx = star._sx + Math.cos(angle)*radius;
       p._sy = star._sy + Math.sin(angle)*radius*0.9;
       p._sr = Math.max(9, nodeRadius(p)*0.5);
@@ -242,8 +248,8 @@ function buildGraphHtml(nodes, edges) {
     if (!dragging){
       if (Math.abs(globe.velY) > 0.0002 || Math.abs(globe.velX) > 0.0002){
         globe.rotY += globe.velY;
-        globe.rotX = Math.max(-1.1, Math.min(1.1, globe.rotX + globe.velX));
-        globe.velY *= 0.94; globe.velX *= 0.94;
+        globe.rotX += globe.velX;
+        globe.velY *= 0.985; globe.velX *= 0.985;
       }
     }
     draw();
@@ -274,12 +280,17 @@ function buildGraphHtml(nodes, edges) {
     return Math.sqrt(ddx*ddx+ddy*ddy);
   }
   function hitTestEdge(px, py){
+    // 防误触：没有恒星被双击展开时，连线一律不可点——一条边两端节点
+    // 必然属于同一个恒星（并查集分组决定的），所以这条限制不会导致
+    // 任何一条边永远点不到，只是要求用户先双击展开它所属的那个恒星。
+    if (!focusedStarId) return null;
     var best=null, bestD=Infinity;
     EDGES_RAW.forEach(function(e){
       var a=byId[e.source], b=byId[e.target];
       if(!a||!b) return;
+      if (a.starId!==focusedStarId) return;
       var d = distToSegment(px, py, a._sx, a._sy, b._sx, b._sy);
-      if (d < 16 && d < bestD){ bestD=d; best=e; }
+      if (d < 22 && d < bestD){ bestD=d; best=e; }
     });
     return best;
   }
@@ -291,7 +302,7 @@ function buildGraphHtml(nodes, edges) {
     var deltaY = normalizeAngle(targetRotY - globe.rotY);
     animateVal(function(v){ globe.rotY=v; }, globe.rotY, globe.rotY+deltaY, 420);
     animateVal(function(v){ globe.rotX=v; }, globe.rotX, targetRotX, 420);
-    animateVal(function(v){ globe.zoom=v; }, globe.zoom, 1.9, 420);
+    animateVal(function(v){ globe.zoom=v; }, globe.zoom, 2.6, 420);
   }
   function collapseToOverview(){
     focusedStarId = null;
@@ -320,6 +331,7 @@ function buildGraphHtml(nodes, edges) {
       dragging=true; moved=false;
       lastX=pointers[e.pointerId].x; lastY=pointers[e.pointerId].y;
       globe.velY=0; globe.velX=0;
+      moveHistory = [{x:lastX, y:lastY, t:performance.now()}];
     } else if (ids.length===2){
       var p1=pointers[ids[0]], p2=pointers[ids[1]];
       pinchStartDist = dist(p1,p2);
@@ -347,10 +359,35 @@ function buildGraphHtml(nodes, edges) {
     var dx = nx-lastX, dy = ny-lastY;
     if (Math.abs(dx)+Math.abs(dy) > 3) moved = true;
     globe.rotY += dx*0.008;
-    globe.rotX = Math.max(-1.1, Math.min(1.1, globe.rotX - dy*0.008));
-    globe.velY = dx*0.0016; globe.velX = -dy*0.0016;
+    globe.rotX -= dy*0.008; // 竖直方向不再夹角度限制，跟水平一样能整圈转
     lastX=nx; lastY=ny;
+    var now = performance.now();
+    moveHistory.push({x:nx, y:ny, t:now});
+    var cutoff = now - 120;
+    while (moveHistory.length>1 && moveHistory[0].t < cutoff) moveHistory.shift();
   });
+
+  function cancelPendingSingle(){
+    if (pendingSingle){ clearTimeout(pendingSingle.timer); pendingSingle = null; }
+  }
+
+  function fireSingleTap(hitNode, hitEdge){
+    if (hitNode) post({ type:'node', id: hitNode.id });
+    else if (hitEdge) post({ type:'edge', source: hitEdge.source, target: hitEdge.target });
+    else post({ type:'close' });
+  }
+
+  function fireDoubleTap(hitNode){
+    if (!hitNode){
+      collapseToOverview();
+    } else if (hasPlanets(hitNode)){
+      if (focusedStarId===hitNode.id){ collapseToOverview(); }
+      else { focusedStarId=hitNode.id; focusNode(hitNode); }
+    } else {
+      focusNode(hitNode);
+    }
+    draw();
+  }
 
   function endPointer(e){
     delete pointers[e.pointerId];
@@ -358,31 +395,42 @@ function buildGraphHtml(nodes, edges) {
     if (ids.length < 2) { pinchStartDist = 0; }
     if (dragging && ids.length===0){
       dragging=false;
+      if (moved && moveHistory.length>=2){
+        // 用抬手前最近~120ms的采样算真实的"轻扫"速度，而不是只看最后
+        // 一帧的位移（抬手前经常已经在减速，导致惯性起不来）。上限
+        // MAX_SPIN 保证甩得再用力也不会转特别快，配合tick()里更慢的
+        // 衰减率，做出"太空中失重缓慢漂"的手感，而不是快速转完就停。
+        var latest = moveHistory[moveHistory.length-1];
+        var earliest = moveHistory[0];
+        var dt = Math.max(1, latest.t-earliest.t);
+        var vx = (latest.x-earliest.x)/dt;
+        var vy = (latest.y-earliest.y)/dt;
+        var MAX_SPIN = 0.014;
+        globe.velY = Math.max(-MAX_SPIN, Math.min(MAX_SPIN, vx*0.02));
+        globe.velX = Math.max(-MAX_SPIN, Math.min(MAX_SPIN, -vy*0.02));
+      }
       if (!moved){
         var hitNode = hitTestNode(lastX,lastY);
-        var now = performance.now();
-        var isDoubleTap = (lastTap.node===hitNode) && (now-lastTap.t < 320);
-        if (isDoubleTap){
-          lastTap = {t:0, node:null};
-          if (!hitNode){
-            collapseToOverview();
-          } else if (hasPlanets(hitNode)){
-            if (focusedStarId===hitNode.id){ collapseToOverview(); }
-            else { focusedStarId=hitNode.id; focusNode(hitNode); }
-          } else {
-            focusNode(hitNode);
-          }
+        var hitEdge = hitNode ? null : hitTestEdge(lastX,lastY);
+
+        // 单击不立刻触发：先等 DOUBLE_TAP_MS 看有没有第二下点在同一个
+        // 目标上跟上来。没跟上，超时后才真正当作单击弹卡片；跟上了，
+        // 说明是双击，取消这次单击、直接走双击逻辑（聚焦/展开/收起），
+        // 避免双击的第一下就已经把解释卡片弹出来的问题。
+        if (pendingSingle && pendingSingle.hitNode===hitNode && pendingSingle.hitEdge===hitEdge){
+          cancelPendingSingle();
+          fireDoubleTap(hitNode);
         } else {
-          if (hitNode){
-            post({ type:'node', id: hitNode.id });
-          } else {
-            var hitEdge = hitTestEdge(lastX, lastY);
-            if (hitEdge) post({ type:'edge', source: hitEdge.source, target: hitEdge.target });
-            else post({ type:'close' });
-          }
-          lastTap = {t:now, node:hitNode};
+          cancelPendingSingle();
+          pendingSingle = {
+            hitNode: hitNode,
+            hitEdge: hitEdge,
+            timer: setTimeout(function(){
+              fireSingleTap(hitNode, hitEdge);
+              pendingSingle = null;
+            }, DOUBLE_TAP_MS),
+          };
         }
-        draw();
       }
     }
   }

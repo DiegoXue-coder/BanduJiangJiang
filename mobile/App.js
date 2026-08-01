@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { View, ActivityIndicator } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
@@ -17,8 +17,10 @@ import ReviewScreen from './screens/ReviewScreen';
 import ReviewBookScreen from './screens/ReviewBookScreen';
 import ReviewDetailScreen from './screens/ReviewDetailScreen';
 import ProfileScreen from './screens/ProfileScreen';
+import LoginScreen from './screens/LoginScreen';
 import { useTheme } from './theme';
 import { FONT_ASSETS } from './fonts';
+import { loadStoredToken, isLoggedIn, onAuthExpired } from './lib/api';
 
 // 阶段十一：底部tab从emoji换成Tabler Icons（MIT协议，免费商用）
 const TAB_ICON_COMPONENT = { 书架: IconBooks, 划线复盘: IconHighlight, 我的: IconUserCircle };
@@ -72,11 +74,37 @@ export default function App() {
   const [fontsLoaded] = useFonts(FONT_ASSETS);
   const tabBarStyle = { backgroundColor: theme.cardBg, borderTopColor: theme.cardBorder };
 
-  if (!fontsLoaded) {
+  // 阶段十三：登录态守卫。authChecked=false 期间不知道用户登没登录过，
+  // 先转圈，不能默认展示任何一边——直接默认展示书架会闪一下已登录界面，
+  // 默认展示登录页会让已登录用户每次开App都先看一眼登录页再跳走。
+  const [authChecked, setAuthChecked] = useState(false);
+  const [loggedIn, setLoggedIn] = useState(false);
+
+  useEffect(() => {
+    loadStoredToken().then(() => {
+      setLoggedIn(isLoggedIn());
+      setAuthChecked(true);
+    });
+    // token失效（过期/被后端拒绝）时 appFetch 会广播这个事件，统一弹回登录页。
+    return onAuthExpired(() => setLoggedIn(false));
+  }, []);
+
+  const handleLoggedIn = useCallback(() => setLoggedIn(true), []);
+
+  if (!fontsLoaded || !authChecked) {
     return (
       <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: theme.bg }}>
         <ActivityIndicator size="large" color={theme.accent} />
       </View>
+    );
+  }
+
+  if (!loggedIn) {
+    return (
+      <SafeAreaProvider>
+        <StatusBar style="auto" />
+        <LoginScreen onLoggedIn={handleLoggedIn} />
+      </SafeAreaProvider>
     );
   }
 

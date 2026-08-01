@@ -1,4 +1,5 @@
 import CryptoJS from 'crypto-js';
+import * as SecureStore from 'expo-secure-store';
 
 // ── 后端地址 ──────────────────────────────────────────────────────────
 // 手机端新接口(/app/*)直接指向生产环境——书库内容是真实预置书籍，
@@ -8,6 +9,8 @@ export const API_BASE = 'https://bandujiangjiang-production.up.railway.app';
 // ── HMAC 会员卡式验证 ────────────────────────────────────────────────
 // 与 extension/content/content.js 用的是同一个密钥、同一套算法
 // （后端 EXTENSION_SECRET 对应），复用现有验证机制，不是重新设计。
+// 阶段十三之后 /app/* 接口不再看这个token了（换成JWT），但 /history、
+// /ask、/tts、/transcribe 这几个跟插件共用的接口鉴权维持不变，继续要发。
 const EXT_SECRET = 'ce15f8e8-5956-42c5-9a6d-a0fc7d504f7b';
 
 function getExtToken() {
@@ -15,15 +18,93 @@ function getExtToken() {
   return CryptoJS.HmacSHA256(day, EXT_SECRET).toString(CryptoJS.enc.Hex).slice(0, 32);
 }
 
-/** 带鉴权头的 fetch 封装，所有 /app/* 接口调用统一走这个。 */
-export async function appFetch(path, options = {}) {
-  const res = await fetch(`${API_BASE}${path}`, {
-    ...options,
-    headers: {
-      'x-extension-token': getExtToken(),
-      ...options.headers,
-    },
+// ── 阶段十三：登录态（JWT）───────────────────────────────────────────
+// token 存 SecureStore（安全存储，不是明文AsyncStorage），同时内存里缓存
+// 一份——getBookFileUrl这类要同步拼URL的地方等不起SecureStore的异步读取，
+// App启动时 loadStoredToken() 会先把这份内存缓存填好。
+const TOKEN_KEY = 'bandu_auth_token';
+let cachedToken = null;
+
+/** App 启动时调一次：把 SecureStore 里存的 token 读进内存缓存，返回它
+ * （null 表示没登录过/已登出）。*/
+export async function loadStoredToken() {
+  cachedToken = await SecureStore.getItemAsync(TOKEN_KEY);
+  return cachedToken;
+}
+
+async function setToken(token) {
+  cachedToken = token;
+  await SecureStore.setItemAsync(TOKEN_KEY, token);
+}
+
+export function isLoggedIn() {
+  return !!cachedToken;
+}
+
+// 退出登录（用户主动点"我的"页的退出按钮）和token失效（后端401）最终要
+// 做的事完全一样：清token+通知订阅者弹回登录页，所以共用同一套广播逻辑，
+// 不要在 ProfileScreen 里另起一条"退出登录该怎么通知App"的路径。
+const authExpiredListeners = new Set();
+export function onAuthExpired(fn) {
+  authExpiredListeners.add(fn);
+  return () => authExpiredListeners.delete(fn);
+}
+function clearLoginState() {
+  cachedToken = null;
+  authExpiredListeners.forEach((fn) => fn());
+}
+
+export async function logout() {
+  clearLoginState();
+  await SecureStore.deleteItemAsync(TOKEN_KEY);
+}
+
+export async function register(username, password) {
+  const res = await fetch(`${API_BASE}/app/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
   });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+  await setToken(data.token);
+  return data;
+}
+
+export async function login(username, password) {
+  const res = await fetch(`${API_BASE}/app/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+  await setToken(data.token);
+  return data;
+}
+
+// token失效（过期/被后端拒绝）时，appFetch 在这里清掉本地登录态并广播，
+// 订阅者（App.js）负责把用户弹回登录页。
+function notifyAuthExpired() {
+  clearLoginState();
+  SecureStore.deleteItemAsync(TOKEN_KEY).catch(() => {});
+}
+
+/** 带鉴权头的 fetch 封装，所有 /app/* 及共用接口调用统一走这个。
+ * x-extension-token 一直带（插件同款接口要用），登录后额外带
+ * Authorization（/app/* 接口靠这个识别真实用户）。*/
+export async function appFetch(path, options = {}) {
+  const headers = {
+    'x-extension-token': getExtToken(),
+    ...options.headers,
+  };
+  if (cachedToken) headers['Authorization'] = `Bearer ${cachedToken}`;
+
+  const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
+
+  if (res.status === 401 && path.startsWith('/app/')) {
+    notifyAuthExpired();
+  }
   if (!res.ok) {
     const detail = await res.text().catch(() => '');
     throw new Error(`HTTP ${res.status} ${detail}`.trim());
@@ -41,13 +122,16 @@ export async function getBookContext(bookId) {
 
 // 阅读器用 epubjs-react-native 内置的 expo-file-system 下载 EPUB 文件，
 // 走的是普通 URL 下载，不会附带自定义请求头——所以这里把 token 放进
-// query string，跟后端 _verify_token 的 query 兜底逻辑对应。
+// query string，跟后端 get_current_user 的 query 兜底逻辑对应。阶段十三
+// 这个接口鉴权从 ExtAuth 换成了 CurrentUser（JWT），这里也跟着从扩展令牌
+// 换成登录 token；同步读内存缓存（不是 await SecureStore）是因为这个函数
+// 直接内联用在 JSX 的 src 属性里，调用方等不起异步。
 //
 // 路径必须以 .epub 结尾：epubjs-react-native 靠 URL 字符串里有没有
 // ".epub" 子串判断源文件类型，没有的话会内部报错但不会显示出来，界面卡在
 // "正在下载书本"转圈——真机实测踩到的坑，不是猜的。
 export function getBookFileUrl(bookId) {
-  return `${API_BASE}/app/books/${bookId}/file.epub?token=${getExtToken()}`;
+  return `${API_BASE}/app/books/${bookId}/file.epub?token=${encodeURIComponent(cachedToken || '')}`;
 }
 
 export async function getHighlights(bookId) {
