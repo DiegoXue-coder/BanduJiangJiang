@@ -95,6 +95,13 @@ async def init_db():
             INSERT INTO users (id) VALUES (1)
             ON CONFLICT (id) DO NOTHING
         """)
+        # 上面这条显式指定id=1插入，不会推进 BIGSERIAL 用的自增序列——阶段十三
+        # 上线时真机实测踩到的坑：第一个真实注册用户走 DEFAULT 生成id，序列
+        # 还停在初始值1，跟种子用户的id=1主键冲突，注册直接500。这里手动把
+        # 序列同步到当前表里最大id，每次启动跑一次、幂等，不影响正常自增。
+        await conn.execute("""
+            SELECT setval('users_id_seq', (SELECT COALESCE(MAX(id), 1) FROM users))
+        """)
         # 阶段十三：最小可用多租户，用户名+密码登录（不接短信/邮箱验证码，
         # 不做忘记密码自动化——决策层拍板，测试阶段用不上这些成本）。
         # 种子用户1没有用户名/密码（老数据，不需要能登录），这两列允许为空。
