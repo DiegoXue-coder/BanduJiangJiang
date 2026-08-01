@@ -1301,6 +1301,11 @@ async def app_replace_book(book_id: int, file: UploadFile = File(...), user_id: 
     （引用 chapter_id）和问答记录（qa_history.book_id 存的是这个书的 id）都不受
     影响，不会被 CASCADE 删除，不用做数据迁移。数量对不上就拒绝，防止打乱现有
     chapter_id 的引用关系。
+
+    这个接口没有前端入口，是内容维护用的管理操作（见函数说明开头）。书本是
+    共享预置书库，不按"是不是这个用户导入的"做权限限制（见 app_get_library
+    注释）——阶段十三之后任何登录用户理论上都能调这个接口，测试阶段几个
+    受信任的人规模下先接受这个权衡，等真的要对外开放注册再补角色权限。
     """
     if not (file.filename or "").lower().endswith(".epub"):
         raise HTTPException(status_code=400, detail="只支持 .epub 文件")
@@ -1312,7 +1317,7 @@ async def app_replace_book(book_id: int, file: UploadFile = File(...), user_id: 
     pool = await get_pool()
     async with pool.acquire() as conn:
         book = await conn.fetchrow(
-            "SELECT file_path FROM books WHERE id = $1 AND user_id = $2", book_id, user_id
+            "SELECT file_path FROM books WHERE id = $1", book_id
         )
         if not book:
             raise HTTPException(status_code=404, detail="书本不存在")
@@ -1367,12 +1372,15 @@ async def app_delete_book(book_id: int, user_id: int = CurrentUser):
     CASCADE，删 books 这一行会自动带走其余三张表里的关联记录。但
     qa_history.book_id 是普通 TEXT 字段（阶段一为了兼容 Chrome 扩展那边的
     字符串型书籍ID，没有建外键约束），删 books 不会级联到它，这里手动补上。
+
+    书本是共享预置书库，不按"是不是这个用户导入的"做权限限制（见
+    app_get_library 注释），跟 app_replace_book 同样的权衡。
     """
     pool = await get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
             book = await conn.fetchrow(
-                "SELECT file_path FROM books WHERE id = $1 AND user_id = $2", book_id, user_id
+                "SELECT file_path FROM books WHERE id = $1", book_id
             )
             if not book:
                 raise HTTPException(status_code=404, detail="书本不存在")
@@ -1386,7 +1394,12 @@ async def app_delete_book(book_id: int, user_id: int = CurrentUser):
 
 @app.get("/app/books", response_model=list[BookOut])
 async def app_get_library(user_id: int = CurrentUser):
-    """书架：返回当前用户的所有书本，附带各自的阅读进度。"""
+    """书架：返回全部预置书库（每个登录用户看到的是同一套公版经典，不是
+    "各自拥有的书"——产品定位就是给所有用户提供一样的书库体验，只有划线/
+    进度/问答这些"读的过程"才是每个用户各自独立的），附带当前用户各自的
+    阅读进度。阶段十三加真实多用户之前，这里错误地把books按user_id过滤了，
+    导致新注册用户书架是空的——书本本身不该按用户隔离，只有"读到哪了"这种
+    个人数据该隔离。"""
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
@@ -1395,19 +1408,20 @@ async def app_get_library(user_id: int = CurrentUser):
             FROM books b
             LEFT JOIN reading_progress rp
                    ON rp.book_id = b.id AND rp.user_id = $1
-            WHERE b.user_id = $1
             ORDER BY b.added_at DESC
         """, user_id)
     return [BookOut(**dict(r)) for r in rows]
 
 @app.get("/app/books/{book_id}/context", response_model=BookContextOut)
 async def app_get_book_context(book_id: int, user_id: int = CurrentUser):
-    """翻开一本书：书本信息 + 章节目录 + 上次读到的位置。"""
+    """翻开一本书：书本信息 + 章节目录 + 上次读到的位置。书本本身是共享预置
+    书库，不按用户过滤（见 app_get_library 注释）；下面的阅读进度才按当前
+    用户过滤。"""
     pool = await get_pool()
     async with pool.acquire() as conn:
         book = await conn.fetchrow("""
-            SELECT id, title, author FROM books WHERE id = $1 AND user_id = $2
-        """, book_id, user_id)
+            SELECT id, title, author FROM books WHERE id = $1
+        """, book_id)
         if not book:
             raise HTTPException(status_code=404, detail="书本不存在")
 
@@ -1435,12 +1449,13 @@ async def app_get_book_file(book_id: int, user_id: int = CurrentUser):
     ".epub" 子串来判断源文件类型（见 getSourceType.js），不是这个后缀的话它会
     判断成"未知类型"，内部抛错但没有把错误抛到 UI 上，界面会卡在"正在下载书本"
     转圈转到天荒地老——踩过这个坑，所以特意记这条注释。
-    鉴权 token 走 query string（见 _verify_token 注释）。
+    鉴权 token 走 query string（见 get_current_user 注释）。书本是共享预置
+    书库，不按用户过滤（见 app_get_library 注释）。
     """
     pool = await get_pool()
     async with pool.acquire() as conn:
         book = await conn.fetchrow(
-            "SELECT file_path FROM books WHERE id = $1 AND user_id = $2", book_id, user_id
+            "SELECT file_path FROM books WHERE id = $1", book_id
         )
     if not book or not os.path.isfile(book["file_path"]):
         raise HTTPException(status_code=404, detail="书本文件不存在")
@@ -1461,11 +1476,14 @@ async def app_get_highlights(book_id: int, user_id: int = CurrentUser):
 
 @app.post("/app/books/{book_id}/highlights", response_model=HighlightOut)
 async def app_save_highlight(book_id: int, body: HighlightIn, user_id: int = CurrentUser):
-    """保存一条划线，顺手算好 embedding（不推迟到阶段四补算）。"""
+    """保存一条划线，顺手算好 embedding（不推迟到阶段四补算）。书本是共享
+    预置书库，这里只确认书存在，不检查"是不是这个用户的书"（见
+    app_get_library 注释）——划线本身用下面 INSERT 里的 user_id 归到当前
+    登录用户名下，这才是真正需要隔离的地方。"""
     pool = await get_pool()
     async with pool.acquire() as conn:
         book = await conn.fetchrow(
-            "SELECT id FROM books WHERE id = $1 AND user_id = $2", book_id, user_id
+            "SELECT id FROM books WHERE id = $1", book_id
         )
         if not book:
             raise HTTPException(status_code=404, detail="书本不存在")
