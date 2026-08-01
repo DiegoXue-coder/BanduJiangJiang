@@ -120,6 +120,21 @@ export async function getBookContext(bookId) {
   return appFetch(`/app/books/${bookId}/context`);
 }
 
+// JWT本身含两个"."（header.payload.signature标准格式）。epub.js嗅探文件
+// 类型是看"URL里最后一个.后面是什么"，如果直接把JWT明文拼进query string，
+// 最后一个"."会落在token内部而不是".epub"后面，库会误判成不认识的文件
+// 类型、退化成"当成解压过的目录处理"，去请求一个不存在的.../META-INF/
+// container.xml，界面卡死在"正在加载"——真机联调抓真实请求日志坐实的。
+// 转成十六进制字符串（只含0-9a-f，没有任何"."）能从根上绕开这个问题，
+// 不用去改第三方库。后端 get_current_user 对应会把这段十六进制解码回JWT。
+function toHexToken(token) {
+  let hex = '';
+  for (let i = 0; i < token.length; i++) {
+    hex += token.charCodeAt(i).toString(16).padStart(2, '0');
+  }
+  return hex;
+}
+
 // 阅读器用 epubjs-react-native 内置的 expo-file-system 下载 EPUB 文件，
 // 走的是普通 URL 下载，不会附带自定义请求头——所以这里把 token 放进
 // query string，跟后端 get_current_user 的 query 兜底逻辑对应。阶段十三
@@ -131,7 +146,7 @@ export async function getBookContext(bookId) {
 // ".epub" 子串判断源文件类型，没有的话会内部报错但不会显示出来，界面卡在
 // "正在下载书本"转圈——真机实测踩到的坑，不是猜的。
 export function getBookFileUrl(bookId) {
-  return `${API_BASE}/app/books/${bookId}/file.epub?token=${encodeURIComponent(cachedToken || '')}`;
+  return `${API_BASE}/app/books/${bookId}/file.epub?token=${toHexToken(cachedToken || '')}`;
 }
 
 export async function getHighlights(bookId) {

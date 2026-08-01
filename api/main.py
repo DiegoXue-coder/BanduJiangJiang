@@ -269,13 +269,27 @@ def get_current_user(request: Request) -> int:
     """从 Authorization: Bearer <jwt> 头拿当前登录用户的 user_id；EPUB 文件
     下载走的是 expo-file-system，不能带自定义请求头，兼容从 query string 读
     token（跟旧的 ExtAuth 是同一个兜底套路，仅供 /app/books/{id}/file 用）。
+
+    query string这条路走的是十六进制编码过的token，不是原始JWT——真机联调
+    踩到的坑：JWT本身含有两个"."（header.payload.signature标准格式），拼进
+    URL查询参数后，EPUB阅读器库（epub.js）用"URL里最后一个.后面是什么"来
+    嗅探文件类型，被token内部的"."抢先命中，误判成不认识的类型，直接走"当成
+    未解压目录处理"这条回退逻辑，去请求一个根本不存在的 .../META-INF/
+    container.xml，界面卡死在"正在加载"转圈——真机日志里实测抓到的request
+    序列坐实的，不是猜的。旧的HMAC扩展令牌是纯十六进制字符串，没有"."，
+    从来没触发过这个问题。改成十六进制编码后，query string里不会出现任何
+    "."，从根上绕开这类库的天真嗅探逻辑，不用去改第三方库代码。
     """
     if not JWT_SECRET:
         raise HTTPException(status_code=500, detail="服务器未配置 JWT_SECRET")
     auth_header = request.headers.get("authorization", "")
     token = auth_header[7:] if auth_header.lower().startswith("bearer ") else ""
     if not token:
-        token = request.query_params.get("token", "")
+        token_hex = request.query_params.get("token", "")
+        try:
+            token = bytes.fromhex(token_hex).decode("ascii") if token_hex else ""
+        except ValueError:
+            token = ""
     if not token:
         raise HTTPException(status_code=401, detail="未登录")
     payload = _decode_jwt(token)
