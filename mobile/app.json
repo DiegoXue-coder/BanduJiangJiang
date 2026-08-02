@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "伴读讲讲",
+    "name": "沉光共读",
     "slug": "bandujiangjiang",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -41,7 +41,16 @@
     "plugins": [
       "expo-font",
       "expo-asset",
-      "expo-secure-store"
+      "expo-secure-store",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash-icon.png",
+          "imageWidth": 220,
+          "resizeMode": "contain",
+          "backgroundColor": "#EAE3D3"
+        }
+      ]
     ]
   }
 }

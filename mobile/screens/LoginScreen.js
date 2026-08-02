@@ -45,7 +45,8 @@ export default function LoginScreen({ onLoggedIn }) {
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       >
         <View style={styles.centerBox}>
-          <Text style={[styles.title, { color: theme.text }]}>伴读讲讲</Text>
+          <Text style={[styles.title, { color: theme.text }]}>沉光共读</Text>
+          <Text style={[styles.enName, { color: theme.textMuted }]}>Dawn</Text>
           <Text style={[styles.subtitle, { color: theme.textSecondary }]}>
             {isRegister ? '创建账号' : '登录'}
           </Text>
@@ -108,7 +109,8 @@ const styles = StyleSheet.create({
   safe: { flex: 1 },
   flex: { flex: 1 },
   centerBox: { flex: 1, justifyContent: 'center', paddingHorizontal: 28 },
-  title: { fontSize: 26, fontWeight: '700', textAlign: 'center', marginBottom: 6 },
+  title: { fontSize: 26, fontWeight: '700', textAlign: 'center', marginBottom: 2 },
+  enName: { fontSize: 12, letterSpacing: 2, textAlign: 'center', marginBottom: 24 },
   subtitle: { fontSize: 14, textAlign: 'center', marginBottom: 28 },
   input: { borderWidth: 1, borderRadius: 4, paddingHorizontal: 14, paddingVertical: 12, fontSize: 15, marginBottom: 12 },
   errorText: { fontSize: 13, marginBottom: 8, textAlign: 'center' },
