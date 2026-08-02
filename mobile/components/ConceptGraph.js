@@ -18,14 +18,15 @@
 // 通过postMessage把"点中了什么"告诉React Native，原生这边再弹出跟
 // 之前完全一样的详情卡片（NodeDetailModal/EdgeDetailModal，未改动，
 // 卡片本身的完整来源数据只在原生这层查，不会进WebView）。
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   View, Text, StyleSheet, ActivityIndicator, TouchableOpacity,
-  Pressable, ScrollView,
+  Pressable, ScrollView, Alert,
 } from 'react-native';
 import { WebView } from 'react-native-webview';
 import { useFocusEffect } from '@react-navigation/native';
-import { getConceptGraph } from '../lib/api';
+import { IconRefresh } from '@tabler/icons-react-native';
+import { getConceptGraph, triggerConceptGraphBuild, getConceptGraphBuildStatus } from '../lib/api';
 import { useTheme } from '../theme';
 import { FONTS } from '../fonts';
 import KnownIssueNotice from './KnownIssueNotice';
@@ -515,6 +516,9 @@ export default function ConceptGraph() {
   const [error, setError] = useState('');
   const [selectedNode, setSelectedNode] = useState(null);
   const [selectedEdge, setSelectedEdge] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const mountedRef = useRef(true);
+  useEffect(() => () => { mountedRef.current = false; }, []);
 
   const load = useCallback(async () => {
     setError('');
@@ -527,6 +531,44 @@ export default function ConceptGraph() {
   }, []);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
+
+  // 阶段十四：知识图谱构建原来完全没有App内的触发入口，用户划线/问答之后
+  // 图谱不会自动更新——真实用了才发现这个摩擦点太明显，加个用户可见的
+  // 手动刷新按钮。触发之后是后台异步跑的批处理（不是一次请求内同步算完），
+  // 这里轮询构建状态直到跑完再重新拉一次图谱数据；最多等2分钟，正常情况
+  // 几秒到几十秒就该跑完，超时了说明有问题，不无限等下去。
+  const handleRefresh = useCallback(async () => {
+    if (refreshing) return;
+    setRefreshing(true);
+    try {
+      await triggerConceptGraphBuild();
+      const deadline = Date.now() + 120000;
+      while (Date.now() < deadline && mountedRef.current) {
+        await new Promise((r) => setTimeout(r, 2500));
+        const status = await getConceptGraphBuildStatus();
+        if (!status.running) break;
+      }
+      if (mountedRef.current) await load();
+    } catch (e) {
+      if (mountedRef.current) Alert.alert('刷新失败', e.message || '请稍后重试');
+    } finally {
+      if (mountedRef.current) setRefreshing(false);
+    }
+  }, [refreshing, load]);
+
+  const refreshButton = (
+    <TouchableOpacity
+      style={[styles.refreshBtn, { backgroundColor: 'rgba(255,255,255,0.12)' }]}
+      onPress={handleRefresh}
+      disabled={refreshing}
+    >
+      {refreshing ? (
+        <ActivityIndicator size="small" color="rgba(255,255,255,0.75)" />
+      ) : (
+        <IconRefresh size={20} color="rgba(255,255,255,0.75)" strokeWidth={1.75} />
+      )}
+    </TouchableOpacity>
+  );
 
   // fullById留着完整来源数据（node.sources），点击弹窗要用；WebView里那份
   // 只带投影/分级要用的精简字段，两份数据分开，完整来源文本不会被塞进
@@ -590,6 +632,7 @@ export default function ConceptGraph() {
           message={'暂时还没有生成知识图谱\n内容仍在整理中，请稍后再来看看'}
           style={styles.emptyText}
         />
+        {refreshButton}
       </View>
     );
   }
@@ -623,6 +666,8 @@ export default function ConceptGraph() {
           onClose={() => setSelectedEdge(null)}
         />
       )}
+
+      {refreshButton}
     </View>
   );
 }
@@ -633,6 +678,14 @@ const styles = StyleSheet.create({
   emptyText: { color: 'rgba(255,255,255,0.55)', fontSize: 14, textAlign: 'center', lineHeight: 22 },
   errorText: { fontSize: 14, textAlign: 'center' },
   retryBtn: { paddingHorizontal: 20, paddingVertical: 10 },
+
+  // 阶段十四：手动刷新知识图谱——用户明确要求放在不显眼的角落（右下角），
+  // 不要太中心/太显眼，这是个辅助操作不是主要交互。
+  refreshBtn: {
+    position: 'absolute', right: 16, bottom: 16,
+    width: 40, height: 40, borderRadius: 20,
+    alignItems: 'center', justifyContent: 'center',
+  },
 
   backdrop: { ...StyleSheet.absoluteFillObject },
   modalWrap: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 },

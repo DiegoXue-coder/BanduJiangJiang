@@ -270,11 +270,24 @@ export async function getReview() {
 }
 
 // ── 阶段十二：知识图谱 ──────────────────────────────────────────────
-// 图谱页面只读预算好的结果（概念提取/去重/关联检测是重AI调用的后台批处理，
-// 不在App里触发，由内容维护流程单独跑 POST /app/concept-graph/build）。
+// 图谱页面默认只读预算好的结果（概念提取/去重/关联检测是重AI调用的后台
+// 批处理）。阶段十四之前这个构建步骤完全没有App内的触发入口，用户划线/
+// 问答之后图谱不会自动更新，只能等工程师手动去后台调——真实使用中发现
+// 这个摩擦点太明显，加了个用户可见的手动刷新按钮（见ConceptGraph.js），
+// 触发的还是同一个 POST /app/concept-graph/build（内部遍历所有注册用户
+// 处理各自的增量数据，不是只处理当前这一个用户，但因为只处理"还没提炼过"
+// 的新增记录，对大多数用户是空操作，成本可控）。
 
 export async function getConceptGraph() {
   return appFetch('/app/concept-graph');
+}
+
+export async function triggerConceptGraphBuild() {
+  return appFetch('/app/concept-graph/build', { method: 'POST' });
+}
+
+export async function getConceptGraphBuildStatus() {
+  return appFetch('/app/concept-graph/build-status');
 }
 
 // ── 阶段十四：测试阶段Bug反馈 ────────────────────────────────────────
