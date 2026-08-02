@@ -2074,3 +2074,30 @@ async def app_submit_bug_report(
             VALUES ($1, $2, $3)
         """, user_id, image_path, description)
     return {"ok": True}
+
+@app.get("/app/bug-reports")
+async def app_list_bug_reports(_=ExtAuth):
+    """管理用查看入口，没有前端页面对应（阶段十四范围只要求"团队直接查
+    数据库/存储目录看"，没做App内的审阅界面）——真机联调时发现光查数据库
+    拿不到图片本身（图片存在Railway持久卷文件系统里，不在Postgres里），
+    照抄app_delete_book这类"无前端入口的管理操作"的鉴权方式（ExtAuth，
+    跟插件共用），补一个能看列表+图片的最小可用入口，不用每次都手动
+    ssh进容器翻文件。"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT br.id, br.user_id, u.username, br.description, br.created_at
+            FROM bug_reports br
+            JOIN users u ON u.id = br.user_id
+            ORDER BY br.created_at DESC
+        """)
+    return [dict(r) for r in rows]
+
+@app.get("/app/bug-reports/{report_id}/image")
+async def app_get_bug_report_image(report_id: int, _=ExtAuth):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT image_path FROM bug_reports WHERE id = $1", report_id)
+    if not row or not os.path.isfile(row["image_path"]):
+        raise HTTPException(status_code=404, detail="图片不存在")
+    return FileResponse(row["image_path"])
