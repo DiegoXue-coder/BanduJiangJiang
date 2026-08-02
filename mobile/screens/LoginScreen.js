@@ -48,7 +48,7 @@ export default function LoginScreen({ onLoggedIn }) {
           <Text style={[styles.title, { color: theme.text }]}>沉光共读</Text>
           <Text style={[styles.enName, { color: theme.textMuted }]}>Dawn</Text>
           <Text style={[styles.subtitle, { color: theme.textSecondary }]}>
-            {isRegister ? '创建账号' : '登录'}
+            {isRegister ? '请输入您的用户名和密码' : '登录'}
           </Text>
 
           <TextInput

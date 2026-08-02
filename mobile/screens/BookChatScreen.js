@@ -100,6 +100,10 @@ export default function BookChatScreen({
   const preparedRef    = useRef(null); // { text, sound } 提前加载好、还没播放的下一句
   const preparingRef   = useRef(false); // 正在预取的锁，防止并发重复预取
   const ttsPlayingRef  = useRef(false);
+  const ttsEpochRef    = useRef(0); // 每次stopAudio自增——让停止之前发起、
+    // 停止之后才resolve的createAsync能认出自己已经过期，不再把上一轮问题
+    // 遗留的音频塞进preparedRef/soundRef（真机反馈过"问了下一个问题，
+    // 上一个问题的语音还在继续读"，根因就是这个竞态）
   const abortStreamRef = useRef(null); // streamAsk() 返回的取消函数
 
   // 排查"TTS完全没声音"查到的坑：没有任何地方显式设置过 playsInSilentModeIOS，
@@ -159,6 +163,7 @@ export default function BookChatScreen({
   }
 
   async function stopAudio() {
+    ttsEpochRef.current += 1; // 必须最先做、同步完成——让所有还没resolve的createAsync过期
     ttsQueueRef.current = [];
     ttsPlayingRef.current = false;
     setIsSpeaking(false);
@@ -229,6 +234,7 @@ export default function BookChatScreen({
   // 队列却再也没人播放它。
   async function prefetchNext() {
     if (preparedRef.current || preparingRef.current || ttsQueueRef.current.length === 0) return;
+    const epoch = ttsEpochRef.current;
     const text = ttsQueueRef.current.shift();
     preparingRef.current = true; // 占住位置，必须在下面的 await 之前
     try {
@@ -236,6 +242,12 @@ export default function BookChatScreen({
         { uri: getTtsPlayUrl(text) },
         { shouldPlay: false },
       );
+      if (epoch !== ttsEpochRef.current) {
+        // 加载这段时间里问了新问题、stopAudio已经跑过——这句音频已经过期，
+        // 不能塞进preparedRef，否则会被新一轮播放误当成"下一句"播出来
+        sound.unloadAsync().catch(() => {});
+        return;
+      }
       preparedRef.current = { text, sound };
     } catch (e) {
       console.warn('[TTS 预取]', e.message); // 预取失败就跳过这一句，不影响后面排队的句子
@@ -264,6 +276,7 @@ export default function BookChatScreen({
     }
     ttsPlayingRef.current = true; // 锁必须在这里、在任何 await 之前
     setIsSpeaking(true);
+    const epoch = ttsEpochRef.current;
 
     let sound = pendingSound;
     if (!sound) {
@@ -278,6 +291,12 @@ export default function BookChatScreen({
         console.warn('[TTS]', e.message);
         ttsPlayingRef.current = false;
         playNextInQueue(); // 这一句加载失败就跳过，接着处理队列里下一句
+        return;
+      }
+      if (epoch !== ttsEpochRef.current) {
+        // 加载这段时间里问了新问题，stopAudio已经跑过并建立了新一轮播放状态——
+        // 这句是上一轮遗留的，直接丢弃，不能覆盖新一轮已经在用的soundRef
+        sound.unloadAsync().catch(() => {});
         return;
       }
     }

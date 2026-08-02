@@ -9,6 +9,7 @@ import { useFileSystem } from '@epubjs-react-native/expo-file-system';
 import { BottomSheetModal, BottomSheetBackdrop } from '@gorhom/bottom-sheet';
 import { IconList, IconMessageCircle, IconBrightness, IconTextSize } from '@tabler/icons-react-native';
 import { Asset } from 'expo-asset';
+import * as FileSystem from 'expo-file-system/legacy';
 import {
   getBookContext, getBookFileUrl, getHighlights, saveHighlight, updateProgress,
 } from '../lib/api';
@@ -47,7 +48,7 @@ const PROGRESS_DEBOUNCE_MS = 2000;
 
 function ReaderInner({
   bookId, bookTitle, author, initialLocation, initialAnnotations, navigation,
-  jumpToCfi, jumpNonce,
+  jumpToCfi, jumpNonce, epubSrc,
 }) {
   const { addAnnotation, changeTheme, changeFontSize, changeFontFamily, toc, goToLocation, goNext, goPrevious, injectJavascript } = useReader();
 
@@ -401,7 +402,7 @@ function ReaderInner({
 
       <View style={styles.readerBody}>
         <Reader
-          src={getBookFileUrl(bookId)}
+          src={epubSrc}
           fileSystem={useFileSystem}
           width="100%"
           height="100%"
@@ -504,17 +505,37 @@ export default function ReaderScreen({ route, navigation }) {
   const theme = useTheme();
   const [ctx, setCtx] = useState(null);
   const [highlights, setHighlights] = useState(null);
+  const [epubUri, setEpubUri] = useState(null);
   const [error, setError] = useState('');
+
+  // 安卓真机+模拟器排查过"打开卡死在Opening、RN层无报错"的问题——真根因是
+  // @epubjs-react-native/core内嵌进WebView执行的那段标注(annotation)相关JS
+  // 用了可选链?.语法，老安卓系统WebView解析不了，整段内联脚本直接解析失败，
+  // 无法输出任何报错（修复见patches/@epubjs-react-native+core+*.patch）。
+  // 这里改成预下载+读成Base64传给<Reader>，是在排查过程中顺带做的加固：
+  // 避免依赖库内部在WebView里对file://路径发起fetch()（Chromium的fetch()
+  // 不支持file:协议），让EPUB内容完全走内存解码，不经过WebView网络层。
+  const loadEpub = useCallback(async () => {
+    const dir = FileSystem.documentDirectory + 'epub_cache/';
+    const localUri = dir + `book_${bookId}.epub`;
+    const info = await FileSystem.getInfoAsync(localUri);
+    if (!info.exists) {
+      await FileSystem.makeDirectoryAsync(dir, { intermediates: true });
+      await FileSystem.downloadAsync(getBookFileUrl(bookId), localUri);
+    }
+    return FileSystem.readAsStringAsync(localUri, { encoding: FileSystem.EncodingType.Base64 });
+  }, [bookId]);
 
   const load = useCallback(async () => {
     try {
-      const [c, h] = await Promise.all([getBookContext(bookId), getHighlights(bookId)]);
+      const [c, h, uri] = await Promise.all([getBookContext(bookId), getHighlights(bookId), loadEpub()]);
       setCtx(c);
       setHighlights(h);
+      setEpubUri(uri);
     } catch (e) {
       setError(e.message || '加载失败');
     }
-  }, [bookId]);
+  }, [bookId, loadEpub]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -531,7 +552,7 @@ export default function ReaderScreen({ route, navigation }) {
     );
   }
 
-  if (!ctx || !highlights) {
+  if (!ctx || !highlights || !epubUri) {
     return (
       <SafeAreaView style={[styles.safe, { backgroundColor: theme.bg }]}>
         <View style={styles.centerBox}>
@@ -551,6 +572,7 @@ export default function ReaderScreen({ route, navigation }) {
       jumpNonce={jumpNonce}
       initialAnnotations={highlights}
       navigation={navigation}
+      epubSrc={epubUri}
     />
   );
 }

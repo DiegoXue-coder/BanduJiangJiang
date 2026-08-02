@@ -1,0 +1,101 @@
+diff --git a/node_modules/@epubjs-react-native/core/lib/commonjs/utils/webViewInjectFunctions.js b/node_modules/@epubjs-react-native/core/lib/commonjs/utils/webViewInjectFunctions.js
+index 9a6ad9b..00b6773 100644
+--- a/node_modules/@epubjs-react-native/core/lib/commonjs/utils/webViewInjectFunctions.js
++++ b/node_modules/@epubjs-react-native/core/lib/commonjs/utils/webViewInjectFunctions.js
+@@ -18,7 +18,7 @@ function injectJavaScript(ref, script) {
+     try {
+       ${script}
+     } catch (error) {
+-      alert(error?.message);
++      alert(error && error.message);
+     }
+ 
+     true;
+@@ -28,15 +28,15 @@ function mapAnnotationStylesToEpubStyles(type, styles) {
+   let epubStyles = {};
+   if (type === 'highlight') {
+     epubStyles = {
+-      'fill': styles?.color || 'yellow',
+-      'fill-opacity': styles?.opacity || 0.3
++      'fill': (styles && styles.color) || 'yellow',
++      'fill-opacity': (styles && styles.opacity) || 0.3
+     };
+   }
+   if (type === 'underline') {
+     epubStyles = {
+-      'stroke': styles?.color || 'yellow',
+-      'stroke-opacity': styles?.opacity || 0.3,
+-      'stroke-width': styles?.thickness || 1
++      'stroke': (styles && styles.color) || 'yellow',
++      'stroke-opacity': (styles && styles.opacity) || 0.3,
++      'stroke-width': (styles && styles.thickness) || 1
+     };
+   }
+   return epubStyles;
+@@ -47,12 +47,12 @@ function mapObjectToAnnotation(objectName = 'annotation') {
+     data: ${objectName}.data,
+     cfiRange: ${objectName}.cfiRange,
+     sectionIndex: ${objectName}.sectionIndex,
+-    cfiRangeText: ${objectName}?.cfiRangeText ? ${objectName}.cfiRangeText : ${objectName}.mark?.range?.toString(),
+-    iconClass: ${objectName}.data?.iconClass,
++    cfiRangeText: ${objectName}.cfiRangeText ? ${objectName}.cfiRangeText : ((${objectName}.mark && ${objectName}.mark.range) ? ${objectName}.mark.range.toString() : undefined),
++    iconClass: (${objectName}.data && ${objectName}.data.iconClass),
+     styles: ${objectName}.type !== 'mark' ? {
+-      color: ${objectName}.styles?.fill || ${objectName}.mark?.attributes?.fill || ${objectName}.mark?.attributes?.stroke || ${objectName}.styles?.color,
+-      opacity: Number(${objectName}.styles?.['fill-opacity'] || ${objectName}.mark?.attributes?.['fill-opacity'] || ${objectName}.mark?.attributes?.['stroke-opacity'] || ${objectName}.styles?.opacity),
+-      thickness: Number(${objectName}.styles?.['stroke-width'] || ${objectName}.mark?.attributes?.['stroke-width'] || ${objectName}.styles?.thickness),
++      color: (${objectName}.styles && ${objectName}.styles.fill) || (${objectName}.mark && ${objectName}.mark.attributes && ${objectName}.mark.attributes.fill) || (${objectName}.mark && ${objectName}.mark.attributes && ${objectName}.mark.attributes.stroke) || (${objectName}.styles && ${objectName}.styles.color),
++      opacity: Number((${objectName}.styles && ${objectName}.styles['fill-opacity']) || (${objectName}.mark && ${objectName}.mark.attributes && ${objectName}.mark.attributes['fill-opacity']) || (${objectName}.mark && ${objectName}.mark.attributes && ${objectName}.mark.attributes['stroke-opacity']) || (${objectName}.styles && ${objectName}.styles.opacity)),
++      thickness: Number((${objectName}.styles && ${objectName}.styles['stroke-width']) || (${objectName}.mark && ${objectName}.mark.attributes && ${objectName}.mark.attributes['stroke-width']) || (${objectName}.styles && ${objectName}.styles.thickness)),
+     } : undefined
+   }`;
+ }
+@@ -142,7 +142,7 @@ function addAnnotationByTagId(type, tagId, data, iconClass, styles, cfiRangeText
+       .then(() => {
+         ${onChangeAnnotations()}
+       })
+-      .catch(error => alert(JSON.stringify(error?.message)))
++      .catch(error => alert(JSON.stringify(error && error.message)))
+   `;
+ }
+ function updateAnnotation(annotation, data = {}, styles) {
+@@ -202,16 +202,16 @@ function updateAnnotationByTagId(tagId, data = {}, styles) {
+ 
+           if (annotation.type === 'highlight') {
+             epubStyles = {
+-              'fill': styles?.color || 'yellow',
+-              'fill-opacity': styles?.opacity || 0.3,
++              'fill': (styles && styles.color) || 'yellow',
++              'fill-opacity': (styles && styles.opacity) || 0.3,
+             };
+           }
+ 
+           if (annotation.type === 'underline') {
+             epubStyles = {
+-              'stroke': styles?.color || 'yellow',
+-              'stroke-opacity': styles?.opacity || 0.3,
+-              'stroke-width': styles?.thickness || 1,
++              'stroke': (styles && styles.color) || 'yellow',
++              'stroke-opacity': (styles && styles.opacity) || 0.3,
++              'stroke-width': (styles && styles.thickness) || 1,
+             };
+           }
+ 
+@@ -222,7 +222,7 @@ function updateAnnotationByTagId(tagId, data = {}, styles) {
+ 
+         ${onChangeAnnotations()}
+       })
+-      .catch(error => alert(JSON.stringify(error?.message)))
++      .catch(error => alert(JSON.stringify(error && error.message)))
+   `;
+ }
+ function removeAnnotationByTagId(tagId) {
+@@ -268,6 +268,6 @@ function removeAnnotationByTagId(tagId) {
+ 
+         ${onChangeAnnotations()}
+       })
+-      .catch(error => alert(error?.message))
++      .catch(error => alert(error && error.message))
+   `;
+ }
+\ No newline at end of file

@@ -31,7 +31,6 @@ t2s 配置）。转换放在切分之后，不改动已经调好的繁体文本�
 不影响判断"第"字的逻辑（简繁体"第"字写法相同）。
 """
 import re
-import sys
 from bs4 import BeautifulSoup
 import ebooklib
 from ebooklib import epub
@@ -88,7 +87,15 @@ def split_by_short_titled_paragraph(soup, max_title_len=12):
 def split_by_bracketed_title_paragraph(soup):
     """《墨子》专用：这本书章节标题干净地各占一个独立<p>标签，形如"《親士》"，
     不需要长度+"第"字那套启发式——直接匹配"整段文字就是《…》"的<p>就是标题。
-    这本书结构比道德经/论语规整得多，是这几本里少见的"运气好"案例。"""
+    这本书结构比道德经/论语规整得多，是这几本里少见的"运气好"案例。
+
+    真机反馈发现的坑：标题虽然干净独立成<p>，但正文却整章塞进同一个<p>里，
+    编号小节/脚注之间只靠<p>内部的换行分隔，原样搬过去（旧版本直接append
+    str(p)）会变成一大坨没有任何<p>边界的纯文本——浏览器/WebView按默认
+    white-space规则把这些内部换行折叠掉，渲染出来就是反馈里说的"糊成一团，
+    没有空格和换行"。修复：正文按内部换行重新切出真正的<p>标签，每行独立
+    成段（这本书内部换行本身就是真实的段落/编号/脚注边界，不是Mengzi那种
+    固定行宽硬折行，所以按行切是对的，不需要额外的段落标记识别）。"""
     body = soup.find("body") or soup
     all_ps = body.find_all("p", recursive=True)
     pattern = re.compile(r"^《.+》$")
@@ -107,24 +114,46 @@ def split_by_bracketed_title_paragraph(soup):
             current_title = text
             current_content = []
         elif current_title is not None:
-            current_content.append(str(p))
+            for line in p.get_text().split("\n"):
+                line = line.strip()
+                if line:
+                    current_content.append(f"<p>{line}</p>")
 
     if current_title is not None:
         sections.append((current_title, current_content))
     return sections
 
 
-def split_by_line_pattern(soup, title_regex):
+def split_by_line_pattern(soup, title_regex, para_marker_regex=None):
     """《孟子》专用：章节标题（如"卷之一梁惠王上"）跟后面几千字正文挤在
     同一个<p>标签里，不能按标签切，只能把所有<p>文字按行拼起来，逐行用
-    正则找标题行。"""
+    正则找标题行。
+
+    真机反馈发现的坑：这本书内部的换行是Gutenberg原始文本固定行宽硬折行的
+    排版产物，不是真正的段落边界——旧版本"一行=一段"直接把一句话腰斩成
+    好几个<p>（反馈原话"一句话还没讲完，就换行"）。
+
+    para_marker_regex（可选）：孟子每章内部确实有真正的段落分隔——"一""二"
+    "三"……这类独占一行的数字小节号（14章全部命中，人工核对过），传这个
+    正则识别这些标记行：标记行本身单独成段、触发另起一段，标记之间的所有
+    硬折行拼接（不加分隔符，中文不需要）成同一段，不再按原始硬换行切。
+    不传就保留旧的"一行一段"行为——只有在确认没有这种小节号结构时才应该
+    不传，不是默认更安全的选项。"""
     body = soup.find("body") or soup
     all_ps = body.find_all("p", recursive=True)
     pattern = re.compile(title_regex)
+    marker_pattern = re.compile(para_marker_regex) if para_marker_regex else None
 
     sections = []
     current_title = None
-    current_lines = []
+    current_paragraphs = []
+    buffer = ""
+
+    def flush_buffer():
+        nonlocal buffer
+        if buffer:
+            current_paragraphs.append(buffer)
+            buffer = ""
 
     for p in all_ps:
         for line in p.get_text().split("\n"):
@@ -132,15 +161,23 @@ def split_by_line_pattern(soup, title_regex):
             if not line:
                 continue
             if pattern.match(line):
+                flush_buffer()
                 if current_title is not None:
-                    sections.append((current_title, [f"<p>{l}</p>" for l in current_lines]))
+                    sections.append((current_title, [f"<p>{l}</p>" for l in current_paragraphs]))
                 current_title = line
-                current_lines = []
+                current_paragraphs = []
+            elif marker_pattern and marker_pattern.match(line):
+                flush_buffer()
+                buffer = line + "、" # 小节号后面原文本来就没有标点，读起来会跟正文粘在一起
             elif current_title is not None:
-                current_lines.append(line)
+                if marker_pattern:
+                    buffer += line
+                else:
+                    current_paragraphs.append(line)
 
+    flush_buffer()
     if current_title is not None:
-        sections.append((current_title, [f"<p>{l}</p>" for l in current_lines]))
+        sections.append((current_title, [f"<p>{l}</p>" for l in current_paragraphs]))
     return sections
 
 
@@ -190,8 +227,17 @@ def repackage(src_path, dst_path, book_title, author, split_fn=split_by_short_ti
 
 
 if __name__ == "__main__":
-    src, dst, title, author = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-    sections = repackage(src, dst, title, author)
-    print(f"\n--- 全部 {len(sections)} 个章节标题 ---")
-    for i, (t, _) in enumerate(sections):
-        print(f"  [{i}] {t}")
+    print("=== 道德经 ===")
+    repackage("daodejing.epub", "daodejing_clean.epub", "道德经", "老子")
+
+    print("\n=== 论语 ===")
+    repackage("lunyu.epub", "lunyu_clean.epub", "论语", "孔子")
+
+    print("\n=== 孟子 ===")
+    repackage(
+        "mengzi.epub", "mengzi_clean.epub", "孟子", "孟子",
+        split_fn=lambda soup: split_by_line_pattern(soup, r"^卷之.+$", r"^[一二三四五六七八九十百]+$"),
+    )
+
+    print("\n=== 墨子 ===")
+    repackage("mozi.epub", "mozi_clean.epub", "墨子", "墨子", split_fn=split_by_bracketed_title_paragraph)
