@@ -1,17 +1,19 @@
-import React, { useState } from 'react';
+import React from 'react';
 import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '../theme';
 import { logout } from '../lib/api';
-import BugReportModal from './BugReportModal';
 
 // "我的"页面 —— 范围声明里确认的第三个底部入口。阶段十三加了真实登录，
 // 这里补上退出登录；登出之后 App.js 会自动弹回登录页（logout()内部会
-// 广播登录态变化，不需要这里自己处理导航跳转）。阶段十四加了Bug反馈入口。
-export default function ProfileScreen() {
+// 广播登录态变化，不需要这里自己处理导航跳转）。阶段十四加了Bug反馈入口
+// ——"反馈问题"现在是"我的"tab自己的 stack 导航里"推入"的一个页面
+// （BugReportScreen，见 App.js 的 ProfileStackScreen），不是本地 state
+// 控制的 Modal：真机反馈过 Modal 版本安全区计算不准、也没法左滑退出，
+// 换成推入式页面之后这两个问题都随 native-stack 自带的行为一起解决了。
+export default function ProfileScreen({ navigation }) {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
-  const [bugReportVisible, setBugReportVisible] = useState(false);
   return (
     <SafeAreaView edges={['bottom', 'left', 'right']} style={[styles.safe, { backgroundColor: theme.bg }]}>
       <View style={[styles.header, { backgroundColor: theme.accent, paddingTop: insets.top + 14 }]}>
@@ -20,7 +22,7 @@ export default function ProfileScreen() {
       <View style={styles.centerBox}>
         <TouchableOpacity
           style={[styles.actionBtn, { borderColor: theme.cardBorder, borderRadius: theme.radius }]}
-          onPress={() => setBugReportVisible(true)}
+          onPress={() => navigation.navigate('BugReport')}
         >
           <Text style={[styles.actionBtnText, { color: theme.text }]}>反馈问题</Text>
         </TouchableOpacity>
@@ -31,7 +33,6 @@ export default function ProfileScreen() {
           <Text style={[styles.actionBtnText, { color: theme.danger }]}>退出登录</Text>
         </TouchableOpacity>
       </View>
-      <BugReportModal visible={bugReportVisible} onClose={() => setBugReportVisible(false)} />
     </SafeAreaView>
   );
 }

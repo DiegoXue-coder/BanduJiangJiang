@@ -17,6 +17,7 @@ import ReviewScreen from './screens/ReviewScreen';
 import ReviewBookScreen from './screens/ReviewBookScreen';
 import ReviewDetailScreen from './screens/ReviewDetailScreen';
 import ProfileScreen from './screens/ProfileScreen';
+import BugReportScreen from './screens/BugReportScreen';
 import LoginScreen from './screens/LoginScreen';
 import { useTheme } from './theme';
 import { FONT_ASSETS } from './fonts';
@@ -38,6 +39,7 @@ const TAB_ICON_COMPONENT = { 书架: IconBooks, 划线复盘: IconHighlight, 我
 const Tab = createBottomTabNavigator();
 const BookshelfStack = createNativeStackNavigator();
 const ReviewStack = createNativeStackNavigator();
+const ProfileStack = createNativeStackNavigator();
 
 // 书架tab自己的堆栈——点书本卡片会"推入"阅读器页面，阅读器时隐藏底部tab栏。
 // 阶段十：BookChat 不再是独立页面，改成 ReaderScreen 内部用 BottomSheetModal
@@ -63,9 +65,22 @@ function ReviewStackScreen() {
   );
 }
 
+// "我的"tab自己的堆栈——阶段十四"反馈问题"改成"推入"的页面而不是本地
+// state控制的Modal（真机反馈：Modal里SafeAreaView量安全区不准、标题跟
+// 状态栏时钟重叠，而且Modal没有原生的左滑返回手势），推入式页面这两个
+// 问题都随native-stack自带的行为一起解决，不用额外写代码。
+function ProfileStackScreen() {
+  return (
+    <ProfileStack.Navigator screenOptions={{ headerShown: false }}>
+      <ProfileStack.Screen name="ProfileHome" component={ProfileScreen} />
+      <ProfileStack.Screen name="BugReport" component={BugReportScreen} />
+    </ProfileStack.Navigator>
+  );
+}
+
 function getTabBarStyle(route, visibleStyle) {
   const focusedRoute = getFocusedRouteNameFromRoute(route) ?? 'BookshelfHome';
-  if (['Reader', 'ReviewBook', 'ReviewDetail'].includes(focusedRoute)) return { display: 'none' };
+  if (['Reader', 'ReviewBook', 'ReviewDetail', 'BugReport'].includes(focusedRoute)) return { display: 'none' };
   return visibleStyle;
 }
 
@@ -147,7 +162,14 @@ export default function App() {
                     popToTopOnBlur: true,
                   })}
                 />
-                <Tab.Screen name="我的" component={ProfileScreen} />
+                <Tab.Screen
+                  name="我的"
+                  component={ProfileStackScreen}
+                  options={({ route }) => ({
+                    tabBarStyle: getTabBarStyle(route, tabBarStyle),
+                    popToTopOnBlur: true,
+                  })}
+                />
               </Tab.Navigator>
             </NavigationContainer>
           </ReaderProvider>
