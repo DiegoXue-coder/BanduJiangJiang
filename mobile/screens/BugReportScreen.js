@@ -55,7 +55,7 @@ export default function BugReportScreen({ navigation }) {
     setSubmitting(true);
     try {
       await submitBugReport(description.trim(), imageUri);
-      Alert.alert('提交成功', '感谢反馈，我们会尽快处理');
+      Alert.alert('已收到，谢谢你！', '你的建议对我们很珍贵，我们会认真看、尽快处理');
       navigation.goBack();
     } catch (e) {
       Alert.alert('提交失败', e.message || '请稍后重试');
@@ -76,6 +76,10 @@ export default function BugReportScreen({ navigation }) {
         </View>
 
         <View style={styles.body}>
+          <Text style={[styles.introText, { color: theme.textSecondary }]}>
+            感谢你愿意花时间体验、帮我们发现问题——作为最早一批用户，你的每一条建议我们都会认真看，能改的会尽快改。
+          </Text>
+
           <TouchableOpacity
             style={[
               styles.imagePicker,
@@ -86,7 +90,7 @@ export default function BugReportScreen({ navigation }) {
             {imageUri ? (
               <Image source={{ uri: imageUri }} style={[styles.imagePreview, { borderRadius: theme.radius }]} />
             ) : (
-              <Text style={[styles.imagePickerText, { color: theme.textSecondary }]}>点击从相册选一张截图</Text>
+              <Text style={[styles.imagePickerText, { color: theme.textSecondary }]}>点击从相册选一张截图，让我们更快看懂问题</Text>
             )}
           </TouchableOpacity>
 
@@ -95,7 +99,7 @@ export default function BugReportScreen({ navigation }) {
               styles.descInput,
               { backgroundColor: theme.cardBg, borderColor: theme.cardBorder, color: theme.text, borderRadius: theme.radius },
             ]}
-            placeholder="简单描述一下遇到的问题…"
+            placeholder="说说你遇到了什么、或者有什么想法，怎么说都可以…"
             placeholderTextColor={theme.textMuted}
             value={description}
             onChangeText={setDescription}
@@ -131,6 +135,7 @@ const styles = StyleSheet.create({
   headerBtnText: { fontSize: 15 },
   headerTitle: { fontSize: 17, fontWeight: '700' },
   body: { flex: 1, padding: 16, gap: 14 },
+  introText: { fontSize: 13, lineHeight: 20 },
   imagePicker: {
     height: 200, borderWidth: 1, borderStyle: 'dashed',
     alignItems: 'center', justifyContent: 'center', overflow: 'hidden',
