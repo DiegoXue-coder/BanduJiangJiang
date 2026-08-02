@@ -21,6 +21,16 @@ import { FONTS } from '../fonts';
 // 不用等全部回答生成完才开口。
 const SENTENCE_END = /([。！？；\n])/;
 
+// 用户反馈朗读会"念一段停一段"，跟"预取下一句"这套本来是为了消除停顿设计
+// 的机制冲突——查下来是苏格拉底式问答常见的短句回复（"对。""是的呢。"）
+// 一句一次单独发TTS请求，每次请求的网络往返耗时经常比这句话本身的播放
+// 时长还长：预取只有"当前这句在播"这么点时间窗口去把下一句准备好，短句子
+// 播放时间短，窗口比请求耗时还短，等不及就会出现真实的静音空档，听感上
+// 就是一顿一顿。攒到一定字数再送一次TTS请求（合并连续的短句），不是让
+// 预取更快，是从根上减少请求次数、拉长每个音频片段的播放时长，给下一段
+// 的网络请求留出更宽裕的重叠窗口。
+const MIN_TTS_CHUNK_LEN = 20;
+
 function Bubble({ role, text, theme }) {
   const isUser = role === 'user';
   return (
@@ -313,13 +323,26 @@ export default function BookChatScreen({
     let sentenceBuffer = '';
 
     // 把 buffer 里已经凑成整句的部分切出来送去TTS；isFinal时把剩下不满一句
-    // 的尾巴也当作最后一句处理（流式结束时可能没有标点收尾）
+    // 的尾巴也当作最后一句处理（流式结束时可能没有标点收尾）。
+    //
+    // 连续的完整短句先攒在 pending 里，攒够 MIN_TTS_CHUNK_LEN 才真正入队送去
+    // TTS，不是每凑齐一句标点就立刻单独发一次请求——原因见上面 MIN_TTS_CHUNK_LEN
+    // 的注释。攒不够长度的完整句子会被放回 sentenceBuffer 开头，跟下一次
+    // onDelta 流进来的新文字接着攒，不会丢、也不会提前送出去。
     function flushSentences(isFinal) {
+      let pending = '';
       for (;;) {
         const idx = sentenceBuffer.search(SENTENCE_END);
         if (idx === -1) break;
-        enqueueTts(sentenceBuffer.slice(0, idx + 1));
+        pending += sentenceBuffer.slice(0, idx + 1);
         sentenceBuffer = sentenceBuffer.slice(idx + 1);
+        if (pending.length >= MIN_TTS_CHUNK_LEN) {
+          enqueueTts(pending);
+          pending = '';
+        }
+      }
+      if (pending) {
+        sentenceBuffer = pending + sentenceBuffer;
       }
       if (isFinal && sentenceBuffer.trim()) {
         enqueueTts(sentenceBuffer);
