@@ -125,6 +125,7 @@ function ReaderInner({
   const [selection, setSelection] = useState(null); // { text, cfiRange }
   const progressTimer = useRef(null);
   const annotationsRestored = useRef(false);
+  const skippedInitialNav = useRef(false);
 
   // initialAnnotations 要等 Reader 的 onReady 触发（book 真正渲染完成）才能加，
   // 提前调用 addAnnotation 会静默失效，所以不能放进 mount 时的 effect 里。
@@ -178,6 +179,26 @@ function ReaderInner({
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isReady, jumpToCfi, jumpNonce]);
+
+  // 阶段十四：真机反馈"第一次打开一本从没读过的书，会先经过epub.js自己
+  // 生成的目录导航页"（无样式的原始HTML链接列表，截图确认在《孟子》
+  // 《道德经》两本不同书上都出现，是所有书首次打开时的通用行为，不是单本
+  // 书EPUB文件的问题）。之前的常驻目录按钮只提供了绕开它的入口，没解决
+  // "第一次打开就落在这个页面上"本身。这里检测到"没有保存过阅读进度、
+  // 也不是从复盘页跳转过来的"（initialLocation和jumpToCfi都没有）这种
+  // 真正的首次打开场景，主动跳到目录第一个真实章节——直接复用
+  // goToTocItem（跟用户手动点目录条目走的是同一段逻辑，不是另起一套）。
+  // 跟上面"跳转到原文位置"那个effect一样加小延迟错开epub.js自己内部的
+  // 初始display()，用ref保证只跳一次，不会在后续toc数组引用变化时重复跳。
+  useEffect(() => {
+    if (!isReady || initialLocation || jumpToCfi) return;
+    if (skippedInitialNav.current) return;
+    if (!toc || toc.length === 0) return;
+    skippedInitialNav.current = true;
+    const t = setTimeout(() => goToTocItem(toc[0].href), 400);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isReady, toc]);
 
   function handleLocationChange(_total, currentLocation, _progress, currentSection) {
     const cfi = currentLocation?.start?.cfi;
