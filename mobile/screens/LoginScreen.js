@@ -94,6 +94,10 @@ export default function LoginScreen({ onLoggedIn }) {
               {isRegister ? '已有账号？去登录' : '没有账号？去注册'}
             </Text>
           </TouchableOpacity>
+
+          <Text style={[styles.nameCallout, { color: theme.textMuted }]}>
+            产品名字正在征集中，欢迎提建议
+          </Text>
         </View>
       </KeyboardAvoidingView>
     </SafeAreaView>
@@ -113,4 +117,5 @@ const styles = StyleSheet.create({
   submitBtnText: { fontSize: 15, fontWeight: '700' },
   switchModeBtn: { marginTop: 18, alignItems: 'center' },
   switchModeText: { fontSize: 13 },
+  nameCallout: { fontSize: 12, textAlign: 'center', marginTop: 32 },
 });

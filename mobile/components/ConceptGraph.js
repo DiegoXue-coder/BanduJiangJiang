@@ -28,6 +28,7 @@ import { useFocusEffect } from '@react-navigation/native';
 import { getConceptGraph } from '../lib/api';
 import { useTheme } from '../theme';
 import { FONTS } from '../fonts';
+import KnownIssueNotice from './KnownIssueNotice';
 
 // 深色星空感背景是图谱区域自己固定的视觉风格，不跟随App的亮色/暗色主题
 // 切换——星空氛围本身就该是暗的，跟着切成亮色反而破坏设计意图。
@@ -580,9 +581,15 @@ export default function ConceptGraph() {
   if (data.nodes.length === 0) {
     return (
       <View style={[styles.centerBox, { backgroundColor: SPACE_BG }]}>
-        <Text style={styles.emptyText}>
-          暂时还没有提炼出概念{'\n'}多划线、多提问，AI 会帮你梳理出思想脉络
-        </Text>
+        {/* 之前这里写"多划线、多提问，AI会帮你梳理"，暗示多用几次就会自动
+            生成——但概念提炼这一步是后台批处理，需要人工触发才会跑，用户
+            怎么用App都不会自动出现，原文案是误导性的。改成诚实但不暴露
+            "需要人工触发"这种内部实现细节的说法（决策层拍板：阶段十四"已知
+            问题场景化提示文案"通用模式的第一个应用）。 */}
+        <KnownIssueNotice
+          message={'暂时还没有生成知识图谱\n内容仍在整理中，请稍后再来看看'}
+          style={styles.emptyText}
+        />
       </View>
     );
   }

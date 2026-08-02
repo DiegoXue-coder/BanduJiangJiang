@@ -276,3 +276,21 @@ export async function getReview() {
 export async function getConceptGraph() {
   return appFetch('/app/concept-graph');
 }
+
+// ── 阶段十四：测试阶段Bug反馈 ────────────────────────────────────────
+// 相册选图+文字描述，不做程序自动截屏（避免额外的权限/技术复杂度，决策层
+// 拍板范围）。appFetch 不手动设 Content-Type——RN 的 fetch 遇到 FormData
+// 类型的 body 会自动生成正确的 multipart boundary，手动设反而会出错。
+export async function submitBugReport(description, imageUri) {
+  const formData = new FormData();
+  formData.append('description', description);
+  formData.append('image', {
+    uri: imageUri,
+    name: 'bug_report.jpg',
+    type: 'image/jpeg',
+  });
+  return appFetch('/app/bug-reports', {
+    method: 'POST',
+    body: formData,
+  });
+}

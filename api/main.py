@@ -18,7 +18,7 @@ import asyncpg
 import bcrypt
 import jwt
 
-from fastapi import FastAPI, HTTPException, Request, Depends, File, UploadFile, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Request, Depends, File, UploadFile, BackgroundTasks, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, FileResponse, StreamingResponse
 from pydantic import BaseModel
@@ -190,6 +190,17 @@ async def init_db():
                 explanation_b  TEXT NOT NULL DEFAULT '',
                 created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 UNIQUE (concept_a_id, concept_b_id)
+            )
+        """)
+        # 阶段十四：测试阶段Bug反馈——用户从相册选一张图+写文字描述，团队直接
+        # 去后台/数据库看，不做自动分类等复杂处理（决策层拍板范围）。
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS bug_reports (
+                id          BIGSERIAL PRIMARY KEY,
+                user_id     BIGINT NOT NULL REFERENCES users(id),
+                image_path  TEXT NOT NULL DEFAULT '',
+                description TEXT NOT NULL DEFAULT '',
+                created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
         """)
     print("[DB] 初始化完成，pgvector 已启用")
@@ -2029,3 +2040,37 @@ async def app_get_concept_graph(user_id: int = CurrentUser):
     } for r in relation_rows]
 
     return {"nodes": nodes, "edges": edges}
+
+# ── 阶段十四：测试阶段Bug反馈（决策层拍板范围：只做提交入口，不做自动分类，
+# 团队直接查数据库/存储目录看）─────────────────────────────────────────
+_DEFAULT_BUG_REPORT_DIR = "/data/bug_reports" if os.path.isdir("/data") else "bug_reports"
+BUG_REPORT_STORAGE_DIR = os.environ.get("BUG_REPORT_STORAGE_DIR", _DEFAULT_BUG_REPORT_DIR)
+os.makedirs(BUG_REPORT_STORAGE_DIR, exist_ok=True)
+MAX_BUG_IMAGE_BYTES = 10 * 1024 * 1024  # 10MB，手机相册照片正常用不到这么大
+
+@app.post("/app/bug-reports")
+async def app_submit_bug_report(
+    description: str = Form(...),
+    image: UploadFile = File(...),
+    user_id: int = CurrentUser,
+):
+    """测试阶段Bug反馈：用户从相册选一张图+写文字描述提交，团队直接查数据库/
+    存储目录看，不做自动分类等复杂处理（阶段十四，决策层拍板范围）。"""
+    raw = await image.read()
+    if len(raw) > MAX_BUG_IMAGE_BYTES:
+        raise HTTPException(status_code=413, detail="图片过大，请控制在 10MB 以内")
+
+    ext = os.path.splitext(image.filename or "")[1].lower() or ".jpg"
+    if ext not in (".jpg", ".jpeg", ".png", ".heic", ".webp"):
+        ext = ".jpg"
+    image_path = os.path.join(BUG_REPORT_STORAGE_DIR, f"{uuid.uuid4().hex}{ext}")
+    with open(image_path, "wb") as f:
+        f.write(raw)
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO bug_reports (user_id, image_path, description)
+            VALUES ($1, $2, $3)
+        """, user_id, image_path, description)
+    return {"ok": True}
