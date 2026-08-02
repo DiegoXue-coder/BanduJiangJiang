@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View, Text, TouchableOpacity, StyleSheet, ActivityIndicator, Alert,
-  Modal, FlatList, PanResponder,
+  Modal, FlatList, PanResponder, Pressable,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Reader, useReader } from '@epubjs-react-native/core';
@@ -49,7 +49,7 @@ function ReaderInner({
   bookId, bookTitle, author, initialLocation, initialAnnotations, navigation,
   jumpToCfi, jumpNonce,
 }) {
-  const { addAnnotation, changeTheme, changeFontSize, changeFontFamily, toc, goToLocation, injectJavascript } = useReader();
+  const { addAnnotation, changeTheme, changeFontSize, changeFontFamily, toc, goToLocation, goNext, goPrevious, injectJavascript } = useReader();
 
   // 目录跳转不能直接把 toc 里的 href（形如"chap_005.xhtml"）丢给 goToLocation——
   // 那个函数最终是调 epub.js 的 rendition.display(target)，虽然理论上支持
@@ -370,40 +370,56 @@ function ReaderInner({
         </SafeAreaView>
       </Modal>
 
-      <Reader
-        src={getBookFileUrl(bookId)}
-        fileSystem={useFileSystem}
-        width="100%"
-        height="100%"
-        defaultTheme={THEMES.light}
-        initialLocation={initialLocation || undefined}
-        onReady={handleReady}
-        onDisplayError={(reason) => Alert.alert('加载失败', String(reason))}
-        onLocationChange={handleLocationChange}
-        onSelected={(text, cfiRange) => setSelection({ text, cfiRange })}
-        menuItems={[
-          {
-            label: '划线',
-            action: (cfiRange, text) => {
-              handleHighlight(cfiRange, text);
-              return false;
+      <View style={styles.readerBody}>
+        <Reader
+          src={getBookFileUrl(bookId)}
+          fileSystem={useFileSystem}
+          width="100%"
+          height="100%"
+          defaultTheme={THEMES.light}
+          initialLocation={initialLocation || undefined}
+          onReady={handleReady}
+          onDisplayError={(reason) => Alert.alert('加载失败', String(reason))}
+          onLocationChange={handleLocationChange}
+          onSelected={(text, cfiRange) => setSelection({ text, cfiRange })}
+          menuItems={[
+            {
+              label: '划线',
+              action: (cfiRange, text) => {
+                handleHighlight(cfiRange, text);
+                return false;
+              },
             },
-          },
-          {
-            label: '问AI',
-            action: (cfiRange, text) => {
-              openChat(text, cfiRange);
-              return false;
+            {
+              label: '问AI',
+              action: (cfiRange, text) => {
+                openChat(text, cfiRange);
+                return false;
+              },
             },
-          },
-        ]}
-        renderLoadingFileComponent={() => (
-          <View style={styles.centerBox}>
-            <ActivityIndicator size="large" color={uiTheme.accent} />
-            <Text style={[styles.loadingText, { color: uiTheme.textSecondary }]}>正在下载书本…</Text>
-          </View>
-        )}
-      />
+          ]}
+          renderLoadingFileComponent={() => (
+            <View style={styles.centerBox}>
+              <ActivityIndicator size="large" color={uiTheme.accent} />
+              <Text style={[styles.loadingText, { color: uiTheme.textSecondary }]}>正在下载书本…</Text>
+            </View>
+          )}
+        />
+
+        {/* 阶段十四：用户反馈只能滑动翻页，希望能点页面边缘翻页——大多数
+            阅读器App的通用模式（Kindle/Apple Books同款）：左右各留一条
+            点击区域调goPrevious/goNext，中间留给原有的单击/长按选字/划线
+            行为不受影响。宽度取22%左右，太窄不好点，太宽会跟"贴着边缘选字"
+            这种小概率操作抢触摸，是个折中，不是精确科学。 */}
+        <Pressable
+          style={[styles.pageTapZone, styles.pageTapZoneLeft]}
+          onPress={() => goPrevious()}
+        />
+        <Pressable
+          style={[styles.pageTapZone, styles.pageTapZoneRight]}
+          onPress={() => goNext()}
+        />
+      </View>
 
       {!!selection && (
         <View style={[styles.selectionBar, { backgroundColor: uiTheme.text, borderRadius: uiTheme.radius }]}>
@@ -532,6 +548,11 @@ const styles = StyleSheet.create({
   },
   headerBtn: { padding: 5, minWidth: 32, alignItems: 'center', justifyContent: 'center' },
   headerBtnText: { fontSize: 15, fontWeight: '600' },
+
+  readerBody: { flex: 1, position: 'relative' },
+  pageTapZone: { position: 'absolute', top: 0, bottom: 0, width: '22%' },
+  pageTapZoneLeft: { left: 0 },
+  pageTapZoneRight: { right: 0 },
 
   controlPanel: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
