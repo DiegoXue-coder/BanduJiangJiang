@@ -164,6 +164,36 @@ function ReaderInner({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isReady]);
 
+  // 阶段十四：epub.js自带的目录导航页（章节列表那一页，见上面"首次打开
+  // 跳过"那个effect的注释）虽然已经不再是首次打开的默认落脚点了，但书本
+  // 身把它当成spine里的一节，用户手动往前翻页还是能翻回去看到——之前是
+  // 纯浏览器默认样式（白底+蓝色下划线链接），跟App其余阅读体验完全不搭。
+  // rendition.themes（changeTheme）按道理该统一套到所有小节，但这个导航
+  // 页表现明显没吃到；没深究epub.js内部为什么这一节例外，直接用已经在用
+  // 的injectJavascript机制（跟上面注入字体的方式一样）另外补一层通用
+  // 样式、且加!important——不管根因是不是没吃到主题，这层都能兜底盖过去。
+  // 依赖里带上themeName：用户切换阅读主题（默认/护眼/夜间）时这里也要
+  // 跟着重新注入一份新颜色，不然切主题之后颜色会跟正文不一致。
+  useEffect(() => {
+    if (!isReady) return;
+    const { background, color } = THEMES[themeName].body;
+    injectJavascript(`
+      (function() {
+        try {
+          var style = document.createElement('style');
+          style.innerHTML =
+            'body{background:${background} !important;color:${color} !important;}' +
+            'a{color:${uiTheme.accent} !important;text-decoration:none !important;}' +
+            'ol,ul{padding-left:1.4em;}' +
+            'li{margin-bottom:.6em;line-height:1.6;}' +
+            'nav h1,h1{font-size:1.3em;margin-bottom:.8em;}';
+          document.head.appendChild(style);
+        } catch (e) {}
+      })();
+      true;
+    `);
+  }, [isReady, themeName]);
+
   // "跳转到原文位置"从划线复盘详情页过来——如果这本书已经打开过（Reader 还
   // 挂载在书架堆栈里），只传 initialLocation 不会生效，那个属性很多阅读器
   // 组件只在"第一次挂载"时读一次。用 goToLocation 主动跳转才能保证不管书
