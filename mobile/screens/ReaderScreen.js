@@ -55,18 +55,23 @@ function ReaderInner({
   // 阶段十四第一版点击翻页用的是普通 Pressable 盖在 WebView 上面，真机反馈
   // 划线选字失效了——根因是 RN 核心的触摸响应者系统一旦被 Pressable 那层
   // 抢到，同一次触摸后续不管变成长按还是拖拽，都不会再传到底下的 WebView，
-  // 选字靠的正是长按+拖拽这套手势，被从根上截断了。改用
-  // react-native-gesture-handler 的 Gesture.Tap()（maxDuration
-  // 卡住只认"短促点一下"，跟这个阅读器库自己内部识别单击/双击用的是
-  // 同一套机制、同样的时长阈值）——库自己内部的长按选字手势本来就是靠
-  // 这套手势系统识别、且明确验证过能跟WebView内容选取共存（划线功能
-  // 一直正常），比自己另起一层原生触摸响应者更可靠。
+  // 选字靠的正是长按+拖拽这套手势，被从根上截断了。第二版换成
+  // react-native-gesture-handler 的 Gesture.Tap()，缓解了大部分区域，但
+  // 真机反馈边缘这两条窄条本身还是选不了字——因为哪怕Tap手势本身认不出
+  // "这是一次长按"而判定失败，默认情况下这个手势层依然独占了触摸事件，
+  // 底下WebView压根没收到、没机会自己启动长按选字。
+  // 加 cancelsTouchesInView(false)（iOS原生手势系统的能力，RNGH直接暴露
+  // 出来）：让触摸从一开始就"两边都收到"，不是"我识别失败了才让你收"——
+  // 短促点击时我们的Tap手势识别成功、翻页；手指按住不放/拖拽时我们的
+  // Tap手势不触发，同时WebView从始至终都收到了同一路触摸，它自己的长按
+  // 选字能正常启动。用户建议的"点了识别成翻页、长按识别成选字"就是这个
+  // 效果，两边不再互相抢，是并行识别、各自只对自己认得出的模式生效。
   const prevPageTap = useMemo(
-    () => Gesture.Tap().runOnJS(true).maxDuration(200).onStart(() => goPrevious()),
+    () => Gesture.Tap().runOnJS(true).maxDuration(200).cancelsTouchesInView(false).onStart(() => goPrevious()),
     [goPrevious]
   );
   const nextPageTap = useMemo(
-    () => Gesture.Tap().runOnJS(true).maxDuration(200).onStart(() => goNext()),
+    () => Gesture.Tap().runOnJS(true).maxDuration(200).cancelsTouchesInView(false).onStart(() => goNext()),
     [goNext]
   );
 
