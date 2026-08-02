@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View, Text, TouchableOpacity, StyleSheet, ActivityIndicator, Alert,
-  Modal, FlatList, PanResponder, Pressable,
+  Modal, FlatList, PanResponder,
 } from 'react-native';
+import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Reader, useReader } from '@epubjs-react-native/core';
 import { useFileSystem } from '@epubjs-react-native/expo-file-system';
@@ -50,6 +51,24 @@ function ReaderInner({
   jumpToCfi, jumpNonce,
 }) {
   const { addAnnotation, changeTheme, changeFontSize, changeFontFamily, toc, goToLocation, goNext, goPrevious, injectJavascript } = useReader();
+
+  // 阶段十四第一版点击翻页用的是普通 Pressable 盖在 WebView 上面，真机反馈
+  // 划线选字失效了——根因是 RN 核心的触摸响应者系统一旦被 Pressable 那层
+  // 抢到，同一次触摸后续不管变成长按还是拖拽，都不会再传到底下的 WebView，
+  // 选字靠的正是长按+拖拽这套手势，被从根上截断了。改用
+  // react-native-gesture-handler 的 Gesture.Tap()（maxDuration
+  // 卡住只认"短促点一下"，跟这个阅读器库自己内部识别单击/双击用的是
+  // 同一套机制、同样的时长阈值）——库自己内部的长按选字手势本来就是靠
+  // 这套手势系统识别、且明确验证过能跟WebView内容选取共存（划线功能
+  // 一直正常），比自己另起一层原生触摸响应者更可靠。
+  const prevPageTap = useMemo(
+    () => Gesture.Tap().runOnJS(true).maxDuration(200).onStart(() => goPrevious()),
+    [goPrevious]
+  );
+  const nextPageTap = useMemo(
+    () => Gesture.Tap().runOnJS(true).maxDuration(200).onStart(() => goNext()),
+    [goNext]
+  );
 
   // 目录跳转不能直接把 toc 里的 href（形如"chap_005.xhtml"）丢给 goToLocation——
   // 那个函数最终是调 epub.js 的 rendition.display(target)，虽然理论上支持
@@ -410,15 +429,14 @@ function ReaderInner({
             阅读器App的通用模式（Kindle/Apple Books同款）：左右各留一条
             点击区域调goPrevious/goNext，中间留给原有的单击/长按选字/划线
             行为不受影响。宽度取22%左右，太窄不好点，太宽会跟"贴着边缘选字"
-            这种小概率操作抢触摸，是个折中，不是精确科学。 */}
-        <Pressable
-          style={[styles.pageTapZone, styles.pageTapZoneLeft]}
-          onPress={() => goPrevious()}
-        />
-        <Pressable
-          style={[styles.pageTapZone, styles.pageTapZoneRight]}
-          onPress={() => goNext()}
-        />
+            这种小概率操作抢触摸，是个折中，不是精确科学。用
+            GestureDetector+Gesture.Tap()而不是Pressable，见上面注释。 */}
+        <GestureDetector gesture={prevPageTap}>
+          <View style={[styles.pageTapZone, styles.pageTapZoneLeft]} />
+        </GestureDetector>
+        <GestureDetector gesture={nextPageTap}>
+          <View style={[styles.pageTapZone, styles.pageTapZoneRight]} />
+        </GestureDetector>
       </View>
 
       {!!selection && (
