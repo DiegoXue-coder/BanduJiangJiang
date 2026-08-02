@@ -3,7 +3,6 @@ import {
   View, Text, TouchableOpacity, StyleSheet, ActivityIndicator, Alert,
   Modal, FlatList, PanResponder,
 } from 'react-native';
-import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Reader, useReader } from '@epubjs-react-native/core';
 import { useFileSystem } from '@epubjs-react-native/expo-file-system';
@@ -51,29 +50,6 @@ function ReaderInner({
   jumpToCfi, jumpNonce,
 }) {
   const { addAnnotation, changeTheme, changeFontSize, changeFontFamily, toc, goToLocation, goNext, goPrevious, injectJavascript } = useReader();
-
-  // 阶段十四第一版点击翻页用的是普通 Pressable 盖在 WebView 上面，真机反馈
-  // 划线选字失效了——根因是 RN 核心的触摸响应者系统一旦被 Pressable 那层
-  // 抢到，同一次触摸后续不管变成长按还是拖拽，都不会再传到底下的 WebView，
-  // 选字靠的正是长按+拖拽这套手势，被从根上截断了。第二版换成
-  // react-native-gesture-handler 的 Gesture.Tap()，缓解了大部分区域，但
-  // 真机反馈边缘这两条窄条本身还是选不了字——因为哪怕Tap手势本身认不出
-  // "这是一次长按"而判定失败，默认情况下这个手势层依然独占了触摸事件，
-  // 底下WebView压根没收到、没机会自己启动长按选字。
-  // 加 cancelsTouchesInView(false)（iOS原生手势系统的能力，RNGH直接暴露
-  // 出来）：让触摸从一开始就"两边都收到"，不是"我识别失败了才让你收"——
-  // 短促点击时我们的Tap手势识别成功、翻页；手指按住不放/拖拽时我们的
-  // Tap手势不触发，同时WebView从始至终都收到了同一路触摸，它自己的长按
-  // 选字能正常启动。用户建议的"点了识别成翻页、长按识别成选字"就是这个
-  // 效果，两边不再互相抢，是并行识别、各自只对自己认得出的模式生效。
-  const prevPageTap = useMemo(
-    () => Gesture.Tap().runOnJS(true).maxDuration(200).cancelsTouchesInView(false).onStart(() => goPrevious()),
-    [goPrevious]
-  );
-  const nextPageTap = useMemo(
-    () => Gesture.Tap().runOnJS(true).maxDuration(200).cancelsTouchesInView(false).onStart(() => goNext()),
-    [goNext]
-  );
 
   // 目录跳转不能直接把 toc 里的 href（形如"chap_005.xhtml"）丢给 goToLocation——
   // 那个函数最终是调 epub.js 的 rendition.display(target)，虽然理论上支持
@@ -217,6 +193,35 @@ function ReaderInner({
       true;
     `);
   }, [isReady, themeName]);
+
+  // 阶段十四：点击左右边缘翻页——前两版分别用RN的Pressable和
+  // react-native-gesture-handler的Gesture.Tap()在WebView上面盖一层透明
+  // 覆盖区域，真机反馈两版都会不同程度挡住划线选字（第二版加了iOS原生的
+  // cancelsTouchesInView(false)想让WebView也能同时收到触摸，依然没解决，
+  // 每行开头一两个字这种靠近覆盖区域的位置始终选不上）。根源是RN原生
+  // 视图和WebView内部本来就是两套独立的触摸/手势系统，隔一层原生覆盖物
+  // 硬要它们不互相打架，没能做到。
+  // 换个完全不同的思路：不在RN这一层做，直接往WebView内部的文档里挂一个
+  // 原生的click监听器，点边缘时调rendition.prev()/next()（epub.js原生
+  // API，goPrevious/goNext底层实际调的就是这两个）。"点击"和"选中文字"
+  // 是浏览器/WebKit自己原生分辨的两种手势——网页里点链接和拖拽选中文字
+  // 几十年来一直能正常共存，click事件根本不会在一次文字选择的拖拽过程中
+  // 触发，不需要我们在外面额外协调两套系统抢touch。
+  useEffect(() => {
+    if (!isReady) return;
+    injectJavascript(`
+      (function() {
+        try {
+          document.addEventListener('click', function(e) {
+            var w = window.innerWidth;
+            if (e.clientX < w * 0.22) { rendition.prev(); }
+            else if (e.clientX > w * 0.78) { rendition.next(); }
+          }, true);
+        } catch (e) {}
+      })();
+      true;
+    `);
+  }, [isReady]);
 
   // "跳转到原文位置"从划线复盘详情页过来——如果这本书已经打开过（Reader 还
   // 挂载在书架堆栈里），只传 initialLocation 不会生效，那个属性很多阅读器
@@ -429,19 +434,6 @@ function ReaderInner({
             </View>
           )}
         />
-
-        {/* 阶段十四：用户反馈只能滑动翻页，希望能点页面边缘翻页——大多数
-            阅读器App的通用模式（Kindle/Apple Books同款）：左右各留一条
-            点击区域调goPrevious/goNext，中间留给原有的单击/长按选字/划线
-            行为不受影响。宽度取22%左右，太窄不好点，太宽会跟"贴着边缘选字"
-            这种小概率操作抢触摸，是个折中，不是精确科学。用
-            GestureDetector+Gesture.Tap()而不是Pressable，见上面注释。 */}
-        <GestureDetector gesture={prevPageTap}>
-          <View style={[styles.pageTapZone, styles.pageTapZoneLeft]} />
-        </GestureDetector>
-        <GestureDetector gesture={nextPageTap}>
-          <View style={[styles.pageTapZone, styles.pageTapZoneRight]} />
-        </GestureDetector>
       </View>
 
       {!!selection && (
@@ -573,9 +565,6 @@ const styles = StyleSheet.create({
   headerBtnText: { fontSize: 15, fontWeight: '600' },
 
   readerBody: { flex: 1, position: 'relative' },
-  pageTapZone: { position: 'absolute', top: 0, bottom: 0, width: '22%' },
-  pageTapZoneLeft: { left: 0 },
-  pageTapZoneRight: { right: 0 },
 
   controlPanel: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
