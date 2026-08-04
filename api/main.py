@@ -28,6 +28,7 @@ import av
 import httpx
 import ebooklib
 from ebooklib import epub
+from pypdf import PdfReader
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -121,6 +122,13 @@ async def init_db():
                 added_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
         """)
+        # 阶段十五：PDF/TXT导入原型——导入的书跟预置书库要能区分开（验收标准
+        # 要求，不需要复杂的个人书库管理界面，一个标签字段够用）。书本仍然是
+        # 全体用户共享可见的同一份书架（不按user_id过滤，见app_get_library
+        # 注释），source只是展示上的"这是谁导入的普通标记"，不是权限隔离。
+        await conn.execute(
+            "ALTER TABLE books ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'preset'"
+        )
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS chapters (
                 id          BIGSERIAL PRIMARY KEY,
@@ -486,6 +494,7 @@ class BookOut(BaseModel):
     author: str
     added_at: datetime.datetime
     current_cfi_location: str = ""
+    source: str = "preset"
 
 class BookContextOut(BaseModel):
     id: int
@@ -648,6 +657,111 @@ def _extract_chapter_titles(book: "epub.EpubBook") -> list[str]:
     if titles:
         return titles
     return [item.get_name() for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT)]
+
+# ── PDF/TXT → EPUB 转换（阶段十五，内部原型）────────────────────────
+# 不新建PDF/TXT专用渲染引擎：把导入文件在后端转换成一份"干净EPUB"，直接复用
+# 现有 import_book 落地逻辑，阅读器/划线/AI讲解/知识图谱全部零改动自动可用。
+# 跟 content_source/wikisource_to_epub.py 是同一个模式（那边是离线内容准备
+# 脚本，这里是同样的思路搬进实时API），阈值也沿用同一个真实教训：
+# 段落太短会导致WebView长按选字明显更容易失败（阶段十一真机踩过的坑），
+# 所以过短的自然段落要先合并，不能每段独立成一章。
+MIN_CHAPTER_CHARS = 150
+
+def _merge_short_paragraphs(paragraphs: list[str], min_chars: int = MIN_CHAPTER_CHARS) -> list[str]:
+    merged = []
+    buffer = ""
+    for p in paragraphs:
+        buffer = f"{buffer}\n{p}" if buffer else p
+        if len(buffer) >= min_chars:
+            merged.append(buffer)
+            buffer = ""
+    if buffer:
+        if merged:
+            merged[-1] = f"{merged[-1]}\n{buffer}"
+        else:
+            merged.append(buffer)
+    return merged
+
+def _build_epub_from_sections(dst_path: str, title: str, author: str, sections: list[str]) -> list[str]:
+    """sections：每个元素是一章的纯文本（段内用\\n分隔自然段）。返回生成的章节标题列表。"""
+    new_book = epub.EpubBook()
+    new_book.set_identifier(f"imported-{uuid.uuid4().hex}")
+    new_book.set_title(title)
+    new_book.set_language("zh")
+    if author:
+        new_book.add_author(author)
+
+    chapter_titles = []
+    items = []
+    for idx, text in enumerate(sections):
+        chapter_title = f"第{idx + 1}节"
+        chapter_titles.append(chapter_title)
+        paragraphs_html = "".join(f"<p>{line}</p>" for line in text.split("\n") if line.strip())
+        c = epub.EpubHtml(title=chapter_title, file_name=f"chap_{idx:03d}.xhtml", lang="zh")
+        c.content = f"<h1>{chapter_title}</h1>{paragraphs_html}"
+        new_book.add_item(c)
+        items.append(c)
+
+    new_book.toc = tuple(items)
+    new_book.add_item(epub.EpubNcx())
+    new_book.add_item(epub.EpubNav())
+    new_book.spine = ["nav"] + items
+    epub.write_epub(dst_path, new_book)
+    return chapter_titles
+
+def _txt_bytes_to_sections(raw: bytes) -> list[str]:
+    """TXT编码不固定（国内常见来源很多是GBK/GB18030，不只是UTF-8），依次尝试，
+    都失败才用UTF-8+替换非法字符兜底（不静默失败，但也不因编码问题直接崩溃）。"""
+    text = None
+    for enc in ("utf-8", "gb18030"):
+        try:
+            text = raw.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    if text is None:
+        text = raw.decode("utf-8", errors="replace")
+
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    if not paragraphs:
+        # 没有空行分段的纯文本，退化成按单行分段
+        paragraphs = [line.strip() for line in text.split("\n") if line.strip()]
+    if not paragraphs:
+        raise HTTPException(status_code=400, detail="TXT文件内容为空或无法解析")
+    return _merge_short_paragraphs(paragraphs)
+
+def _pdf_bytes_to_sections(raw: bytes) -> list[str]:
+    """只支持文字版PDF（可选中文字），扫描版/图片版PDF提取不到文字，明确报错，
+    不做OCR（阶段十五验收标准明确排除OCR范围）。"""
+    try:
+        reader = PdfReader(io.BytesIO(raw))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"PDF文件无法打开: {e}")
+
+    if reader.is_encrypted:
+        raise HTTPException(status_code=400, detail="PDF文件已加密，暂不支持")
+
+    page_texts = []
+    for page in reader.pages:
+        try:
+            page_texts.append(page.extract_text() or "")
+        except Exception:
+            page_texts.append("")
+
+    full_text = "\n\n".join(page_texts)
+    # 扫描版/图片版PDF提取不出文字（或只有寥寥几个字的页眉页脚），用总字数
+    # 相对页数的密度判断，而不是"完全为空"这种过于宽松的条件——避免把"提取
+    # 出来的全是噪音"误判成"提取成功"。
+    if len(full_text.strip()) < max(50, len(reader.pages) * 20):
+        raise HTTPException(
+            status_code=400,
+            detail="无法从这份PDF提取到足够的文字，可能是扫描版/图片版PDF——本次原型不支持OCR，暂不能导入",
+        )
+
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", full_text) if p.strip()]
+    if not paragraphs:
+        paragraphs = [line.strip() for line in full_text.split("\n") if line.strip()]
+    return _merge_short_paragraphs(paragraphs)
 
 # ── 微信读书 Skill API ─────────────────────────────────────────────
 
@@ -1277,6 +1391,31 @@ async def app_login(body: AuthRequest):
         raise HTTPException(status_code=401, detail="用户名或密码错误")
     return AuthResponse(token=_make_jwt(row["id"], username), user_id=row["id"], username=username)
 
+async def _insert_book_and_chapters(
+    user_id: int, title: str, author: str, file_path: str,
+    chapter_titles: list[str], source: str = "preset",
+) -> BookOut:
+    """把已经落地成EPUB文件的一本书写入 books + chapters，两个入口共用：
+    直接上传EPUB（app_import_book）、PDF/TXT转换后落地EPUB（app_import_file，
+    阶段十五）。"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            book_row = await conn.fetchrow("""
+                INSERT INTO books (user_id, title, author, file_path, source)
+                VALUES ($1, $2, $3, $4, $5)
+                RETURNING id, added_at
+            """, user_id, title, author, file_path, source)
+            book_id = book_row["id"]
+
+            for idx, chapter_title in enumerate(chapter_titles):
+                await conn.execute("""
+                    INSERT INTO chapters (book_id, order_index, title)
+                    VALUES ($1, $2, $3)
+                """, book_id, idx, chapter_title)
+
+    return BookOut(id=book_id, title=title, author=author, added_at=book_row["added_at"], source=source)
+
 @app.post("/app/books/import", response_model=BookOut)
 async def app_import_book(file: UploadFile = File(...), user_id: int = CurrentUser):
     """把一本 EPUB 导入书库：解析标题/作者/章节目录，写入 books + chapters。"""
@@ -1300,23 +1439,49 @@ async def app_import_book(file: UploadFile = File(...), user_id: int = CurrentUs
         os.remove(file_path)
         raise HTTPException(status_code=400, detail=f"EPUB 解析失败: {e}")
 
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            book_row = await conn.fetchrow("""
-                INSERT INTO books (user_id, title, author, file_path)
-                VALUES ($1, $2, $3, $4)
-                RETURNING id, added_at
-            """, user_id, title, author, file_path)
-            book_id = book_row["id"]
+    return await _insert_book_and_chapters(user_id, title, author, file_path, chapter_titles)
 
-            for idx, chapter_title in enumerate(chapter_titles):
-                await conn.execute("""
-                    INSERT INTO chapters (book_id, order_index, title)
-                    VALUES ($1, $2, $3)
-                """, book_id, idx, chapter_title)
+MAX_IMPORT_FILE_BYTES = 30 * 1024 * 1024  # 30MB，PDF/TXT原型用，比EPUB上限低一档
 
-    return BookOut(id=book_id, title=title, author=author, added_at=book_row["added_at"])
+@app.post("/app/books/import-file", response_model=BookOut)
+async def app_import_file(
+    file: UploadFile = File(...),
+    title: str = Form(""),
+    author: str = Form(""),
+    user_id: int = CurrentUser,
+):
+    """阶段十五（内部原型）：PDF/TXT导入——不新建渲染引擎，后端把文件转换成
+    一份干净EPUB，走跟直接上传EPUB完全一样的落地逻辑（_insert_book_and_
+    chapters），阅读器/划线/AI讲解/知识图谱因此零改动自动可用。
+
+    范围边界（见 05-验收标准.md 阶段十五）：只支持文字版PDF（不支持扫描版/
+    图片版，不做OCR）；TXT按段落合并切章节；仅供团队内部用自己合法拥有的
+    内容测试，不对外部用户开放。"""
+    filename = file.filename or ""
+    ext = os.path.splitext(filename)[1].lower()
+    if ext not in (".pdf", ".txt"):
+        raise HTTPException(status_code=400, detail="只支持 .pdf 或 .txt 文件")
+
+    raw = await file.read()
+    if len(raw) > MAX_IMPORT_FILE_BYTES:
+        raise HTTPException(status_code=413, detail="文件过大，请控制在 30MB 以内")
+
+    sections = _pdf_bytes_to_sections(raw) if ext == ".pdf" else _txt_bytes_to_sections(raw)
+
+    book_title = title.strip() or os.path.splitext(filename)[0] or "未命名"
+    book_author = author.strip()
+
+    file_path = os.path.join(EPUB_STORAGE_DIR, f"{uuid.uuid4().hex}.epub")
+    try:
+        chapter_titles = _build_epub_from_sections(file_path, book_title, book_author, sections)
+    except Exception as e:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        raise HTTPException(status_code=400, detail=f"生成EPUB失败: {e}")
+
+    return await _insert_book_and_chapters(
+        user_id, book_title, book_author, file_path, chapter_titles, source="imported",
+    )
 
 @app.post("/app/books/{book_id}/replace", response_model=BookOut)
 async def app_replace_book(book_id: int, file: UploadFile = File(...), user_id: int = CurrentUser):
@@ -1428,7 +1593,7 @@ async def app_get_library(user_id: int = CurrentUser):
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
-            SELECT b.id, b.title, b.author, b.added_at,
+            SELECT b.id, b.title, b.author, b.added_at, b.source,
                    COALESCE(rp.current_cfi_location, '') AS current_cfi_location
             FROM books b
             LEFT JOIN reading_progress rp
