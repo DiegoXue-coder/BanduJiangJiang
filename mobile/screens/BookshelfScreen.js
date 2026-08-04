@@ -1,15 +1,18 @@
 import React, { useCallback, useState } from 'react';
 import {
   View, Text, FlatList, TouchableOpacity, StyleSheet,
-  ActivityIndicator, RefreshControl,
+  ActivityIndicator, RefreshControl, Alert,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
-import { getLibrary } from '../lib/api';
+import * as DocumentPicker from 'expo-document-picker';
+import { IconUpload } from '@tabler/icons-react-native';
+import { getLibrary, importFile } from '../lib/api';
 import { useTheme } from '../theme';
 
 function BookCard({ book, onPress, theme }) {
   const hasProgress = !!book.current_cfi_location;
+  const isImported = book.source === 'imported';
   return (
     <TouchableOpacity
       style={[styles.card, {
@@ -23,7 +26,14 @@ function BookCard({ book, onPress, theme }) {
         <Text style={[styles.coverInitial, { color: theme.textOnAccent }]}>{book.title?.[0] || '书'}</Text>
       </View>
       <View style={styles.cardInfo}>
-        <Text style={[styles.cardTitle, { color: theme.text }]} numberOfLines={1}>{book.title}</Text>
+        <View style={styles.cardTitleRow}>
+          <Text style={[styles.cardTitle, { color: theme.text }]} numberOfLines={1}>{book.title}</Text>
+          {isImported && (
+            <View style={[styles.importedTag, { backgroundColor: theme.tagSoft, borderRadius: theme.radius }]}>
+              <Text style={[styles.importedTagText, { color: theme.tag }]}>导入</Text>
+            </View>
+          )}
+        </View>
         {!!book.author && (
           <Text style={[styles.cardAuthor, { color: theme.textSecondary }]} numberOfLines={1}>{book.author}</Text>
         )}
@@ -33,12 +43,40 @@ function BookCard({ book, onPress, theme }) {
   );
 }
 
+// 阶段十五（内部原型）：从系统文件选择器挑一个PDF/TXT，后端转换成EPUB后
+// 走跟预置书库完全一样的落地流程。不做自定义进度条/取消这类复杂交互——
+// 原型阶段选个文件、等一下、成功或看清楚报错，够用（05-验收标准.md
+// 阶段十五范围）。
+async function pickAndImportFile(setImporting, onDone) {
+  const result = await DocumentPicker.getDocumentAsync({
+    type: ['application/pdf', 'text/plain'],
+    copyToCacheDirectory: true,
+  });
+  if (result.canceled || !result.assets?.[0]) return;
+
+  const asset = result.assets[0];
+  const ext = (asset.name || '').toLowerCase().split('.').pop();
+  const mimeType = ext === 'pdf' ? 'application/pdf' : 'text/plain';
+  const title = (asset.name || '').replace(/\.(pdf|txt)$/i, '');
+
+  setImporting(true);
+  try {
+    await importFile(asset.uri, asset.name, mimeType, title);
+    onDone();
+  } catch (e) {
+    Alert.alert('导入失败', e.message || '请稍后重试');
+  } finally {
+    setImporting(false);
+  }
+}
+
 export default function BookshelfScreen({ navigation }) {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
   const [books, setBooks]   = useState(null); // null = 加载中
   const [error, setError]   = useState('');
   const [refreshing, setRefreshing] = useState(false);
+  const [importing, setImporting] = useState(false);
 
   const load = useCallback(async (isRefresh = false) => {
     if (isRefresh) setRefreshing(true);
@@ -83,6 +121,17 @@ export default function BookshelfScreen({ navigation }) {
     <SafeAreaView edges={['bottom', 'left', 'right']} style={[styles.safe, { backgroundColor: theme.bg }]}>
       <View style={[styles.header, { backgroundColor: theme.accent, paddingTop: insets.top + 14 }]}>
         <Text style={[styles.headerTitle, { color: theme.textOnAccent }]}>书架</Text>
+        <TouchableOpacity
+          style={styles.importBtn}
+          disabled={importing}
+          onPress={() => pickAndImportFile(setImporting, () => load())}
+        >
+          {importing ? (
+            <ActivityIndicator size="small" color={theme.textOnAccent} />
+          ) : (
+            <IconUpload color={theme.textOnAccent} size={22} strokeWidth={1.75} />
+          )}
+        </TouchableOpacity>
       </View>
       <FlatList
         data={books}
@@ -110,10 +159,18 @@ export default function BookshelfScreen({ navigation }) {
 
 const styles = StyleSheet.create({
   safe: { flex: 1 },
-  header: { paddingHorizontal: 16, paddingVertical: 14 },
+  header: {
+    paddingHorizontal: 16, paddingVertical: 14,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+  },
   headerTitle: { fontSize: 20, fontWeight: '700' },
+  importBtn: { padding: 4 },
 
   listContent: { padding: 16, flexGrow: 1 },
+
+  cardTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  importedTag: { paddingHorizontal: 6, paddingVertical: 2 },
+  importedTagText: { fontSize: 10, fontWeight: '600' },
 
   card: {
     flexDirection: 'row', alignItems: 'center',
@@ -127,7 +184,7 @@ const styles = StyleSheet.create({
   coverInitial: { fontSize: 22, fontWeight: '700' },
 
   cardInfo: { flex: 1 },
-  cardTitle:  { fontSize: 16, fontWeight: '600' },
+  cardTitle:  { fontSize: 16, fontWeight: '600', flexShrink: 1 },
   cardAuthor: { fontSize: 13, marginTop: 2 },
   cardStatus: { fontSize: 12, marginTop: 6, fontWeight: '600' },
 

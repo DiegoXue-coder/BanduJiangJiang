@@ -120,6 +120,19 @@ export async function getBookContext(bookId) {
   return appFetch(`/app/books/${bookId}/context`);
 }
 
+// ── 阶段十五：PDF/TXT导入原型（内部原型，不对外部用户开放）──────────
+// 后端把PDF/TXT转换成EPUB后走跟直接导入EPUB一样的落地逻辑，这里只是多一个
+// 上传入口，不需要额外的轮询/进度接口。
+export async function importFile(fileUri, fileName, mimeType, title = '') {
+  const formData = new FormData();
+  formData.append('file', { uri: fileUri, name: fileName, type: mimeType });
+  if (title) formData.append('title', title);
+  return appFetch('/app/books/import-file', {
+    method: 'POST',
+    body: formData,
+  });
+}
+
 // JWT本身含两个"."（header.payload.signature标准格式）。epub.js嗅探文件
 // 类型是看"URL里最后一个.后面是什么"，如果直接把JWT明文拼进query string，
 // 最后一个"."会落在token内部而不是".epub"后面，库会误判成不认识的文件

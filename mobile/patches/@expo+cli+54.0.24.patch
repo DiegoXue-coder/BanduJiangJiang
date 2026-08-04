@@ -1,0 +1,17 @@
+diff --git a/node_modules/@expo/cli/build/src/api/user/actions.js b/node_modules/@expo/cli/build/src/api/user/actions.js
+index a943e5a..dc1c205 100644
+--- a/node_modules/@expo/cli/build/src/api/user/actions.js
++++ b/node_modules/@expo/cli/build/src/api/user/actions.js
+@@ -139,6 +139,12 @@ async function tryGetUserAsync() {
+     if (user) {
+         return user;
+     }
++    if (_env.env.CI || !process.stdout.isTTY) {
++        // Non-interactive (e.g. headless tunnel server): default to the
++        // same choice a human would pick ("Proceed anonymously") instead
++        // of crashing the manifest request with a login prompt.
++        return null;
++    }
+     const choices = [
+         {
+             title: 'Log in',
