@@ -158,6 +158,21 @@ export async function importFile(fileUri, fileName, mimeType, title = '') {
   });
 }
 
+// 用户在"导入"入口里直接选epub文件（阶段十五加的选项）：走已有的
+// /app/books/import（早在阶段一就存在，之前只有内容筹备脚本用过，一直没
+// 配手机端入口），显式传 source=imported 跟预置书库区分开——不传的话这个
+// 接口默认还是'preset'（兼容老调用方，见后端注释）。
+export async function importEpub(fileUri, fileName) {
+  const formData = new FormData();
+  formData.append('file', { uri: fileUri, name: fileName, type: 'application/epub+zip' });
+  formData.append('source', 'imported');
+  return appFetch('/app/books/import', {
+    method: 'POST',
+    body: formData,
+    timeoutMs: 60_000,
+  });
+}
+
 // JWT本身含两个"."（header.payload.signature标准格式）。epub.js嗅探文件
 // 类型是看"URL里最后一个.后面是什么"，如果直接把JWT明文拼进query string，
 // 最后一个"."会落在token内部而不是".epub"后面，库会误判成不认识的文件
