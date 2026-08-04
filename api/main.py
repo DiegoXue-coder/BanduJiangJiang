@@ -696,23 +696,32 @@ async def _tencent_transcribe(wav_bytes: bytes) -> str:
     pcm = wav_bytes[44:] if wav_bytes[:4] == b"RIFF" else wav_bytes
     CHUNK = 6400  # 16kHz*16bit*mono下200ms的数据量，文档推荐的分片大小
 
-    segments: dict[int, str] = {}
-    async with websockets.connect(url, open_timeout=10) as ws:
-        for i in range(0, len(pcm), CHUNK):
-            await ws.send(pcm[i:i + CHUNK])
-        await ws.send(json.dumps({"type": "end"}))
+    # 真机反馈过一次卡死502（后端在美国sfo，腾讯云在国内，跨境这段连接偶尔
+    # 迟迟不回应），原来的代码没有任何超时保护，会一直干等到Railway自己的
+    # 网关超时才报错，用户看到的是不知所云的"Application failed to respond"。
+    # 包一层整体超时，卡住时给出我们自己的明确错误，不让请求无限挂起。
+    async def _run() -> str:
+        segments: dict[int, str] = {}
+        async with websockets.connect(url, open_timeout=10) as ws:
+            for i in range(0, len(pcm), CHUNK):
+                await ws.send(pcm[i:i + CHUNK])
+            await ws.send(json.dumps({"type": "end"}))
 
-        async for raw in ws:
-            msg = json.loads(raw)
-            if msg.get("code", 0) != 0:
-                raise RuntimeError(f"腾讯云ASR错误 {msg.get('code')}: {msg.get('message')}")
-            result = msg.get("result")
-            if result and result.get("slice_type") == 2:
-                segments[result.get("index", 0)] = result.get("voice_text_str", "")
-            if msg.get("final") == 1:
-                break
+            async for raw in ws:
+                msg = json.loads(raw)
+                if msg.get("code", 0) != 0:
+                    raise RuntimeError(f"腾讯云ASR错误 {msg.get('code')}: {msg.get('message')}")
+                result = msg.get("result")
+                if result and result.get("slice_type") == 2:
+                    segments[result.get("index", 0)] = result.get("voice_text_str", "")
+                if msg.get("final") == 1:
+                    break
+        return "".join(segments[i] for i in sorted(segments))
 
-    return "".join(segments[i] for i in sorted(segments))
+    try:
+        return await asyncio.wait_for(_run(), timeout=20)
+    except asyncio.TimeoutError:
+        raise RuntimeError("腾讯云语音识别响应超时（20秒），请重试")
 
 # ── EPUB 章节目录提取 ──────────────────────────────────────────────
 
