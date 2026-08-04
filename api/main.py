@@ -701,6 +701,7 @@ async def _tencent_transcribe(wav_bytes: bytes) -> str:
     # 网关超时才报错，用户看到的是不知所云的"Application failed to respond"。
     # 包一层整体超时，卡住时给出我们自己的明确错误，不让请求无限挂起。
     async def _run() -> str:
+        print(f"[腾讯云ASR] 发送PCM {len(pcm)} 字节，约 {len(pcm)/32000:.1f} 秒")  # 临时诊断
         segments: dict[int, str] = {}
         async with websockets.connect(url, open_timeout=10) as ws:
             for i in range(0, len(pcm), CHUNK):
@@ -709,6 +710,7 @@ async def _tencent_transcribe(wav_bytes: bytes) -> str:
 
             async for raw in ws:
                 msg = json.loads(raw)
+                print(f"[腾讯云ASR原始消息] {raw}")  # 临时诊断，排查完准确率问题就删
                 if msg.get("code", 0) != 0:
                     raise RuntimeError(f"腾讯云ASR错误 {msg.get('code')}: {msg.get('message')}")
                 result = msg.get("result")
