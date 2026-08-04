@@ -92,15 +92,39 @@ function notifyAuthExpired() {
 
 /** 带鉴权头的 fetch 封装，所有 /app/* 及共用接口调用统一走这个。
  * x-extension-token 一直带（插件同款接口要用），登录后额外带
- * Authorization（/app/* 接口靠这个识别真实用户）。*/
+ * Authorization（/app/* 接口靠这个识别真实用户）。
+ *
+ * timeoutMs（可选）：RN 的 fetch 本身没有默认超时，服务器如果因为某个
+ * 请求处理异常久（或连接中途卡死）不回应，调用方会一直转圈、既不报成功
+ * 也不报失败——阶段十五PDF导入真机反馈踩到的坑，验收标准明确要求"不允许
+ * 无提示卡死"，所以这里补一个可选的AbortController超时，超时就抛出清晰
+ * 错误而不是无限等。默认不设（大多数接口本来就很快，不用额外加超时逻辑
+ * 的复杂度），只有明确可能耗时的调用方（比如导入大文件）会传这个参数。*/
 export async function appFetch(path, options = {}) {
+  const { timeoutMs, ...fetchOptions } = options;
   const headers = {
     'x-extension-token': getExtToken(),
-    ...options.headers,
+    ...fetchOptions.headers,
   };
   if (cachedToken) headers['Authorization'] = `Bearer ${cachedToken}`;
 
-  const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
+  const controller = timeoutMs ? new AbortController() : null;
+  const timer = timeoutMs ? setTimeout(() => controller.abort(), timeoutMs) : null;
+
+  let res;
+  try {
+    res = await fetch(`${API_BASE}${path}`, {
+      ...fetchOptions, headers,
+      ...(controller ? { signal: controller.signal } : {}),
+    });
+  } catch (e) {
+    if (e.name === 'AbortError') {
+      throw new Error('请求超时，请检查网络或稍后重试');
+    }
+    throw e;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 
   if (res.status === 401 && path.startsWith('/app/')) {
     notifyAuthExpired();
@@ -130,6 +154,7 @@ export async function importFile(fileUri, fileName, mimeType, title = '') {
   return appFetch('/app/books/import-file', {
     method: 'POST',
     body: formData,
+    timeoutMs: 90_000, // PDF解析可能比其他接口慢不少，给足够的余量，但不能无限等
   });
 }
 

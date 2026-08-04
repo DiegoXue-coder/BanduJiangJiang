@@ -666,6 +666,7 @@ def _extract_chapter_titles(book: "epub.EpubBook") -> list[str]:
 # 段落太短会导致WebView长按选字明显更容易失败（阶段十一真机踩过的坑），
 # 所以过短的自然段落要先合并，不能每段独立成一章。
 MIN_CHAPTER_CHARS = 150
+MAX_PDF_PAGES = 400
 
 def _merge_short_paragraphs(paragraphs: list[str], min_chars: int = MIN_CHAPTER_CHARS) -> list[str]:
     merged = []
@@ -740,6 +741,17 @@ def _pdf_bytes_to_sections(raw: bytes) -> list[str]:
 
     if reader.is_encrypted:
         raise HTTPException(status_code=400, detail="PDF文件已加密，暂不支持")
+
+    # 页数上限：pypdf逐页同步提取，页数一多(尤其复杂排版/嵌入字体的真实PDF，
+    # 不是这次开发时用的简单测试PDF)可能真的很慢，真机反馈过"一直转圈不报
+    # 成功也不报失败"——即使已经用asyncio.to_thread不再卡住整个服务器，
+    # 单个超大文件还是可能久到让用户干等。先设一个上限直接拒绝，比"处理很
+    # 久最后可能还是失败"更符合"转换失败要有清晰提示"这条验收标准。
+    if len(reader.pages) > MAX_PDF_PAGES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"PDF页数过多（{len(reader.pages)}页，上限{MAX_PDF_PAGES}页），本次原型暂不支持，请拆分后再试",
+        )
 
     page_texts = []
     for page in reader.pages:
