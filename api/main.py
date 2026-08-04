@@ -1,4 +1,4 @@
-"""伴读讲讲 — FastAPI 后端（DeepSeek 对话 + SiliconFlow SenseVoice 语音识别）"""
+"""伴读讲讲 — FastAPI 后端（DeepSeek 对话 + 腾讯云语音识别）"""
 
 import os
 import io
@@ -7,16 +7,20 @@ import time
 import hmac
 import uuid
 import json
+import base64
+import random
 import hashlib
 import datetime
 import asyncio
 import threading
+import urllib.parse
 from collections import defaultdict
 from contextlib import asynccontextmanager
 
 import asyncpg
 import bcrypt
 import jwt
+import websockets
 
 from fastapi import FastAPI, HTTPException, Request, Depends, File, UploadFile, BackgroundTasks, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -351,6 +355,15 @@ def _make_ds(key: str) -> OpenAI | None:
 def _make_sf(key: str) -> OpenAI | None:
     return OpenAI(api_key=key, base_url="https://api.siliconflow.cn/v1") if key else None
 
+# 腾讯云语音识别（实时ASR大模型引擎，2026-08阶段十五从SiliconFlow切换过来——
+# 调研结论见开发进度记录：大模型版约1元/小时，是三个付费选项里性价比最高的）。
+# APPID只用来拼WebSocket连接地址，不参与签名计算；密钥不走请求头（跟DeepSeek/
+# SiliconFlow那套"允许用户自带key"的设计不一样——腾讯云这边只有我们自己的账号
+# 在用，没有让第三方用户自带key的场景，直接读环境变量。
+TENCENT_APPID      = os.environ.get("TENCENT_APPID", "")
+TENCENT_SECRET_ID  = os.environ.get("TENCENT_SECRET_ID", "")
+TENCENT_SECRET_KEY = os.environ.get("TENCENT_SECRET_KEY", "")
+
 # ── 免费额度（按 IP + 日期，每天自动重置）─────────────────────────
 
 FREE_DAILY_LIMIT = 100  # 2026-07-21从20调高：产品还在测试阶段，后续测试内容量大，用户确认不用卡这么紧
@@ -636,6 +649,70 @@ def _webm_to_wav(audio_bytes: bytes) -> bytes:
         in_cont.close()
     out_io.seek(0)
     return out_io.read()
+
+# ── 腾讯云实时语音识别（WebSocket，大模型引擎）──────────────────────
+#
+# 官方SDK（tencentcloud-speech-sdk-python）只在GitHub发布、不在PyPI上，
+# 直接手写WebSocket客户端，照官方文档的签名算法+消息协议实现，不引入
+# 额外的vendored依赖。
+#
+# 手机端"录完整段音频再一次性上传"这个流程完全不变——这是腾讯云"实时
+# 语音识别"协议本身的用法：把一整段已经录好的音频，从后端这一层用
+# write()式的分片发送喂进去，等最后一条"识别完成"消息拿到文本再返回，
+# 跟真正的"边说边发"没有本质区别，只是数据来源是一个已经录完的文件，
+# 不是麦克风实时流。对手机端来说，接口请求/响应格式完全没变。
+TENCENT_ASR_ENGINE = "16k_zh_en"  # 大模型1.0版中文引擎（16k采样率）
+
+def _tencent_asr_sign(query_string: str) -> str:
+    signstr = f"asr.cloud.tencent.com/asr/v2/{TENCENT_APPID}?{query_string}"
+    digest = hmac.new(TENCENT_SECRET_KEY.encode(), signstr.encode(), hashlib.sha1).digest()
+    return base64.b64encode(digest).decode()
+
+async def _tencent_transcribe(wav_bytes: bytes) -> str:
+    if not (TENCENT_APPID and TENCENT_SECRET_ID and TENCENT_SECRET_KEY):
+        raise RuntimeError("腾讯云语音识别未配置（缺 TENCENT_APPID/SECRET_ID/SECRET_KEY）")
+
+    now = int(time.time())
+    params = {
+        "secretid": TENCENT_SECRET_ID,
+        "timestamp": str(now),
+        "expired": str(now + 300),
+        "nonce": str(random.randint(10000, 99999)),
+        "engine_model_type": TENCENT_ASR_ENGINE,
+        "voice_id": uuid.uuid4().hex,
+        "voice_format": "1",  # 整数枚举，不是字符串！1=PCM（真机验证时对着wav发过
+        # 一次才发现的坑：文档表格里写的"wav"是给人看的格式名，实际参数是数字，
+        # 12才对应WAV，传字符串"wav"会被服务端当成非法整数直接拒绝连接）
+        "needvad": "1",
+    }
+    # 签名原文要求参数按key字典序排列、值不做URL编码；拼进最终连接地址时才编码
+    sorted_query = "&".join(f"{k}={params[k]}" for k in sorted(params))
+    signature = _tencent_asr_sign(sorted_query)
+    url_query = "&".join(f"{k}={urllib.parse.quote_plus(v)}" for k, v in params.items())
+    url = f"wss://asr.cloud.tencent.com/asr/v2/{TENCENT_APPID}?{url_query}&signature={urllib.parse.quote_plus(signature)}"
+
+    # 跳过44字节WAV文件头，只发裸PCM——voice_format=1(PCM)已经告诉服务端这是
+    # 不带容器头的裸音频数据，官方文档的分片发送示例发的都是PCM数据本身
+    pcm = wav_bytes[44:] if wav_bytes[:4] == b"RIFF" else wav_bytes
+    CHUNK = 6400  # 16kHz*16bit*mono下200ms的数据量，文档推荐的分片大小
+
+    segments: dict[int, str] = {}
+    async with websockets.connect(url, open_timeout=10) as ws:
+        for i in range(0, len(pcm), CHUNK):
+            await ws.send(pcm[i:i + CHUNK])
+        await ws.send(json.dumps({"type": "end"}))
+
+        async for raw in ws:
+            msg = json.loads(raw)
+            if msg.get("code", 0) != 0:
+                raise RuntimeError(f"腾讯云ASR错误 {msg.get('code')}: {msg.get('message')}")
+            result = msg.get("result")
+            if result and result.get("slice_type") == 2:
+                segments[result.get("index", 0)] = result.get("voice_text_str", "")
+            if msg.get("final") == 1:
+                break
+
+    return "".join(segments[i] for i in sorted(segments))
 
 # ── EPUB 章节目录提取 ──────────────────────────────────────────────
 
@@ -1322,29 +1399,17 @@ async def transcribe(request: Request, _=ExtAuth):
         raise HTTPException(status_code=400, detail="空音频")
     if len(audio_bytes) > MAX_AUDIO_BYTES:
         raise HTTPException(status_code=413, detail="音频过大，请控制在 5MB 以内")
-    sf = _make_sf(_sf_key(request))
     print(f"[转录] 收到 {len(audio_bytes)//1024}KB")
     try:
-        import time as _time
-        t0       = _time.time()
+        t0        = time.time()
         wav_bytes = await asyncio.to_thread(_webm_to_wav, audio_bytes)
-        t1 = _time.time()
-        # SiliconFlow SDK 调用是同步阻塞的，不包一层 to_thread 会卡住整个事件
-        # 循环，拖慢其他并发请求（不影响这一次请求本身的耗时，但影响并发吞吐）
-        result = await asyncio.to_thread(
-            sf.audio.transcriptions.create,
-            model="FunAudioLLM/SenseVoiceSmall",
-            file=("audio.wav", io.BytesIO(wav_bytes), "audio/wav"),
-            language="zh",
-        )
-        text = re.sub(r"<\|[^|]+\|>", "", result.text).strip()
-        # 拆开打日志：转码 vs SiliconFlow API 本身，方便以后排查延迟时一眼看出
-        # 瓶颈在哪一层（2026-07-22 实测过 SiliconFlow 有明显冷启动，首次调用
-        # ~8s、热身后 1.3-1.6s，转码耗时可忽略不计，瓶颈几乎全在 SiliconFlow 那边）
-        print(f"[转录] 转码={t1-t0:.2f}s SiliconFlow={_time.time()-t1:.2f}s 总计={_time.time()-t0:.2f}s → {repr(text)}")
+        t1        = time.time()
+        text      = await _tencent_transcribe(wav_bytes)
+        # 拆开打日志：转码 vs 腾讯云ASR本身，方便以后排查延迟时一眼看出瓶颈在哪层
+        print(f"[转录] 转码={t1-t0:.2f}s 腾讯云ASR={time.time()-t1:.2f}s 总计={time.time()-t0:.2f}s → {repr(text)}")
     except Exception as e:
         print(f"[转录] 错误: {e}")
-        raise HTTPException(status_code=502, detail=f"SenseVoice 错误: {e}")
+        raise HTTPException(status_code=502, detail=f"语音识别错误: {e}")
     return {"text": text}
 
 # ── 手机端 App 接口（/app 前缀，WBS 阶段一骨架）─────────────────────
