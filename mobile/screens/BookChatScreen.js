@@ -94,6 +94,7 @@ export default function BookChatScreen({
   const [keyboardHeight, setKeyboardHeight] = useState(0);
 
   const recordingRef   = useRef(null);
+  const startingRecordingRef = useRef(false); // 防止预热延迟期间重复点击开始录音
   const soundRef       = useRef(null);
   const scrollRef      = useRef(null);
   const ttsQueueRef    = useRef([]);   // 按句切好、还没开始处理的文字队列
@@ -454,21 +455,32 @@ export default function BookChatScreen({
         setStatus(`识别失败：${e.message}`);
       }
     } else {
+      if (startingRecordingRef.current) return; // 预热延迟期间重复点击，忽略
+      startingRecordingRef.current = true;
       try {
         const { status: perm } = await Audio.requestPermissionsAsync();
         if (perm !== 'granted') {
           setStatus('需要麦克风权限，请到系统设置里开启');
           return;
         }
+        setStatus('准备麦克风…');
         await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
-        const { recording } = await Audio.Recording.createAsync(
-          Audio.RecordingOptionsPresets.HIGH_QUALITY,
-        );
+        // 真机反馈过"说话前半句录不进去"——prepareToRecordAsync/startAsync的
+        // Promise resolve不代表iOS麦克风硬件已经真正开始采集，音频会话切换
+        // 有实测存在的预热延迟。拆开原来一步到位的Audio.Recording.createAsync，
+        // 在真正开始采集之后再留一小段缓冲时间，缓冲期间不让用户看到"可以
+        // 说话了"这个状态，避免刚开口那几个字被吞掉。
+        const recording = new Audio.Recording();
+        await recording.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
+        await recording.startAsync();
         recordingRef.current = recording;
+        await new Promise(resolve => setTimeout(resolve, 300));
         setRecording(true);
         setStatus('录音中 — 再次点击停止');
       } catch (e) {
         setStatus(`无法启动录音：${e.message}`);
+      } finally {
+        startingRecordingRef.current = false;
       }
     }
   }
