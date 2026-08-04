@@ -703,8 +703,22 @@ async def _tencent_transcribe(wav_bytes: bytes) -> str:
     async def _run() -> str:
         segments: dict[int, str] = {}
         async with websockets.connect(url, open_timeout=10) as ws:
+            # 真机反馈坐实过的坑：原来把整段PCM一口气发完，腾讯云限速"1秒内
+            # 最多接收3秒时长音频"，一段8~12秒的录音几乎瞬间发完，远超3倍速，
+            # 直接报错code=4000拒绝——之前排查到的502本质就是这个错误被我们
+            # 自己的try/except包成502抛出，不是网关超时。按发送节奏限速，
+            # 控制在2.5倍速以内（留安全余量，不顶到3倍的硬上限）。
+            SEND_SPEED_FACTOR = 2.5
+            BYTES_PER_SECOND = 32000  # 16kHz * 16bit * mono
+            start_wall = time.time()
+            audio_seconds_sent = 0.0
             for i in range(0, len(pcm), CHUNK):
                 await ws.send(pcm[i:i + CHUNK])
+                audio_seconds_sent += len(pcm[i:i + CHUNK]) / BYTES_PER_SECOND
+                min_wall_elapsed = audio_seconds_sent / SEND_SPEED_FACTOR
+                wall_elapsed = time.time() - start_wall
+                if wall_elapsed < min_wall_elapsed:
+                    await asyncio.sleep(min_wall_elapsed - wall_elapsed)
             await ws.send(json.dumps({"type": "end"}))
 
             async for raw in ws:
