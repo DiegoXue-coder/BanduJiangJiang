@@ -1494,8 +1494,17 @@ async def _insert_book_and_chapters(
     return BookOut(id=book_id, title=title, author=author, added_at=book_row["added_at"], source=source)
 
 @app.post("/app/books/import", response_model=BookOut)
-async def app_import_book(file: UploadFile = File(...), user_id: int = CurrentUser):
-    """把一本 EPUB 导入书库：解析标题/作者/章节目录，写入 books + chapters。"""
+async def app_import_book(
+    file: UploadFile = File(...),
+    source: str = Form("preset"),
+    user_id: int = CurrentUser,
+):
+    """把一本 EPUB 导入书库：解析标题/作者/章节目录，写入 books + chapters。
+
+    `source` 默认 `preset`（阶段一起就是这个默认值，供内容筹备脚本/管理操作
+    往预置书库灌书用，不传就是老行为，不破坏既有调用方）。阶段十五手机端
+    "导入"入口加了epub选项后，用户自己上传的epub会显式传 `source=imported`，
+    跟PDF/TXT转换来的书用同一套区分预置库/用户导入的标记。"""
     if not (file.filename or "").lower().endswith(".epub"):
         raise HTTPException(status_code=400, detail="只支持 .epub 文件")
 
@@ -1516,7 +1525,7 @@ async def app_import_book(file: UploadFile = File(...), user_id: int = CurrentUs
         os.remove(file_path)
         raise HTTPException(status_code=400, detail=f"EPUB 解析失败: {e}")
 
-    return await _insert_book_and_chapters(user_id, title, author, file_path, chapter_titles)
+    return await _insert_book_and_chapters(user_id, title, author, file_path, chapter_titles, source=source)
 
 MAX_IMPORT_FILE_BYTES = 30 * 1024 * 1024  # 30MB，PDF/TXT原型用，比EPUB上限低一档
 

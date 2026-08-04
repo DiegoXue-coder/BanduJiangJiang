@@ -7,7 +7,7 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useFocusEffect } from '@react-navigation/native';
 import * as DocumentPicker from 'expo-document-picker';
 import { IconUpload } from '@tabler/icons-react-native';
-import { getLibrary, importFile } from '../lib/api';
+import { getLibrary, importFile, importEpub } from '../lib/api';
 import { useTheme } from '../theme';
 
 function BookCard({ book, onPress, theme }) {
@@ -43,25 +43,31 @@ function BookCard({ book, onPress, theme }) {
   );
 }
 
-// 阶段十五（内部原型）：从系统文件选择器挑一个PDF/TXT，后端转换成EPUB后
-// 走跟预置书库完全一样的落地流程。不做自定义进度条/取消这类复杂交互——
-// 原型阶段选个文件、等一下、成功或看清楚报错，够用（05-验收标准.md
-// 阶段十五范围）。
+// 阶段十五（内部原型）：从系统文件选择器挑一个PDF/TXT/EPUB。PDF/TXT在
+// 后端转换成EPUB后走跟预置书库完全一样的落地流程；EPUB直接走已经存在、
+// 但一直没配手机端入口的/app/books/import（真机反馈用户手里正好有epub
+// 文件、发现选不出来，才顺手把这个入口补上，不属于阶段十五原定范围但
+// 改动很小）。不做自定义进度条/取消这类复杂交互——原型阶段选个文件、
+// 等一下、成功或看清楚报错，够用（05-验收标准.md 阶段十五范围）。
 async function pickAndImportFile(setImporting, onDone) {
   const result = await DocumentPicker.getDocumentAsync({
-    type: ['application/pdf', 'text/plain'],
+    type: ['application/pdf', 'text/plain', 'application/epub+zip'],
     copyToCacheDirectory: true,
   });
   if (result.canceled || !result.assets?.[0]) return;
 
   const asset = result.assets[0];
   const ext = (asset.name || '').toLowerCase().split('.').pop();
-  const mimeType = ext === 'pdf' ? 'application/pdf' : 'text/plain';
-  const title = (asset.name || '').replace(/\.(pdf|txt)$/i, '');
 
   setImporting(true);
   try {
-    await importFile(asset.uri, asset.name, mimeType, title);
+    if (ext === 'epub') {
+      await importEpub(asset.uri, asset.name);
+    } else {
+      const mimeType = ext === 'pdf' ? 'application/pdf' : 'text/plain';
+      const title = (asset.name || '').replace(/\.(pdf|txt)$/i, '');
+      await importFile(asset.uri, asset.name, mimeType, title);
+    }
     onDone();
   } catch (e) {
     Alert.alert('导入失败', e.message || '请稍后重试');
