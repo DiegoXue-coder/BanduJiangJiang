@@ -1466,14 +1466,27 @@ async def app_import_file(
     if len(raw) > MAX_IMPORT_FILE_BYTES:
         raise HTTPException(status_code=413, detail="文件过大，请控制在 30MB 以内")
 
-    sections = _pdf_bytes_to_sections(raw) if ext == ".pdf" else _txt_bytes_to_sections(raw)
+    # PDF提取文字（pypdf逐页同步调用）和EPUB打包都是CPU密集的同步代码，真实
+    # PDF（尤其带自定义字体/复杂排版的）比这次开发时用的简单测试PDF慢得多，
+    # 不包一层to_thread会卡住整个事件循环——跟_webm_to_wav那处音频转码是
+    # 同一类坑，这个项目已经有过教训，这里补上同样的处理。
+    try:
+        sections = await asyncio.to_thread(
+            _pdf_bytes_to_sections if ext == ".pdf" else _txt_bytes_to_sections, raw
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"文件解析失败: {e}")
 
     book_title = title.strip() or os.path.splitext(filename)[0] or "未命名"
     book_author = author.strip()
 
     file_path = os.path.join(EPUB_STORAGE_DIR, f"{uuid.uuid4().hex}.epub")
     try:
-        chapter_titles = _build_epub_from_sections(file_path, book_title, book_author, sections)
+        chapter_titles = await asyncio.to_thread(
+            _build_epub_from_sections, file_path, book_title, book_author, sections
+        )
     except Exception as e:
         if os.path.exists(file_path):
             os.remove(file_path)
