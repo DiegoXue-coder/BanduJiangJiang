@@ -10,6 +10,7 @@ asyncpg>=0.30.0
 EbookLib>=0.18
 beautifulsoup4>=4.12.0
 pypdf>=5.0.0
+pdfplumber>=0.11.0
 python-multipart>=0.0.9
 pyjwt>=2.9.0
 bcrypt>=4.2.0

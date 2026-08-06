@@ -154,7 +154,9 @@ export async function importFile(fileUri, fileName, mimeType, title = '') {
   return appFetch('/app/books/import-file', {
     method: 'POST',
     body: formData,
-    timeoutMs: 90_000, // PDF解析可能比其他接口慢不少，给足够的余量，但不能无限等
+    // 阶段十八加了pdfplumber表格识别后实测变慢不少（212页的书本地测试
+    // 光表格扫描这一步就要80+秒），90秒对大部头PDF不够用，调到180秒。
+    timeoutMs: 180_000,
   });
 }
 

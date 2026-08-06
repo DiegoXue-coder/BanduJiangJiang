@@ -34,6 +34,7 @@ import httpx
 import ebooklib
 from ebooklib import epub
 from pypdf import PdfReader
+import pdfplumber
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
@@ -923,6 +924,16 @@ def _merge_short_paragraphs(paragraphs: list[str], min_chars: int = MIN_CHAPTER_
     merged = []
     buffer = ""
     for p in paragraphs:
+        # 阶段十八：表格HTML块（_TABLE_MARKER开头）和图片数据块（_IMAGE_
+        # MARKER开头）必须原样单独成一项，不能被这里当成普通段落跟前后
+        # 文字合并——合并会把HTML/base64数据拆散拼进别的段落字符串里，
+        # _build_epub_from_sections按\\n展开<p>标签时就整个错乱了。
+        if p.startswith(_TABLE_MARKER) or p.startswith(_IMAGE_MARKER):
+            if buffer:
+                merged.append(buffer)
+                buffer = ""
+            merged.append(p)
+            continue
         buffer = f"{buffer}\n{p}" if buffer else p
         if len(buffer) >= min_chars:
             merged.append(buffer)
@@ -955,13 +966,42 @@ def _build_epub_from_sections(dst_path: str, title: str, author: str, chapters: 
 
     chapter_titles = []
     items = []
+    image_seq = 0
     for idx, (chapter_title, paragraphs) in enumerate(chapters):
         chapter_titles.append(chapter_title)
-        paragraphs_html = "".join(
-            f"<p>{html.escape(sub)}</p>"
-            for p in paragraphs
-            for sub in p.split("\n") if sub.strip()
-        )
+        html_parts = []
+        for p in paragraphs:
+            for sub in p.split("\n"):
+                if not sub.strip():
+                    continue
+                if sub.startswith(_TABLE_MARKER):
+                    # 阶段十八：表格HTML是_table_rows_to_html已经内部转义过
+                    # 单元格内容自己拼好的<table>，原样插入，不能再套一层
+                    # <p>或者再html.escape一次（会把标签本身也转义掉，表格
+                    # 就没法渲染了）。
+                    html_parts.append(sub[len(_TABLE_MARKER):])
+                elif sub.startswith(_IMAGE_MARKER):
+                    # 格式："{ext}:{base64数据}"，跟_extract_page_text_with_
+                    # tables里拼marker的格式对应。单张图片解码/写入失败不
+                    # 影响其他内容，跳过这一张就好，不能让整本书导入失败。
+                    try:
+                        payload = sub[len(_IMAGE_MARKER):]
+                        ext, b64data = payload.split(":", 1)
+                        img_bytes = base64.b64decode(b64data)
+                        image_seq += 1
+                        img_name = f"images/img_{image_seq:04d}.{ext}"
+                        img_item = epub.EpubImage(
+                            uid=f"img{image_seq}", file_name=img_name,
+                            media_type=_IMAGE_EXT_MEDIA_TYPE.get(ext, "image/jpeg"),
+                            content=img_bytes,
+                        )
+                        new_book.add_item(img_item)
+                        html_parts.append(f'<img src="{img_name}" alt="" />')
+                    except Exception:
+                        continue
+                else:
+                    html_parts.append(f"<p>{html.escape(sub)}</p>")
+        paragraphs_html = "".join(html_parts)
         c = epub.EpubHtml(title=chapter_title, file_name=f"chap_{idx:03d}.xhtml", lang="zh")
         c.content = f"<h1>{html.escape(chapter_title)}</h1>{paragraphs_html}"
         new_book.add_item(c)
@@ -982,6 +1022,17 @@ def _build_epub_from_sections(dst_path: str, title: str, author: str, chapters: 
 # 分章"——一本书大概几十章的量级，不是几百章。
 FALLBACK_CHAPTER_CHARS = 3000
 
+def _paragraph_weight(p: str) -> int:
+    """算章节大小时，表格/图片这类marker段落不能按它原始字符串长度算——
+    图片是base64编码塞进字符串的，一张几十KB的图片编码后是几万字符，会把
+    "这一章有多长"这个统计值算得虚高，导致明明没多少正文的章节被误判成
+    "超大章节"提前强制拆分（真实测试发现的现象：一本书加了图片提取之后
+    章节数从33变成57，比没有图片时明显碎）。marker段落统一按固定权重算，
+    跟一段普通正文的量级相当，不再被它编码后的字节长度带偏。"""
+    if p.startswith(_TABLE_MARKER) or p.startswith(_IMAGE_MARKER):
+        return 200
+    return len(p)
+
 def _group_paragraphs_by_size(paragraphs: list[str], target_chars: int) -> list[list[str]]:
     """把段落列表按目标字数分组，每组尽量接近target_chars，用于没有真实章节
     结构时的兜底分章。"""
@@ -990,7 +1041,7 @@ def _group_paragraphs_by_size(paragraphs: list[str], target_chars: int) -> list[
     current_len = 0
     for p in paragraphs:
         current.append(p)
-        current_len += len(p)
+        current_len += _paragraph_weight(p)
         if current_len >= target_chars:
             groups.append(current)
             current, current_len = [], 0
@@ -1091,6 +1142,139 @@ def _rejoin_pdf_lines_into_paragraphs(full_text: str) -> list[str]:
         paragraphs.append(current)
     return paragraphs
 
+# ── 阶段十八：PDF表格识别 + 图片提取 ────────────────────────────────
+# pdfplumber能分析文字/线条的坐标位置识别表格网格，pypdf做不到（只能拿到
+# 一串顺序文字，表格的行列关系在提取时就已经丢失，真机反馈过的"表格变成
+# 一坨乱序文字"就是这个原因）。用两份真实PDF实测过：pdfplumber的表格识别
+# 可靠程度因书而异——《人口与日本经济》里的表格没有可见边框线（纯靠文字
+# 对齐排版），默认策略识别不到，换成"按文字位置猜列"的策略又会在普通正文
+# 段落上产生大量误判（把正常段落硬拆成假表格）；《后资本主义时代》有真实
+# 带边框的表格，能比较可靠地识别出来，但个别页面结构依然识别得不理想。
+# 结论：不能无条件相信识别结果，必须过一道质量门槛，识别质量不过关就退回
+# 纯文字提取（阶段十八验收标准明确允许的兜底），不能因为"技术上识别到了
+# 东西"就不管质量硬套一个可能是错的表格结构。
+_TABLE_MARKER = "\x00TABLE\x00"
+
+def _is_valid_pdfplumber_table(rows: list[list]) -> bool:
+    """质量门槛：至少2行、至少2列，且大部分格子不是空的——过滤掉"只识别出
+    1列"或者"一堆空格子"这类实际上是识别失败、不是真表格的情况。"""
+    if len(rows) < 2:
+        return False
+    col_counts = [len(r) for r in rows]
+    if max(col_counts) < 2:
+        return False
+    total_cells = sum(col_counts)
+    non_empty = sum(1 for r in rows for c in r if c and str(c).strip())
+    return total_cells > 0 and (non_empty / total_cells) >= 0.4
+
+def _table_rows_to_html(rows: list[list]) -> str:
+    """把pdfplumber提取出的表格数据转成真正的HTML<table>，单元格内容做HTML
+    转义（复用跟正文一样的转义逻辑，避免表格里出现&/</>把XHTML弄坏——阶段
+    十五已经踩过一次这个坑，这里不能再犯）。"""
+    html_rows = []
+    for row in rows:
+        cells = "".join(f"<td>{html.escape((c or '').strip())}</td>" for c in row)
+        html_rows.append(f"<tr>{cells}</tr>")
+    return f"<table>{''.join(html_rows)}</table>"
+
+def _extract_page_text_with_tables(pypdf_page, plumber_page, page_idx: int = -1) -> str:
+    """单页的文字+表格+图片提取：先用pdfplumber找表格并过质量门槛，通过的
+    表格转成HTML、从正文区域裁掉（避免表格内容在正文里以乱序文字的形式
+    重复出现一遍）；没有通过质量门槛的表格，正文部分完全不受影响，照常
+    走原有的pypdf纯文字提取（对表格所在区域来说，退化成跟以前一样的效果，
+    不会比原来更差）。图片提取跟表格是并行的独立步骤，互不影响，任何一个
+    失败都不影响另一个。"""
+    try:
+        found_tables = plumber_page.find_tables()
+    except Exception:
+        found_tables = []
+
+    valid_tables = []
+    for t in found_tables:
+        try:
+            rows = t.extract()
+        except Exception:
+            continue
+        if _is_valid_pdfplumber_table(rows):
+            valid_tables.append((t.bbox, rows))
+
+    if valid_tables:
+        try:
+            cropped = plumber_page
+            for bbox, _ in valid_tables:
+                cropped = cropped.outside_bbox(bbox)
+            prose = cropped.extract_text() or ""
+        except Exception:
+            # 裁剪失败就整页退回pypdf纯文字提取，表格质量门槛通过与否不重要
+            # 了，保底不能比"什么都不做"更差；图片提取不受影响，照常进行。
+            try:
+                prose = pypdf_page.extract_text() or ""
+            except Exception:
+                prose = ""
+            valid_tables = []
+    else:
+        try:
+            prose = pypdf_page.extract_text() or ""
+        except Exception:
+            prose = ""
+
+    blocks = []
+    # 每个表格/图片单独包一层空行，确保在后续的段落识别里被当成独立的一段，
+    # 不会被前后的正文段落吞并合并（_merge_short_paragraphs对这两种marker
+    # 开头的"段落"都有特殊处理，见该函数注释）。
+    for _, rows in valid_tables:
+        blocks.append(_TABLE_MARKER + _table_rows_to_html(rows))
+    for ext, data in _extract_page_images(pypdf_page, page_idx):
+        blocks.append(f"{_IMAGE_MARKER}{ext}:{base64.b64encode(data).decode('ascii')}")
+
+    if not blocks:
+        return prose
+    return f"{prose}\n\n" + "\n\n".join(blocks)
+
+# 图片提取：跟表格是同一个模式（marker+asyncio.to_thread+质量门槛），但图片
+# 的过滤规则是用两份真实PDF实测调出来的，不是凭空定的：
+# 1. 跳过第0页（首页）的图片——实测发现《人口与日本经济》第1页嵌了一张
+#    11262x4900像素、2.26MB的图片，打开一看是整本书的护封平铺展开图（封面+
+#    书脊+封底），不是正文插图，直接嵌进正文阅读体验会很奇怪。首页几乎总是
+#    封面/版权页，不太可能有真正需要嵌入正文的内容插图。
+# 2. 跳过小于_MIN_IMAGE_BYTES的图片——实测发现有些PDF里嵌了67字节的占位
+#    小图（"~0~.png"这类文件名，一眼假），太小不可能是真实插图。
+# 3. 跳过大于_MAX_IMAGE_BYTES的图片——超大图片大概率是封面/整页背景这类
+#    非正文插图（同上那张2.26MB封面图），顺带也避免生成的EPUB文件体积失控。
+# 对比过一张17KB、1171x619的正常图片，打开是真实的GDP增长曲线图——这类
+# 尺寸合理的图片才是这次要抓的目标。
+_IMAGE_MARKER = "\x00IMAGE\x00"
+_MIN_IMAGE_BYTES = 2 * 1024        # 2KB
+_MAX_IMAGE_BYTES = 2 * 1024 * 1024  # 2MB
+
+def _extract_page_images(pypdf_page, page_idx: int) -> list[tuple[str, bytes]]:
+    """返回这一页里通过过滤规则的位图图片：[(扩展名, 原始字节), ...]。矢量
+    图形/图表pypdf提取不到，不强求（阶段十八验收标准明确排除范围）。"""
+    if page_idx == 0:
+        return []
+    images = []
+    try:
+        page_images = list(pypdf_page.images)
+    except Exception:
+        return []
+    for img in page_images:
+        try:
+            data = img.data
+        except Exception:
+            continue
+        if not data or len(data) < _MIN_IMAGE_BYTES or len(data) > _MAX_IMAGE_BYTES:
+            continue
+        ext = (os.path.splitext(img.name or "")[1].lstrip(".").lower() or "jpg")
+        if ext not in ("jpg", "jpeg", "png", "gif", "bmp"):
+            ext = "jpg"
+        images.append((ext, data))
+    return images
+
+_IMAGE_EXT_MEDIA_TYPE = {
+    "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+    "gif": "image/gif", "bmp": "image/bmp",
+}
+
 _CHAPTER_HEADING_RE = re.compile(
     r"^(第[〇零一二三四五六七八九十百千0-9]{1,8}[章回篇卷部节讲]|"
     r"(Chapter|CHAPTER)\s*\d+|"
@@ -1168,7 +1352,7 @@ _MAX_CHAPTER_CHARS = int(FALLBACK_CHAPTER_CHARS * 2.5)
 def _subdivide_oversized_chapters(chapters: list[tuple[str, list[str]]]) -> list[tuple[str, list[str]]]:
     result: list[tuple[str, list[str]]] = []
     for title, paragraphs in chapters:
-        total = sum(len(p) for p in paragraphs)
+        total = sum(_paragraph_weight(p) for p in paragraphs)
         if total <= _MAX_CHAPTER_CHARS:
             result.append((title, paragraphs))
             continue
@@ -1199,12 +1383,35 @@ def _pdf_bytes_to_sections(raw: bytes) -> list[tuple[str, list[str]]]:
             detail=f"PDF页数过多（{len(reader.pages)}页，上限{MAX_PDF_PAGES}页），本次原型暂不支持，请拆分后再试",
         )
 
+    # 阶段十八：逐页额外用pdfplumber找表格（跟pypdf各司其职，pypdf管纯文字，
+    # pdfplumber管表格结构），失败就整个退回纯pypdf提取，不让新功能影响老
+    # 功能的稳定性（前一阶段已经稳定跑通的段落合并/章节切分/乱码过滤都在
+    # 这条纯文字提取的下游，退回去等于完全没受影响）。
+    try:
+        plumber_pdf = pdfplumber.open(io.BytesIO(raw))
+        plumber_pages = plumber_pdf.pages
+    except Exception:
+        plumber_pdf = None
+        plumber_pages = []
+
     page_texts = []
-    for page in reader.pages:
+    for idx, page in enumerate(reader.pages):
+        if plumber_pages and idx < len(plumber_pages):
+            try:
+                page_texts.append(_extract_page_text_with_tables(page, plumber_pages[idx], page_idx=idx))
+                continue
+            except Exception:
+                pass
         try:
             page_texts.append(page.extract_text() or "")
         except Exception:
             page_texts.append("")
+
+    if plumber_pdf is not None:
+        try:
+            plumber_pdf.close()
+        except Exception:
+            pass
 
     full_text = "\n\n".join(page_texts)
     # 扫描版/图片版PDF提取不出文字（或只有寥寥几个字的页眉页脚），用总字数
