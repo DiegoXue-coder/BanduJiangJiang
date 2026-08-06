@@ -638,7 +638,14 @@ def _webm_to_wav(audio_bytes: bytes) -> bytes:
     resampler  = av.AudioResampler(format="s16", layout="mono", rate=16000)
     in_cont    = av.open(in_io)
     out_cont   = av.open(out_io, "w", format="wav")
-    out_stream = out_cont.add_stream("pcm_s16le", rate=16000)
+    # 根因就在这一行：resampler已经把帧转成单声道了，但add_stream不显式指定
+    # layout时，PyAV/FFmpeg给pcm_s16le编码器的默认声道数是2（立体声），不会
+    # 报错，会把单声道数据错误地按双声道容器写出去。下游拿到的WAV文件头
+    # nchannels=2，但内容其实是单声道数据被强行塞进立体声容器——相当于把
+    # 该连续的采样点两两拆开当成左右声道，腾讯云那边收到的PCM字节顺序全乱了，
+    # 表现正是真机反馈的这种"波形能量看着正常（削波/静音诊断都测不出来），
+    # 但识别不出内容或识别出乱码"——用真实失败样本下载下来看WAV头才验证到。
+    out_stream = out_cont.add_stream("pcm_s16le", rate=16000, layout="mono")
     try:
         for frame in in_cont.decode(audio=0):
             for rf in resampler.resample(frame):
