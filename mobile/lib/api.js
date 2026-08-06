@@ -286,18 +286,37 @@ export function getTtsPlayUrl(text, voice = 'zh-CN-XiaoxiaoNeural') {
 }
 
 export async function transcribeAudio(fileUri, uploadAsync, FileSystemUploadType) {
-  const result = await uploadAsync(`${API_BASE}/transcribe`, fileUri, {
-    httpMethod: 'POST',
-    uploadType: FileSystemUploadType.BINARY_CONTENT,
-    headers: {
-      'Content-Type': 'audio/m4a',
-      'x-extension-token': getExtToken(),
-    },
-  });
+  // 真机反馈过好几次"未识别到内容"，但同一时间段后端日志完全没有对应
+  // 请求记录——怀疑请求可能压根没真正打到后端（网络层面被拦截/超时返回
+  // 了什么奇怪的东西），"未识别到内容"这条提示原来是"text为空就默认这句"，
+  // 掩盖了背后真实发生的情况。改成诊断信息直接暴露在报错文案里，不用再
+  // 翻后端日志才能看出卡在哪一步。
+  let result;
+  try {
+    result = await uploadAsync(`${API_BASE}/transcribe`, fileUri, {
+      httpMethod: 'POST',
+      uploadType: FileSystemUploadType.BINARY_CONTENT,
+      headers: {
+        'Content-Type': 'audio/m4a',
+        'x-extension-token': getExtToken(),
+      },
+    });
+  } catch (e) {
+    throw new Error(`上传失败（网络层面）：${e.message}`);
+  }
   if (result.status && result.status >= 400) {
     throw new Error(`HTTP ${result.status} ${result.body || ''}`.trim());
   }
-  return JSON.parse(result.body).text;
+  let parsed;
+  try {
+    parsed = JSON.parse(result.body);
+  } catch (e) {
+    throw new Error(`诊断：status=${result.status} body长度=${(result.body || '').length} body预览="${(result.body || '').slice(0, 80)}"`);
+  }
+  if (!parsed.text) {
+    throw new Error(`诊断：status=${result.status} 后端返回但text为空，body="${(result.body || '').slice(0, 120)}"`);
+  }
+  return parsed.text;
 }
 
 export async function saveQaHistory({ bookId, bookTitle, chapterTitle, question, answer, selection = '', cfiRange = '' }) {
