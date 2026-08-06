@@ -979,6 +979,7 @@ def _txt_bytes_to_sections(raw: bytes) -> list[tuple[str, list[str]]]:
     return [(f"第{idx + 1}节", g) for idx, g in enumerate(groups)]
 
 _PDF_TERMINAL_PUNCT = "。！？」』”’.!?\""
+_REAL_CHAR_RE = re.compile(r"[一-鿿㐀-䶿A-Za-z0-9]")
 
 def _rejoin_pdf_lines_into_paragraphs(full_text: str) -> list[str]:
     """pypdf逐页提取时，PDF是固定排版格式，屏幕上的每一行都会被单独切一个
@@ -991,7 +992,17 @@ def _rejoin_pdf_lines_into_paragraphs(full_text: str) -> list[str]:
     段落边界，行与行之间默认当成同一段落的排版换行、直接拼接（不留换行符）
     ——对齐验收标准里"只在真正的段落边界切分"这条要求。中文书排版习惯每段
     首行缩进两个全角空格，是最可靠的信号；没有缩进信号时退回"上一行以句末
-    标点结尾"这条更弱的启发式。"""
+    标点结尾"这条更弱的启发式。
+
+    真机反馈过一种"一整行全是逗号引号"的乱码（比如`,',...,'',`），用真实
+    PDF文件查证过：这不是pypdf的提取问题——换`pdfplumber`重新提取同一页，
+    结果完全一样，说明是PDF这处内嵌字体本身编码异常，任何提取工具都读不出
+    真实内容，没法恢复。但这类整行都是标点符号、一个中文/字母/数字都没有
+    的行有个很干净的识别信号：真实正文不可能出现"一整行零真实字符"这种
+    情况。直接整行跳过（当成排版换行的一部分，不留痕迹地拼接前后文），
+    去掉之后前后两截能正常连成一句完整话（实测"人口的增"+[垃圾行]+"加和
+    提高生活水平的技术进步了" → 去掉垃圾行后正好是完整句子），比让用户
+    读到一坨看不懂的符号体验好。"""
     raw_lines = full_text.split("\n")
     paragraphs: list[str] = []
     current = ""
@@ -1003,6 +1014,10 @@ def _rejoin_pdf_lines_into_paragraphs(full_text: str) -> list[str]:
             if current:
                 paragraphs.append(current)
                 current = ""
+            continue
+        if not _REAL_CHAR_RE.search(stripped):
+            # 整行没有任何中文/字母/数字，是提取出来的乱码噪音，直接丢弃，
+            # 不当成段落边界（前后文本来是同一句话的两半）。
             continue
 
         is_indented = bool(re.match(r"^(　|[ \t]{2,})", line))
