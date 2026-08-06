@@ -702,34 +702,42 @@ async def _tencent_transcribe(wav_bytes: bytes) -> str:
     # 包一层整体超时，卡住时给出我们自己的明确错误，不让请求无限挂起。
     async def _run() -> str:
         segments: dict[int, str] = {}
+        t_start = time.time()
         async with websockets.connect(url, open_timeout=10) as ws:
-            # 真机反馈坐实过的坑：原来把整段PCM一口气发完，腾讯云限速"1秒内
-            # 最多接收3秒时长音频"，一段8~12秒的录音几乎瞬间发完，远超3倍速，
-            # 直接报错code=4000拒绝——之前排查到的502本质就是这个错误被我们
-            # 自己的try/except包成502抛出，不是网关超时。按发送节奏限速，
-            # 控制在2.5倍速以内（留安全余量，不顶到3倍的硬上限）。
+            print(f"[腾讯云ASR诊断] 连接建立 +{time.time()-t_start:.2f}s，PCM长度={len(pcm)}字节≈{len(pcm)/32000:.1f}秒")
             SEND_SPEED_FACTOR = 2.5
             BYTES_PER_SECOND = 32000  # 16kHz * 16bit * mono
             start_wall = time.time()
             audio_seconds_sent = 0.0
-            for i in range(0, len(pcm), CHUNK):
-                await ws.send(pcm[i:i + CHUNK])
-                audio_seconds_sent += len(pcm[i:i + CHUNK]) / BYTES_PER_SECOND
-                min_wall_elapsed = audio_seconds_sent / SEND_SPEED_FACTOR
-                wall_elapsed = time.time() - start_wall
-                if wall_elapsed < min_wall_elapsed:
-                    await asyncio.sleep(min_wall_elapsed - wall_elapsed)
+            try:
+                for i in range(0, len(pcm), CHUNK):
+                    await ws.send(pcm[i:i + CHUNK])
+                    audio_seconds_sent += len(pcm[i:i + CHUNK]) / BYTES_PER_SECOND
+                    min_wall_elapsed = audio_seconds_sent / SEND_SPEED_FACTOR
+                    wall_elapsed = time.time() - start_wall
+                    if wall_elapsed < min_wall_elapsed:
+                        await asyncio.sleep(min_wall_elapsed - wall_elapsed)
+                print(f"[腾讯云ASR诊断] 发送完毕 +{time.time()-t_start:.2f}s")
+            except websockets.ConnectionClosed as e:
+                print(f"[腾讯云ASR诊断] 发送阶段断连 +{time.time()-t_start:.2f}s rcvd={e.rcvd!r} sent={e.sent!r}")
+                raise
             await ws.send(json.dumps({"type": "end"}))
+            print(f"[腾讯云ASR诊断] 已发end信号 +{time.time()-t_start:.2f}s")
 
-            async for raw in ws:
-                msg = json.loads(raw)
-                if msg.get("code", 0) != 0:
-                    raise RuntimeError(f"腾讯云ASR错误 {msg.get('code')}: {msg.get('message')}")
-                result = msg.get("result")
-                if result and result.get("slice_type") == 2:
-                    segments[result.get("index", 0)] = result.get("voice_text_str", "")
-                if msg.get("final") == 1:
-                    break
+            try:
+                async for raw in ws:
+                    print(f"[腾讯云ASR诊断] 收到消息 +{time.time()-t_start:.2f}s: {raw}")
+                    msg = json.loads(raw)
+                    if msg.get("code", 0) != 0:
+                        raise RuntimeError(f"腾讯云ASR错误 {msg.get('code')}: {msg.get('message')}")
+                    result = msg.get("result")
+                    if result and result.get("slice_type") == 2:
+                        segments[result.get("index", 0)] = result.get("voice_text_str", "")
+                    if msg.get("final") == 1:
+                        break
+            except websockets.ConnectionClosed as e:
+                print(f"[腾讯云ASR诊断] 接收阶段断连 +{time.time()-t_start:.2f}s rcvd={e.rcvd!r} sent={e.sent!r}")
+                raise
         return "".join(segments[i] for i in sorted(segments))
 
     try:
