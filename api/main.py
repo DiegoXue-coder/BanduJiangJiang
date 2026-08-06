@@ -127,11 +127,18 @@ async def init_db():
             )
         """)
         # 阶段十五：PDF/TXT导入原型——导入的书跟预置书库要能区分开（验收标准
-        # 要求，不需要复杂的个人书库管理界面，一个标签字段够用）。书本仍然是
-        # 全体用户共享可见的同一份书架（不按user_id过滤，见app_get_library
-        # 注释），source只是展示上的"这是谁导入的普通标记"，不是权限隔离。
+        # 要求，不需要复杂的个人书库管理界面，一个标签字段够用）。
         await conn.execute(
             "ALTER TABLE books ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'preset'"
+        )
+        # 阶段十五（续，2026-08-06）：导入书支持删除，需要知道"是谁导入的"
+        # 才能做权限校验（不能让用户A删掉用户B导入的书）。预置书（source=
+        # 'preset'）这个字段留空；导入的书写入实际导入者的user_id。同一批
+        # 改动把app_get_library的可见性规则也改了：预置书全体可见，导入的
+        # 书只对导入者本人可见（不再是"source只是展示标记，不做权限隔离"
+        # 这个旧注释描述的行为，见app_get_library最新实现）。
+        await conn.execute(
+            "ALTER TABLE books ADD COLUMN IF NOT EXISTS imported_by BIGINT REFERENCES users(id)"
         )
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS chapters (
@@ -841,6 +848,54 @@ def _txt_bytes_to_sections(raw: bytes) -> list[str]:
         raise HTTPException(status_code=400, detail="TXT文件内容为空或无法解析")
     return _merge_short_paragraphs(paragraphs)
 
+_PDF_TERMINAL_PUNCT = "。！？」』”’.!?\""
+
+def _rejoin_pdf_lines_into_paragraphs(full_text: str) -> list[str]:
+    """pypdf逐页提取时，PDF是固定排版格式，屏幕上的每一行都会被单独切一个
+    `\\n`，不是真正的段落边界——原样按`\\n`切段落，会把"排版换行"误判成
+    "段落换行"，导致跨行的词/人名被硬生生切成两截（真机反馈"阿里吉（Giovanni"
+    被截断成两段，根因就是这个：原文里"Giovanni"后面正好是PDF的排版换行，
+    不是真正的段落结尾）。
+
+    改成基于"空行 / 首行缩进 / 上一行以句末标点结尾"这几个信号识别真正的
+    段落边界，行与行之间默认当成同一段落的排版换行、直接拼接（不留换行符）
+    ——对齐验收标准里"只在真正的段落边界切分"这条要求。中文书排版习惯每段
+    首行缩进两个全角空格，是最可靠的信号；没有缩进信号时退回"上一行以句末
+    标点结尾"这条更弱的启发式。"""
+    raw_lines = full_text.split("\n")
+    paragraphs: list[str] = []
+    current = ""
+
+    for raw_line in raw_lines:
+        line = raw_line.rstrip()
+        stripped = line.strip()
+        if not stripped:
+            if current:
+                paragraphs.append(current)
+                current = ""
+            continue
+
+        is_indented = bool(re.match(r"^(　|[ \t]{2,})", line))
+        prev_ends_paragraph = bool(current) and current[-1] in _PDF_TERMINAL_PUNCT
+
+        if not current:
+            current = stripped
+        elif is_indented or prev_ends_paragraph:
+            paragraphs.append(current)
+            current = stripped
+        else:
+            # 排版硬换行，当成同一段落拼接：中文之间不加空格；两端都是ASCII
+            # 字母/数字时补一个空格，避免"the quick"+"brown"拼成"the quickbrown"
+            sep = ""
+            prev_char, next_char = current[-1], stripped[0]
+            if prev_char.isascii() and prev_char.isalnum() and next_char.isascii() and next_char.isalnum():
+                sep = " "
+            current = f"{current}{sep}{stripped}"
+
+    if current:
+        paragraphs.append(current)
+    return paragraphs
+
 def _pdf_bytes_to_sections(raw: bytes) -> list[str]:
     """只支持文字版PDF（可选中文字），扫描版/图片版PDF提取不到文字，明确报错，
     不做OCR（阶段十五验收标准明确排除OCR范围）。"""
@@ -880,9 +935,7 @@ def _pdf_bytes_to_sections(raw: bytes) -> list[str]:
             detail="无法从这份PDF提取到足够的文字，可能是扫描版/图片版PDF——本次原型不支持OCR，暂不能导入",
         )
 
-    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", full_text) if p.strip()]
-    if not paragraphs:
-        paragraphs = [line.strip() for line in full_text.split("\n") if line.strip()]
+    paragraphs = _rejoin_pdf_lines_into_paragraphs(full_text)
     return _merge_short_paragraphs(paragraphs)
 
 # ── 微信读书 Skill API ─────────────────────────────────────────────
@@ -1517,15 +1570,18 @@ async def _insert_book_and_chapters(
 ) -> BookOut:
     """把已经落地成EPUB文件的一本书写入 books + chapters，两个入口共用：
     直接上传EPUB（app_import_book）、PDF/TXT转换后落地EPUB（app_import_file，
-    阶段十五）。"""
+    阶段十五）。source='imported'时把imported_by写成当前用户，用于阶段十五
+    （续）的删除权限校验+书架可见性过滤；source='preset'（管理/内容筹备
+    脚本用）时imported_by留空。"""
+    imported_by = user_id if source == "imported" else None
     pool = await get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
             book_row = await conn.fetchrow("""
-                INSERT INTO books (user_id, title, author, file_path, source)
-                VALUES ($1, $2, $3, $4, $5)
+                INSERT INTO books (user_id, title, author, file_path, source, imported_by)
+                VALUES ($1, $2, $3, $4, $5, $6)
                 RETURNING id, added_at
-            """, user_id, title, author, file_path, source)
+            """, user_id, title, author, file_path, source, imported_by)
             book_id = book_row["id"]
 
             for idx, chapter_title in enumerate(chapter_titles):
@@ -1705,8 +1761,8 @@ async def app_delete_book(book_id: int, user_id: int = CurrentUser):
     qa_history.book_id 是普通 TEXT 字段（阶段一为了兼容 Chrome 扩展那边的
     字符串型书籍ID，没有建外键约束），删 books 不会级联到它，这里手动补上。
 
-    书本是共享预置书库，不按"是不是这个用户导入的"做权限限制（见
-    app_get_library 注释），跟 app_replace_book 同样的权衡。
+    这个接口没有权限校验，谁都能删任何一本书（包括预置书库）——是特意保留
+    的管理操作，不是产品功能，见下面 app_delete_my_book 对比。
     """
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -1724,14 +1780,43 @@ async def app_delete_book(book_id: int, user_id: int = CurrentUser):
         pass
     return {"deleted": True, "book_id": book_id}
 
+@app.delete("/app/books/{book_id}/mine")
+async def app_delete_my_book(book_id: int, user_id: int = CurrentUser):
+    """阶段十五（续，2026-08-06）：用户在书架上删除自己导入的书，对应前端
+    真正的删除按钮。**跟上面 app_delete_book 是两个不同的接口，不要合并**——
+    那个是无权限校验的管理维护接口，直接接前端会让用户A能删掉用户B导入的
+    书（books表全体用户共享，见app_get_library注释），是真实的越权风险。
+
+    这里只允许删 source='imported' 且 imported_by 是当前登录用户的书；
+    预置书库（source='preset'）一律拒绝，不管是谁在调。"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            book = await conn.fetchrow(
+                "SELECT file_path, source, imported_by FROM books WHERE id = $1", book_id
+            )
+            if not book:
+                raise HTTPException(status_code=404, detail="书本不存在")
+            if book["source"] != "imported" or book["imported_by"] != user_id:
+                raise HTTPException(status_code=403, detail="只能删除自己导入的书")
+            await conn.execute("DELETE FROM qa_history WHERE book_id = $1", str(book_id))
+            await conn.execute("DELETE FROM books WHERE id = $1", book_id)
+    try:
+        os.remove(book["file_path"])
+    except OSError:
+        pass
+    return {"deleted": True, "book_id": book_id}
+
 @app.get("/app/books", response_model=list[BookOut])
 async def app_get_library(user_id: int = CurrentUser):
-    """书架：返回全部预置书库（每个登录用户看到的是同一套公版经典，不是
-    "各自拥有的书"——产品定位就是给所有用户提供一样的书库体验，只有划线/
-    进度/问答这些"读的过程"才是每个用户各自独立的），附带当前用户各自的
-    阅读进度。阶段十三加真实多用户之前，这里错误地把books按user_id过滤了，
-    导致新注册用户书架是空的——书本本身不该按用户隔离，只有"读到哪了"这种
-    个人数据该隔离。"""
+    """书架：预置书库（source='preset'）对所有登录用户可见——产品定位是
+    "所有人共享同一套公版经典"，不是"各自拥有的书"，只有划线/进度/问答这些
+    "读的过程"才按用户隔离。阶段十三加真实多用户之前，这里错误地把全部
+    books按user_id过滤了，导致新注册用户书架是空的，那是bug，已修复。
+
+    阶段十五（续，2026-08-06）新增一条**有意为之**的例外：用户自己导入的书
+    （source='imported'）只对导入者本人可见——跟上面"预置书不按用户隔离"
+    不是同一件事，不要把这条过滤条件当成阶段十三那个bug的回归再删掉。"""
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
@@ -1740,6 +1825,7 @@ async def app_get_library(user_id: int = CurrentUser):
             FROM books b
             LEFT JOIN reading_progress rp
                    ON rp.book_id = b.id AND rp.user_id = $1
+            WHERE b.source = 'preset' OR b.imported_by = $1
             ORDER BY b.added_at DESC
         """, user_id)
     return [BookOut(**dict(r)) for r in rows]
