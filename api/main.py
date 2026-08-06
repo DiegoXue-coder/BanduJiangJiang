@@ -666,15 +666,15 @@ def _webm_to_wav(audio_bytes: bytes) -> bytes:
 
 # ── 腾讯云实时语音识别（WebSocket，大模型引擎）──────────────────────
 #
+# 2026-08-06起：这套WS代码不再是/transcribe的热路径（被下面的"一句话
+# 识别"REST接口取代，理由见下面那段注释），但特意保留没删——这个WS协议
+# 本身是给"边说边传、要实时中间结果"的真流式场景设计的，以后做"边听书
+# 边打断说话"这种需要连续监听的功能时，还是得用这套协议对接真实的麦克风
+# 流，到时候直接把这里的签名和消息解析逻辑接回真实数据流即可，不用重写。
+#
 # 官方SDK（tencentcloud-speech-sdk-python）只在GitHub发布、不在PyPI上，
 # 直接手写WebSocket客户端，照官方文档的签名算法+消息协议实现，不引入
 # 额外的vendored依赖。
-#
-# 手机端"录完整段音频再一次性上传"这个流程完全不变——这是腾讯云"实时
-# 语音识别"协议本身的用法：把一整段已经录好的音频，从后端这一层用
-# write()式的分片发送喂进去，等最后一条"识别完成"消息拿到文本再返回，
-# 跟真正的"边说边发"没有本质区别，只是数据来源是一个已经录完的文件，
-# 不是麦克风实时流。对手机端来说，接口请求/响应格式完全没变。
 TENCENT_ASR_ENGINE = "16k_zh_en"  # 大模型1.0版中文引擎（16k采样率）
 
 def _tencent_asr_sign(query_string: str) -> str:
@@ -737,12 +737,6 @@ async def _tencent_transcribe(wav_bytes: bytes) -> str:
             await ws.send(json.dumps({"type": "end"}))
 
             async for raw in ws:
-                # 临时诊断：真机反馈"识别失败但PCM峰值93.9%（明显有内容）"，
-                # 之前只挑slice_type==2的结果攒起来，如果腾讯云返回的结构跟
-                # 预期不一致（字段名、slice_type取值、或final消息本身就带着
-                # 被漏掉的文本），现有逻辑会静默吞掉，看不出到底哪一步丢的。
-                # 打印每条原始消息，下次真机复现时直接看真实数据结构。排查完就删。
-                print(f"[腾讯云ASR原始消息] {raw[:400]}")
                 msg = json.loads(raw)
                 if msg.get("code", 0) != 0:
                     raise RuntimeError(f"腾讯云ASR错误 {msg.get('code')}: {msg.get('message')}")
@@ -766,6 +760,82 @@ async def _tencent_transcribe(wav_bytes: bytes) -> str:
             last_error = e
             print(f"[腾讯云ASR] 第{attempt}次连接被意外中断，{'重试' if attempt < MAX_ATTEMPTS else '放弃'}")
     raise RuntimeError(f"语音识别连接不稳定，已重试{MAX_ATTEMPTS}次仍失败，请稍后再试（{last_error}）")
+
+# ── 腾讯云一句话识别（REST，标准引擎）───────────────────────────────
+#
+# 上面WS实时接口有"最快按3倍实时速率发送"的限速（本来是给"边说边传"的
+# 真流式场景设计的），但手机端一直是"整段录完再一次性上传"，拿WS硬套
+# 这个用法，光是限速等待就占掉一大截耗时（15秒录音要先等6秒才能把音频
+# "喂"完）。"一句话识别"（SentenceRecognition）是腾讯云专门给"已经有
+# 一段完整音频，要尽快拿到结果"这种场景设计的REST同步接口，没有节流，
+# 实测同一段9.66秒的录音，耗时从6.8秒（WS）降到2.9秒。
+#
+# 唯一的代价：这个接口不支持WS那边用的"大模型引擎"(16k_zh_en)，只有
+# 标准引擎(16k_zh)可选——拿一份真实失败样本（后来查明是别的bug、内容是
+# "你好，听得见我说话吗？1234567666。"）在两个引擎上各测一遍，识别文本
+# 逐字一致，这次样本上没有质量损失才切换过来的，不是没验证就换。
+TENCENT_SENTENCE_ENGINE = "16k_zh"
+TENCENT_ASR_SERVICE = "asr"
+TENCENT_ASR_HOST    = "asr.tencentcloudapi.com"
+TENCENT_ASR_ACTION  = "SentenceRecognition"
+TENCENT_ASR_VERSION = "2019-06-14"
+
+def _tencent_sentence_sign(payload_str: str, timestamp: int) -> dict:
+    """腾讯云标准API v3签名（TC3-HMAC-SHA256）——跟上面WS用的URL签名
+    （HMAC-SHA1）是完全不同的两套机制，SentenceRecognition走的是腾讯云
+    通用API网关，不是ASR专属的WS协议。"""
+    date = datetime.datetime.utcfromtimestamp(timestamp).strftime("%Y-%m-%d")
+    ct = "application/json; charset=utf-8"
+    canonical_headers = f"content-type:{ct}\nhost:{TENCENT_ASR_HOST}\nx-tc-action:{TENCENT_ASR_ACTION.lower()}\n"
+    signed_headers = "content-type;host;x-tc-action"
+    hashed_payload = hashlib.sha256(payload_str.encode()).hexdigest()
+    canonical_request = f"POST\n/\n\n{canonical_headers}\n{signed_headers}\n{hashed_payload}"
+
+    algorithm = "TC3-HMAC-SHA256"
+    credential_scope = f"{date}/{TENCENT_ASR_SERVICE}/tc3_request"
+    hashed_canonical_request = hashlib.sha256(canonical_request.encode()).hexdigest()
+    string_to_sign = f"{algorithm}\n{timestamp}\n{credential_scope}\n{hashed_canonical_request}"
+
+    def _hmac(key: bytes, msg: str) -> bytes:
+        return hmac.new(key, msg.encode(), hashlib.sha256).digest()
+    secret_date    = _hmac(("TC3" + TENCENT_SECRET_KEY).encode(), date)
+    secret_service = _hmac(secret_date, TENCENT_ASR_SERVICE)
+    secret_signing = _hmac(secret_service, "tc3_request")
+    signature = hmac.new(secret_signing, string_to_sign.encode(), hashlib.sha256).hexdigest()
+
+    authorization = (
+        f"{algorithm} Credential={TENCENT_SECRET_ID}/{credential_scope}, "
+        f"SignedHeaders={signed_headers}, Signature={signature}"
+    )
+    return {
+        "Authorization": authorization,
+        "Content-Type": ct,
+        "Host": TENCENT_ASR_HOST,
+        "X-TC-Action": TENCENT_ASR_ACTION,
+        "X-TC-Timestamp": str(timestamp),
+        "X-TC-Version": TENCENT_ASR_VERSION,
+    }
+
+async def _tencent_sentence_transcribe(wav_bytes: bytes) -> str:
+    if not (TENCENT_SECRET_ID and TENCENT_SECRET_KEY):
+        raise RuntimeError("腾讯云语音识别未配置（缺 TENCENT_SECRET_ID/SECRET_KEY）")
+    pcm = wav_bytes[44:] if wav_bytes[:4] == b"RIFF" else wav_bytes
+    payload = {
+        "EngSerViceType": TENCENT_SENTENCE_ENGINE,
+        "SourceType": 1,
+        "VoiceFormat": "pcm",
+        "Data": base64.b64encode(pcm).decode(),
+        "DataLen": len(pcm),
+    }
+    payload_str = json.dumps(payload, separators=(",", ":"))
+    timestamp = int(time.time())
+    headers = _tencent_sentence_sign(payload_str, timestamp)
+    resp = await _http.post(f"https://{TENCENT_ASR_HOST}/", content=payload_str, headers=headers, timeout=15.0)
+    data = resp.json()
+    if "Error" in data.get("Response", {}):
+        err = data["Response"]["Error"]
+        raise RuntimeError(f"腾讯云ASR错误 {err.get('Code')}: {err.get('Message')}")
+    return data["Response"].get("Result", "")
 
 # ── EPUB 章节目录提取 ──────────────────────────────────────────────
 
@@ -1609,7 +1679,12 @@ async def transcribe(request: Request, _=ExtAuth):
             samples.frombytes(pcm_for_check[:len(pcm_for_check) - len(pcm_for_check) % 2])
             peak = max((abs(s) for s in samples), default=0)
             print(f"[转录诊断] PCM样本数={len(samples)} 峰值={peak}(满幅32767，{peak/32767*100:.1f}%)")
-        text      = await _tencent_transcribe(wav_bytes)
+        # 2026-08-06起改用"一句话识别"(REST，标准引擎)替代WS实时接口——
+        # 手机端一直是"整段录完再上传"，WS那套"边说边传"的限速反而是个
+        # 人为瓶颈，REST同步调用没有这个限速，实测同一段音频快了约3倍，
+        # 且经过真实样本比对确认识别质量没有下降（见_tencent_sentence_
+        # transcribe定义处的注释）。
+        text      = await _tencent_sentence_transcribe(wav_bytes)
         # 拆开打日志：转码 vs 腾讯云ASR本身，方便以后排查延迟时一眼看出瓶颈在哪层
         print(f"[转录] 转码={t1-t0:.2f}s 腾讯云ASR={time.time()-t1:.2f}s 总计={time.time()-t0:.2f}s → {repr(text)}")
         # 临时诊断：不止"完全空"会出问题——真机还见过"说了一长段话，
