@@ -1021,8 +1021,10 @@ def _rejoin_pdf_lines_into_paragraphs(full_text: str) -> list[str]:
 _CHAPTER_HEADING_RE = re.compile(
     r"^(第[〇零一二三四五六七八九十百千0-9]{1,8}[章回篇卷部节讲]|"
     r"(Chapter|CHAPTER)\s*\d+|"
-    r"(引言|序言|前言|导言|绪论|导论|结语|结论|后记|附录|尾声|楔子))"
-    r"[\s、：:.．]{0,3}.{0,30}$"
+    r"(引言|序言|前言|导言|绪论|导论|结语|结论|后记|附录|尾声|楔子)|"
+    r"(Introduction|Conclusion|Preface|Prologue|Epilogue|Appendix)\s*[0-9]*)"
+    r"[\s、：:.．]{0,3}.{0,30}$",
+    re.IGNORECASE,
 )
 
 def _split_pdf_into_chapters(full_text: str) -> list[tuple[str, list[str]]]:
