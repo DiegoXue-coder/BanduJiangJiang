@@ -18,6 +18,7 @@ import ReviewBookScreen from './screens/ReviewBookScreen';
 import ReviewDetailScreen from './screens/ReviewDetailScreen';
 import ProfileScreen from './screens/ProfileScreen';
 import BugReportScreen from './screens/BugReportScreen';
+import FeedbackWallScreen from './screens/FeedbackWallScreen';
 import LoginScreen from './screens/LoginScreen';
 import { useTheme } from './theme';
 import { FONT_ASSETS } from './fonts';
@@ -102,6 +103,7 @@ function ProfileStackScreen() {
     <ProfileStack.Navigator screenOptions={{ headerShown: false }}>
       <ProfileStack.Screen name="ProfileHome" component={ProfileScreen} />
       <ProfileStack.Screen name="BugReport" component={BugReportScreen} />
+      <ProfileStack.Screen name="FeedbackWall" component={FeedbackWallScreen} />
     </ProfileStack.Navigator>
   );
 }

@@ -386,3 +386,18 @@ export async function submitBugReport(description, imageUri) {
     body: formData,
   });
 }
+
+// 反馈墙：后端 GET /app/bug-reports 早就存在（阶段十四真机联调时补的管理
+// 查看入口），走 ExtAuth（跟插件共用的扩展令牌），不是JWT——之前只有
+// curl/后台能查，没有App内入口，appFetch 已经每次都带 x-extension-token，
+// 直接复用这条接口，不用后端改动。
+export async function listBugReports() {
+  return appFetch('/app/bug-reports');
+}
+
+// 图片走 <Image source={{uri}}> 原生请求，加不了自定义请求头，只能跟
+// getBookFileUrl 一样把令牌拼进 query string（后端 _verify_token 本来就
+// 兼容这个兜底）。ExtAuth 令牌是按天算的（当天内不变），直接内联安全。
+export function getBugReportImageUrl(reportId) {
+  return `${API_BASE}/app/bug-reports/${reportId}/image?token=${getExtToken()}`;
+}
