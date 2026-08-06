@@ -5,6 +5,7 @@ import io
 import re
 import time
 import hmac
+import html
 import uuid
 import json
 import base64
@@ -887,7 +888,14 @@ def _build_epub_from_sections(dst_path: str, title: str, author: str, chapters: 
     """chapters：[(章节标题, [段落, ...]), ...]。每个"段落"元素本身可能是
     _merge_short_paragraphs合并出来的、内部用\\n拼接了多个原始段落的字符串，
     这里统一按\\n展开成独立的<p>标签，不能整段当成一个<p>（会丢失段落间的
-    视觉分隔）。返回生成的章节标题列表。"""
+    视觉分隔）。返回生成的章节标题列表。
+
+    真机反馈过App里弹出"error parsing attribute"的XHTML解析错误——真实PDF
+    原文里经常有`&`（引用文献里的"A & B"）、数学公式里的`<`/`>`（比如
+    "a > 0"）这类字符，原样塞进`<p>`标签会把XHTML解析弄坏（这两个符号在
+    XML里有特殊含义）。用`html.escape()`转义之后再拼进标签，从根上解决，
+    不是猜的——用真实PDF文件测出来的（提取文本里`&`出现1次、`<`3次、
+    `>`7次，都是这个原因）。"""
     new_book = epub.EpubBook()
     new_book.set_identifier(f"imported-{uuid.uuid4().hex}")
     new_book.set_title(title)
@@ -900,12 +908,12 @@ def _build_epub_from_sections(dst_path: str, title: str, author: str, chapters: 
     for idx, (chapter_title, paragraphs) in enumerate(chapters):
         chapter_titles.append(chapter_title)
         paragraphs_html = "".join(
-            f"<p>{sub}</p>"
+            f"<p>{html.escape(sub)}</p>"
             for p in paragraphs
             for sub in p.split("\n") if sub.strip()
         )
         c = epub.EpubHtml(title=chapter_title, file_name=f"chap_{idx:03d}.xhtml", lang="zh")
-        c.content = f"<h1>{chapter_title}</h1>{paragraphs_html}"
+        c.content = f"<h1>{html.escape(chapter_title)}</h1>{paragraphs_html}"
         new_book.add_item(c)
         items.append(c)
 
@@ -1037,10 +1045,27 @@ def _split_pdf_into_chapters(full_text: str) -> list[tuple[str, list[str]]]:
     章节的正文分别做一遍，跟兜底路径共用同一套逻辑，不是两套独立实现。
     """
     raw_lines = full_text.split("\n")
-    heading_idx = [
+    candidate_idx = [
         i for i, line in enumerate(raw_lines)
         if line.strip() and _CHAPTER_HEADING_RE.match(line.strip())
     ]
+
+    # 真实PDF里章节标题常常是"页眉"，会跟着页码在每一页原样重复出现（比如
+    # "前言""前言 3""前言 1"这种，只有末尾页码不同）——用真实文件测出来的
+    # 真bug：原来每次匹配都当成一个新章节，导致"前言"被拆成好几个重复的
+    # "章节"，还把中间真正的正文内容切碎/吞掉。这里去掉末尾的页码数字比较
+    # "标题主体"，连续出现同一个主体只保留第一次（那才是章节真正的起点，
+    # 后面的重复只是同一章内每一页的页眉噪音，不是新章节的开始）。
+    def heading_base(i: int) -> str:
+        return re.sub(r"[\s0-9]+$", "", raw_lines[i].strip())
+
+    heading_idx = []
+    prev_base = None
+    for i in candidate_idx:
+        base = heading_base(i)
+        if base != prev_base:
+            heading_idx.append(i)
+        prev_base = base
 
     if len(heading_idx) >= 2:
         chapters: list[tuple[str, list[str]]] = []
@@ -1057,7 +1082,7 @@ def _split_pdf_into_chapters(full_text: str) -> list[tuple[str, list[str]]]:
             if body_paras:
                 chapters.append((title, body_paras))
         if chapters:
-            return chapters
+            return _subdivide_oversized_chapters(chapters)
 
     # 兜底：没识别到足够多的真实章节标题，按字数分块（FALLBACK_CHAPTER_
     # CHARS，不是MIN_CHAPTER_CHARS——见该常量注释，这正是真机反馈360多节
@@ -1065,6 +1090,27 @@ def _split_pdf_into_chapters(full_text: str) -> list[tuple[str, list[str]]]:
     paragraphs = _merge_short_paragraphs(_rejoin_pdf_lines_into_paragraphs(full_text))
     groups = _group_paragraphs_by_size(paragraphs, FALLBACK_CHAPTER_CHARS)
     return [(f"第{idx + 1}节", g) for idx, g in enumerate(groups)]
+
+# 真实PDF测出来的情况：一本书如果没有可靠识别到的"第X章"标题（比如章节
+# 标题在提取时跟正文粘住、或者标题格式没被识别出来的样式），中间两个真实
+# 页眉之间（比如"前言"到"后记"）会把全书正文整个吞成一个巨型"章节"（真实
+# 案例：354个段落全挤在一起）。识别到真实标题这条路径本身没问题，但不能
+# 假设识别出来的每一段都天然是合理大小——超大的那些还是要按字数兜底再切
+# 一层，标题保留原样加编号后缀，不是重新识别，只是防止出现一个大到没法读
+# 的章节。
+_MAX_CHAPTER_CHARS = int(FALLBACK_CHAPTER_CHARS * 2.5)
+
+def _subdivide_oversized_chapters(chapters: list[tuple[str, list[str]]]) -> list[tuple[str, list[str]]]:
+    result: list[tuple[str, list[str]]] = []
+    for title, paragraphs in chapters:
+        total = sum(len(p) for p in paragraphs)
+        if total <= _MAX_CHAPTER_CHARS:
+            result.append((title, paragraphs))
+            continue
+        groups = _group_paragraphs_by_size(paragraphs, FALLBACK_CHAPTER_CHARS)
+        for idx, g in enumerate(groups):
+            result.append((f"{title} ({idx + 1})", g))
+    return result
 
 def _pdf_bytes_to_sections(raw: bytes) -> list[tuple[str, list[str]]]:
     """只支持文字版PDF（可选中文字），扫描版/图片版PDF提取不到文字，明确报错，
