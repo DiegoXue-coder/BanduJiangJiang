@@ -730,6 +730,12 @@ async def _tencent_transcribe(wav_bytes: bytes) -> str:
             await ws.send(json.dumps({"type": "end"}))
 
             async for raw in ws:
+                # 临时诊断：真机反馈"识别失败但PCM峰值93.9%（明显有内容）"，
+                # 之前只挑slice_type==2的结果攒起来，如果腾讯云返回的结构跟
+                # 预期不一致（字段名、slice_type取值、或final消息本身就带着
+                # 被漏掉的文本），现有逻辑会静默吞掉，看不出到底哪一步丢的。
+                # 打印每条原始消息，下次真机复现时直接看真实数据结构。排查完就删。
+                print(f"[腾讯云ASR原始消息] {raw[:400]}")
                 msg = json.loads(raw)
                 if msg.get("code", 0) != 0:
                     raise RuntimeError(f"腾讯云ASR错误 {msg.get('code')}: {msg.get('message')}")
