@@ -173,6 +173,13 @@ export async function importEpub(fileUri, fileName) {
   });
 }
 
+// 阶段十五（续，2026-08-06）：删除自己导入的书。走的是带权限校验的
+// /app/books/{id}/mine，不是内容维护用的全局删除接口——后端会校验这本书
+// 是不是自己导入的，预置书库删不掉（403）。
+export async function deleteMyBook(bookId) {
+  return appFetch(`/app/books/${bookId}/mine`, { method: 'DELETE' });
+}
+
 // JWT本身含两个"."（header.payload.signature标准格式）。epub.js嗅探文件
 // 类型是看"URL里最后一个.后面是什么"，如果直接把JWT明文拼进query string，
 // 最后一个"."会落在token内部而不是".epub"后面，库会误判成不认识的文件

@@ -6,11 +6,36 @@ import {
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import * as DocumentPicker from 'expo-document-picker';
-import { IconUpload } from '@tabler/icons-react-native';
-import { getLibrary, importFile, importEpub } from '../lib/api';
+import { IconUpload, IconTrash } from '@tabler/icons-react-native';
+import { getLibrary, importFile, importEpub, deleteMyBook } from '../lib/api';
 import { useTheme } from '../theme';
 
-function BookCard({ book, onPress, theme }) {
+// 阶段十五（续，2026-08-06）：删除入口只在自己导入的书上出现——书架接口
+// 本身已经按"预置书全体可见/导入的书只对导入者可见"过滤过，能出现在这个
+// 列表里的imported书就是当前用户自己的，不需要再额外核对owner，后端
+// /mine接口会再做一次权限校验兜底。
+function confirmDeleteBook(book, onDeleted) {
+  Alert.alert(
+    '删除这本书？',
+    `《${book.title}》会从书架移除，划线和阅读记录也会一并删除，无法恢复。`,
+    [
+      { text: '取消', style: 'cancel' },
+      {
+        text: '删除', style: 'destructive',
+        onPress: async () => {
+          try {
+            await deleteMyBook(book.id);
+            onDeleted();
+          } catch (e) {
+            Alert.alert('删除失败', e.message || '请稍后重试');
+          }
+        },
+      },
+    ],
+  );
+}
+
+function BookCard({ book, onPress, onDeleted, theme }) {
   const hasProgress = !!book.current_cfi_location;
   const isImported = book.source === 'imported';
   return (
@@ -39,6 +64,15 @@ function BookCard({ book, onPress, theme }) {
         )}
         <Text style={[styles.cardStatus, { color: theme.accent }]}>{hasProgress ? '继续阅读' : '开始阅读'}</Text>
       </View>
+      {isImported && (
+        <TouchableOpacity
+          style={styles.deleteBtn}
+          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+          onPress={() => confirmDeleteBook(book, onDeleted)}
+        >
+          <IconTrash color={theme.textMuted} size={18} strokeWidth={1.75} />
+        </TouchableOpacity>
+      )}
     </TouchableOpacity>
   );
 }
@@ -156,6 +190,7 @@ export default function BookshelfScreen({ navigation }) {
             book={item}
             theme={theme}
             onPress={() => navigation.navigate('Reader', { bookId: item.id })}
+            onDeleted={() => load()}
           />
         )}
       />
@@ -177,6 +212,7 @@ const styles = StyleSheet.create({
   cardTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   importedTag: { paddingHorizontal: 6, paddingVertical: 2 },
   importedTagText: { fontSize: 10, fontWeight: '600' },
+  deleteBtn: { padding: 6, marginLeft: 4 },
 
   card: {
     flexDirection: 'row', alignItems: 'center',
