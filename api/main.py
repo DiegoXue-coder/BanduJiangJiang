@@ -1521,10 +1521,32 @@ async def transcribe(request: Request, _=ExtAuth):
         text      = await _tencent_transcribe(wav_bytes)
         # 拆开打日志：转码 vs 腾讯云ASR本身，方便以后排查延迟时一眼看出瓶颈在哪层
         print(f"[转录] 转码={t1-t0:.2f}s 腾讯云ASR={time.time()-t1:.2f}s 总计={time.time()-t0:.2f}s → {repr(text)}")
+        # 临时诊断：确认过腾讯云原始消息里slice_type==2的segment本身
+        # voice_text_str就是空的（不是我们代码筛漏了），怀疑是转码后的PCM
+        # 本身有问题（削波/异常）导致腾讯云识别不出内容。把这次失败的WAV
+        # 存下来，通过下面的调试下载接口拉回本地，用波形图直接看有没有
+        # 削波/异常，排查完这两处（含下面的下载接口）一起删。
+        if not text:
+            os.makedirs(_DEBUG_AUDIO_DIR, exist_ok=True)
+            debug_name = f"{uuid.uuid4().hex}.wav"
+            with open(os.path.join(_DEBUG_AUDIO_DIR, debug_name), "wb") as f:
+                f.write(wav_bytes)
+            print(f"[转录诊断] 空结果，已存调试音频: {debug_name}")
     except Exception as e:
         print(f"[转录] 错误: {e}")
         raise HTTPException(status_code=502, detail=f"语音识别错误: {e}")
     return {"text": text}
+
+_DEBUG_AUDIO_DIR = "/data/debug_audio" if os.path.isdir("/data") else "debug_audio"
+
+@app.get("/transcribe/debug-audio/{filename}")
+async def get_debug_audio(filename: str, _=ExtAuth):
+    """临时诊断接口，排查完上面那处空结果诊断代码后一起删。"""
+    safe_name = os.path.basename(filename)
+    path = os.path.join(_DEBUG_AUDIO_DIR, safe_name)
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="调试音频不存在")
+    return FileResponse(path, media_type="audio/wav")
 
 # ── 手机端 App 接口（/app 前缀，WBS 阶段一骨架）─────────────────────
 # 阶段十三之前这里鉴权是复用插件那套 HMAC（ExtAuth）、写死 user_id=1；
