@@ -34,6 +34,7 @@ import httpx
 import ebooklib
 from ebooklib import epub
 from pypdf import PdfReader
+from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -858,6 +859,55 @@ def _extract_chapter_titles(book: "epub.EpubBook") -> list[str]:
     if titles:
         return titles
     return [item.get_name() for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT)]
+
+def _epub_book_to_chapters(book: "epub.EpubBook") -> list[tuple[str, list[str]]]:
+    """把用户自己上传的epub提取成纯文字章节（跟PDF/TXT导入统一走
+    _build_epub_from_sections重建），丢弃原书自带的CSS/复杂标记。
+
+    真机反馈过：用户自己上传的epub选不了字、目录/正文颜色（比如荧光黄
+    目录、黑色正文）不跟随深色模式/护眼模式调整——预置书库和PDF/TXT导入
+    的书全部走同一套"提取文字重新生成EPUB"的干净流程，从没出过这类问题；
+    但用户上传的epub来源五花八门，没法假设都跟预置书库一样干净、不带
+    自己的样式表。统一走这条路径换稳定的选字+主题适配，代价是丢失原书的
+    排版细节（斜体/特殊样式这类），这个取舍跟PDF/TXT导入的架构前提是
+    一致的，不是新发明的思路。"""
+    titles = _extract_chapter_titles(book)
+    doc_items = [
+        item for item in (
+            book.get_item_with_id(idref) for idref, _ in book.spine
+        )
+        # EpubNav（自动生成的导航/目录页）的get_type()跟普通章节一样都是
+        # ITEM_DOCUMENT，光看类型分不出来——必须专门排除，否则目录页本身
+        # 会被误当成一章，把真正的章节标题错位（真实踩过这个坑：3章里第
+        # 一个"章节"内容其实是目录链接文字，后面章节标题全部错位一个）。
+        if item is not None and item.get_type() == ebooklib.ITEM_DOCUMENT and not isinstance(item, epub.EpubNav)
+    ]
+
+    chapters: list[tuple[str, list[str]]] = []
+    for idx, item in enumerate(doc_items):
+        try:
+            html_content = item.get_content().decode("utf-8", errors="replace")
+        except Exception:
+            continue
+        soup = BeautifulSoup(html_content, "html.parser")
+        for tag in soup(["script", "style"]):
+            tag.decompose()
+        # 只优先取<p>标签（绝大多数epub都用它包段落）。不混着选<div>/<li>——
+        # 这两种标签经常互相嵌套（比如<div>里包着多个<p>），一起选会把父
+        # 容器的文字和它内部子标签的文字重复选中两遍，实测真的复现过这个
+        # 重复bug。真的一个<p>都没有才退化成取纯文本按行分段，不逐标签选。
+        p_tags = soup.find_all("p")
+        if p_tags:
+            paragraphs = [p.get_text(strip=True) for p in p_tags if p.get_text(strip=True)]
+        else:
+            text = soup.get_text("\n")
+            paragraphs = [line.strip() for line in text.split("\n") if line.strip()]
+        if not paragraphs:
+            continue
+        merged = _merge_short_paragraphs(paragraphs)
+        title = titles[idx] if idx < len(titles) else f"第{idx + 1}节"
+        chapters.append((title, merged))
+    return chapters
 
 # ── PDF/TXT → EPUB 转换（阶段十五，内部原型）────────────────────────
 # 不新建PDF/TXT专用渲染引擎：把导入文件在后端转换成一份"干净EPUB"，直接复用
@@ -1839,10 +1889,31 @@ async def app_import_book(
         book_epub = epub.read_epub(file_path)
         title  = (book_epub.get_metadata("DC", "title")   or [("", {})])[0][0] or file.filename
         author = (book_epub.get_metadata("DC", "creator") or [("", {})])[0][0] or ""
-        chapter_titles = _extract_chapter_titles(book_epub)
     except Exception as e:
         os.remove(file_path)
         raise HTTPException(status_code=400, detail=f"EPUB 解析失败: {e}")
+
+    if source == "imported":
+        # 用户自己上传的epub来源五花八门，不能假设跟预置书库一样干净——
+        # 真机反馈过选不了字、目录/正文颜色不跟随深色模式（原书自带CSS跟
+        # 阅读器主题冲突）。统一走跟PDF/TXT导入一样的"提取重建"，见
+        # _epub_book_to_chapters注释。HTML解析+重新生成EPUB是CPU密集的
+        # 同步代码，包一层to_thread（跟PDF导入同样的教训，不重复踩坑）。
+        try:
+            chapters = await asyncio.to_thread(_epub_book_to_chapters, book_epub)
+            if not chapters:
+                raise ValueError("没有提取到可用的正文内容")
+            clean_file_path = os.path.join(EPUB_STORAGE_DIR, f"{uuid.uuid4().hex}.epub")
+            chapter_titles = await asyncio.to_thread(
+                _build_epub_from_sections, clean_file_path, title, author, chapters
+            )
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"EPUB 内容提取失败: {e}")
+        finally:
+            os.remove(file_path)
+        file_path = clean_file_path
+    else:
+        chapter_titles = _extract_chapter_titles(book_epub)
 
     return await _insert_book_and_chapters(user_id, title, author, file_path, chapter_titles, source=source)
 
