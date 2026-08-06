@@ -99,7 +99,8 @@ export default function BookChatScreen({
   const maxDurationTimerRef = useRef(null); // 录音时长上限的自动停止定时器
   const soundRef       = useRef(null);
   const scrollRef      = useRef(null);
-  const ttsQueueRef    = useRef([]);   // 按句切好、还没开始处理的文字队列
+  const ttsQueueRef    = useRef([]);   // 按句切好、还没开始处理的队列，元素是{seq,text}
+  const ttsSeqRef      = useRef(0);    // 临时诊断用：给每句TTS文字标一个自增序号，排查完删
   const preparedRef    = useRef(null); // { text, sound } 提前加载好、还没播放的下一句
   const preparingRef   = useRef(false); // 正在预取的锁，防止并发重复预取
   const ttsPlayingRef  = useRef(false);
@@ -224,7 +225,14 @@ export default function BookChatScreen({
   // 音频，不用现场再等一次网络请求。
   function enqueueTts(text) {
     if (!ttsOn || !text.trim()) return;
-    ttsQueueRef.current.push(text.trim());
+    const seq = ++ttsSeqRef.current;
+    // 临时诊断：真机反馈"分段播放顺序错乱、最后一句经常不播"，此前几次
+    // 修复解决的是相邻但不同的症状，没有真正命中这两个具体问题——按决策层
+    // 要求这次要用真实录音复现的日志确认根因，不能再假设"应该修过了"。
+    // 每句话打一个自增序号，从入队到真正播放完的每一步都打日志，下次真机
+    // 复现问题时能直接看到真实的事件顺序。排查完这几处日志就删。
+    console.log(`[TTS诊断] 入队 seq=${seq} 队列长度=${ttsQueueRef.current.length + 1} 文字="${text.trim().slice(0, 12)}…"`);
+    ttsQueueRef.current.push({ seq, text: text.trim() });
     if (ttsPlayingRef.current) {
       // 已经在放别的句子，趁这个空档把这句提前加载好
       prefetchNext();
@@ -245,20 +253,23 @@ export default function BookChatScreen({
   async function prefetchNext() {
     if (preparedRef.current || preparingRef.current || ttsQueueRef.current.length === 0) return;
     const epoch = ttsEpochRef.current;
-    const text = ttsQueueRef.current.shift();
+    const item = ttsQueueRef.current.shift();
+    console.log(`[TTS诊断] 预取开始 seq=${item.seq}`);
     preparingRef.current = true; // 占住位置，必须在下面的 await 之前
     try {
       const { sound } = await Audio.Sound.createAsync(
-        { uri: getTtsPlayUrl(text) },
+        { uri: getTtsPlayUrl(item.text) },
         { shouldPlay: false },
       );
       if (epoch !== ttsEpochRef.current) {
         // 加载这段时间里问了新问题、stopAudio已经跑过——这句音频已经过期，
         // 不能塞进preparedRef，否则会被新一轮播放误当成"下一句"播出来
+        console.log(`[TTS诊断] 预取完成但epoch已过期，丢弃 seq=${item.seq}`);
         sound.unloadAsync().catch(() => {});
         return;
       }
-      preparedRef.current = { text, sound };
+      console.log(`[TTS诊断] 预取完成，存入preparedRef seq=${item.seq}`);
+      preparedRef.current = { seq: item.seq, text: item.text, sound };
     } catch (e) {
       console.warn('[TTS 预取]', e.message); // 预取失败就跳过这一句，不影响后面排队的句子
     } finally {
@@ -274,16 +285,17 @@ export default function BookChatScreen({
     // await。锁必须在 await 加载之前同步上，不然等待加载的这段时间里，
     // 如果 flushSentences 连续同步调用了好几次 enqueueTts，每次都会看到
     // "还没在播"，各自都触发一次播放，好几句音频就这样同时播了出来。
-    let pendingText, pendingSound = null;
+    let pendingSeq, pendingText, pendingSound = null;
     if (preparedRef.current) {
-      ({ text: pendingText, sound: pendingSound } = preparedRef.current);
+      ({ seq: pendingSeq, text: pendingText, sound: pendingSound } = preparedRef.current);
       preparedRef.current = null;
     } else if (ttsQueueRef.current.length > 0) {
-      pendingText = ttsQueueRef.current.shift();
+      ({ seq: pendingSeq, text: pendingText } = ttsQueueRef.current.shift());
     } else {
       setIsSpeaking(false);
       return;
     }
+    console.log(`[TTS诊断] 开始播放 seq=${pendingSeq} 来源=${pendingSound ? '预取好的' : '现场加载'}`);
     ttsPlayingRef.current = true; // 锁必须在这里、在任何 await 之前
     setIsSpeaking(true);
     const epoch = ttsEpochRef.current;
@@ -306,6 +318,7 @@ export default function BookChatScreen({
       if (epoch !== ttsEpochRef.current) {
         // 加载这段时间里问了新问题，stopAudio已经跑过并建立了新一轮播放状态——
         // 这句是上一轮遗留的，直接丢弃，不能覆盖新一轮已经在用的soundRef
+        console.log(`[TTS诊断] 现场加载完成但epoch已过期，丢弃 seq=${pendingSeq}`);
         sound.unloadAsync().catch(() => {});
         return;
       }
@@ -314,6 +327,7 @@ export default function BookChatScreen({
     soundRef.current = sound;
     sound.setOnPlaybackStatusUpdate(s => {
       if (s.didJustFinish) {
+        console.log(`[TTS诊断] 播放结束 seq=${pendingSeq}`);
         sound.unloadAsync();
         soundRef.current = null;
         ttsPlayingRef.current = false;
