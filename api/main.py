@@ -1671,52 +1671,13 @@ async def transcribe(request: Request, _=ExtAuth):
         t0        = time.time()
         wav_bytes = await asyncio.to_thread(_webm_to_wav, audio_bytes)
         t1        = time.time()
-        # 临时诊断：真机反馈过好几次"未识别到内容"、返回空字符串，量一下
-        # 转码后的PCM实际响度，区分是"录音本身接近静音"（手机端问题）还是
-        # "音频正常、腾讯云没识别出来"（服务端/参数问题）。排查完就删。
-        pcm_for_check = wav_bytes[44:]
-        if pcm_for_check:
-            import array as _array
-            samples = _array.array('h')
-            samples.frombytes(pcm_for_check[:len(pcm_for_check) - len(pcm_for_check) % 2])
-            peak = max((abs(s) for s in samples), default=0)
-            print(f"[转录诊断] PCM样本数={len(samples)} 峰值={peak}(满幅32767，{peak/32767*100:.1f}%)")
-        # 2026-08-06起改用"一句话识别"(REST，标准引擎)替代WS实时接口——
-        # 手机端一直是"整段录完再上传"，WS那套"边说边传"的限速反而是个
-        # 人为瓶颈，REST同步调用没有这个限速，实测同一段音频快了约3倍，
-        # 且经过真实样本比对确认识别质量没有下降（见_tencent_sentence_
-        # transcribe定义处的注释）。
         text      = await _tencent_sentence_transcribe(wav_bytes)
         # 拆开打日志：转码 vs 腾讯云ASR本身，方便以后排查延迟时一眼看出瓶颈在哪层
         print(f"[转录] 转码={t1-t0:.2f}s 腾讯云ASR={time.time()-t1:.2f}s 总计={time.time()-t0:.2f}s → {repr(text)}")
-        # 临时诊断：不止"完全空"会出问题——真机还见过"说了一长段话，
-        # 腾讯云只识别出一两个字"这种明显不对但text非空、不会走进
-        # if not text分支的情况。改成"文本长度跟音频时长明显不成比例"就存，
-        # 而不是只存全空的，不然像"我。"这种坏结果反而漏掉存不下来。
-        # 阈值：粗略按1秒音频至少该出1个字算，差太多才存（正常语速远高于这个）。
-        audio_seconds = len(samples) / 16000 if pcm_for_check else 0
-        suspicious = audio_seconds > 2 and len(text) < audio_seconds * 0.5
-        if suspicious:
-            os.makedirs(_DEBUG_AUDIO_DIR, exist_ok=True)
-            debug_name = f"{uuid.uuid4().hex}.wav"
-            with open(os.path.join(_DEBUG_AUDIO_DIR, debug_name), "wb") as f:
-                f.write(wav_bytes)
-            print(f"[转录诊断] 结果可疑（音频{audio_seconds:.1f}s→文本{len(text)}字），已存调试音频: {debug_name}")
     except Exception as e:
         print(f"[转录] 错误: {e}")
         raise HTTPException(status_code=502, detail=f"语音识别错误: {e}")
     return {"text": text}
-
-_DEBUG_AUDIO_DIR = "/data/debug_audio" if os.path.isdir("/data") else "debug_audio"
-
-@app.get("/transcribe/debug-audio/{filename}")
-async def get_debug_audio(filename: str, _=ExtAuth):
-    """临时诊断接口，排查完上面那处空结果诊断代码后一起删。"""
-    safe_name = os.path.basename(filename)
-    path = os.path.join(_DEBUG_AUDIO_DIR, safe_name)
-    if not os.path.isfile(path):
-        raise HTTPException(status_code=404, detail="调试音频不存在")
-    return FileResponse(path, media_type="audio/wav")
 
 # ── 手机端 App 接口（/app 前缀，WBS 阶段一骨架）─────────────────────
 # 阶段十三之前这里鉴权是复用插件那套 HMAC（ExtAuth）、写死 user_id=1；
