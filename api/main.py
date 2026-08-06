@@ -813,8 +813,11 @@ def _merge_short_paragraphs(paragraphs: list[str], min_chars: int = MIN_CHAPTER_
             merged.append(buffer)
     return merged
 
-def _build_epub_from_sections(dst_path: str, title: str, author: str, sections: list[str]) -> list[str]:
-    """sections：每个元素是一章的纯文本（段内用\\n分隔自然段）。返回生成的章节标题列表。"""
+def _build_epub_from_sections(dst_path: str, title: str, author: str, chapters: list[tuple[str, list[str]]]) -> list[str]:
+    """chapters：[(章节标题, [段落, ...]), ...]。每个"段落"元素本身可能是
+    _merge_short_paragraphs合并出来的、内部用\\n拼接了多个原始段落的字符串，
+    这里统一按\\n展开成独立的<p>标签，不能整段当成一个<p>（会丢失段落间的
+    视觉分隔）。返回生成的章节标题列表。"""
     new_book = epub.EpubBook()
     new_book.set_identifier(f"imported-{uuid.uuid4().hex}")
     new_book.set_title(title)
@@ -824,10 +827,13 @@ def _build_epub_from_sections(dst_path: str, title: str, author: str, sections: 
 
     chapter_titles = []
     items = []
-    for idx, text in enumerate(sections):
-        chapter_title = f"第{idx + 1}节"
+    for idx, (chapter_title, paragraphs) in enumerate(chapters):
         chapter_titles.append(chapter_title)
-        paragraphs_html = "".join(f"<p>{line}</p>" for line in text.split("\n") if line.strip())
+        paragraphs_html = "".join(
+            f"<p>{sub}</p>"
+            for p in paragraphs
+            for sub in p.split("\n") if sub.strip()
+        )
         c = epub.EpubHtml(title=chapter_title, file_name=f"chap_{idx:03d}.xhtml", lang="zh")
         c.content = f"<h1>{chapter_title}</h1>{paragraphs_html}"
         new_book.add_item(c)
@@ -840,9 +846,39 @@ def _build_epub_from_sections(dst_path: str, title: str, author: str, sections: 
     epub.write_epub(dst_path, new_book)
     return chapter_titles
 
-def _txt_bytes_to_sections(raw: bytes) -> list[str]:
+# 一本正常长度的书（几万字）如果按MIN_CHAPTER_CHARS(150)这个"避免单个段落
+# 太短导致WebView选字失败"的极小阈值直接当成"一个分组=一章"，会被切成几百
+# 个没有意义的"章节"——真机反馈过一份PDF被拆成360多节的实际案例，根因就是
+# 混用了这两个不同用途的粒度。这里明确拆成两层：MIN_CHAPTER_CHARS只管"单个
+# 段落别太短"，FALLBACK_CHAPTER_CHARS管"没有真实章节结构时，兜底按多大粒度
+# 分章"——一本书大概几十章的量级，不是几百章。
+FALLBACK_CHAPTER_CHARS = 3000
+
+def _group_paragraphs_by_size(paragraphs: list[str], target_chars: int) -> list[list[str]]:
+    """把段落列表按目标字数分组，每组尽量接近target_chars，用于没有真实章节
+    结构时的兜底分章。"""
+    groups: list[list[str]] = []
+    current: list[str] = []
+    current_len = 0
+    for p in paragraphs:
+        current.append(p)
+        current_len += len(p)
+        if current_len >= target_chars:
+            groups.append(current)
+            current, current_len = [], 0
+    if current:
+        if groups:
+            groups[-1].extend(current)
+        else:
+            groups.append(current)
+    return groups
+
+def _txt_bytes_to_sections(raw: bytes) -> list[tuple[str, list[str]]]:
     """TXT编码不固定（国内常见来源很多是GBK/GB18030，不只是UTF-8），依次尝试，
-    都失败才用UTF-8+替换非法字符兜底（不静默失败，但也不因编码问题直接崩溃）。"""
+    都失败才用UTF-8+替换非法字符兜底（不静默失败，但也不因编码问题直接崩溃）。
+    返回值格式跟_pdf_bytes_to_sections统一：[(章节标题, [段落, ...]), ...]，
+    没有检测章节标题（TXT没有PDF那种固定排版换行问题，但同样可能是没有显式
+    章节结构的长文本），统一按FALLBACK_CHAPTER_CHARS分组当"第N节"。"""
     text = None
     for enc in ("utf-8", "gb18030"):
         try:
@@ -859,7 +895,10 @@ def _txt_bytes_to_sections(raw: bytes) -> list[str]:
         paragraphs = [line.strip() for line in text.split("\n") if line.strip()]
     if not paragraphs:
         raise HTTPException(status_code=400, detail="TXT文件内容为空或无法解析")
-    return _merge_short_paragraphs(paragraphs)
+
+    merged = _merge_short_paragraphs(paragraphs)
+    groups = _group_paragraphs_by_size(merged, FALLBACK_CHAPTER_CHARS)
+    return [(f"第{idx + 1}节", g) for idx, g in enumerate(groups)]
 
 _PDF_TERMINAL_PUNCT = "。！？」』”’.!?\""
 
@@ -909,7 +948,53 @@ def _rejoin_pdf_lines_into_paragraphs(full_text: str) -> list[str]:
         paragraphs.append(current)
     return paragraphs
 
-def _pdf_bytes_to_sections(raw: bytes) -> list[str]:
+_CHAPTER_HEADING_RE = re.compile(
+    r"^(第[〇零一二三四五六七八九十百千0-9]{1,8}[章回篇卷部节讲]|"
+    r"(Chapter|CHAPTER)\s*\d+|"
+    r"(引言|序言|前言|导言|绪论|导论|结语|结论|后记|附录|尾声|楔子))"
+    r"[\s、：:.．]{0,3}.{0,30}$"
+)
+
+def _split_pdf_into_chapters(full_text: str) -> list[tuple[str, list[str]]]:
+    """优先识别PDF正文里真实的章节标题（"第一章"/"Chapter 3"/"引言"这类短
+    独立行），按真实结构切分——能保留有意义的章节标题，不是"第N节"这种
+    毫无信息量的编号。识别不到至少2个这类标题时（说明这本书没有这类显式
+    标题，或者PDF提取时标题跟正文粘在一起分不清），退回按字数分块。
+
+    章节内部的段落处理（PDF硬换行拼接+过短段落合并）统一在这里对每个
+    章节的正文分别做一遍，跟兜底路径共用同一套逻辑，不是两套独立实现。
+    """
+    raw_lines = full_text.split("\n")
+    heading_idx = [
+        i for i, line in enumerate(raw_lines)
+        if line.strip() and _CHAPTER_HEADING_RE.match(line.strip())
+    ]
+
+    if len(heading_idx) >= 2:
+        chapters: list[tuple[str, list[str]]] = []
+        if heading_idx[0] > 0:
+            preamble_text = "\n".join(raw_lines[:heading_idx[0]])
+            preamble_paras = _merge_short_paragraphs(_rejoin_pdf_lines_into_paragraphs(preamble_text))
+            if preamble_paras and sum(len(p) for p in preamble_paras) >= MIN_CHAPTER_CHARS:
+                chapters.append(("前言", preamble_paras))
+        bounds = heading_idx + [len(raw_lines)]
+        for i, start in enumerate(heading_idx):
+            title = raw_lines[start].strip()[:40]
+            body_text = "\n".join(raw_lines[start + 1:bounds[i + 1]])
+            body_paras = _merge_short_paragraphs(_rejoin_pdf_lines_into_paragraphs(body_text))
+            if body_paras:
+                chapters.append((title, body_paras))
+        if chapters:
+            return chapters
+
+    # 兜底：没识别到足够多的真实章节标题，按字数分块（FALLBACK_CHAPTER_
+    # CHARS，不是MIN_CHAPTER_CHARS——见该常量注释，这正是真机反馈360多节
+    # 那个bug的根因所在，两个阈值不能混用）。
+    paragraphs = _merge_short_paragraphs(_rejoin_pdf_lines_into_paragraphs(full_text))
+    groups = _group_paragraphs_by_size(paragraphs, FALLBACK_CHAPTER_CHARS)
+    return [(f"第{idx + 1}节", g) for idx, g in enumerate(groups)]
+
+def _pdf_bytes_to_sections(raw: bytes) -> list[tuple[str, list[str]]]:
     """只支持文字版PDF（可选中文字），扫描版/图片版PDF提取不到文字，明确报错，
     不做OCR（阶段十五验收标准明确排除OCR范围）。"""
     try:
@@ -948,8 +1033,7 @@ def _pdf_bytes_to_sections(raw: bytes) -> list[str]:
             detail="无法从这份PDF提取到足够的文字，可能是扫描版/图片版PDF——本次原型不支持OCR，暂不能导入",
         )
 
-    paragraphs = _rejoin_pdf_lines_into_paragraphs(full_text)
-    return _merge_short_paragraphs(paragraphs)
+    return _split_pdf_into_chapters(full_text)
 
 # ── 微信读书 Skill API ─────────────────────────────────────────────
 
