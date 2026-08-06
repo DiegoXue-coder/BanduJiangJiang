@@ -1521,17 +1521,19 @@ async def transcribe(request: Request, _=ExtAuth):
         text      = await _tencent_transcribe(wav_bytes)
         # 拆开打日志：转码 vs 腾讯云ASR本身，方便以后排查延迟时一眼看出瓶颈在哪层
         print(f"[转录] 转码={t1-t0:.2f}s 腾讯云ASR={time.time()-t1:.2f}s 总计={time.time()-t0:.2f}s → {repr(text)}")
-        # 临时诊断：确认过腾讯云原始消息里slice_type==2的segment本身
-        # voice_text_str就是空的（不是我们代码筛漏了），怀疑是转码后的PCM
-        # 本身有问题（削波/异常）导致腾讯云识别不出内容。把这次失败的WAV
-        # 存下来，通过下面的调试下载接口拉回本地，用波形图直接看有没有
-        # 削波/异常，排查完这两处（含下面的下载接口）一起删。
-        if not text:
+        # 临时诊断：不止"完全空"会出问题——真机还见过"说了一长段话，
+        # 腾讯云只识别出一两个字"这种明显不对但text非空、不会走进
+        # if not text分支的情况。改成"文本长度跟音频时长明显不成比例"就存，
+        # 而不是只存全空的，不然像"我。"这种坏结果反而漏掉存不下来。
+        # 阈值：粗略按1秒音频至少该出1个字算，差太多才存（正常语速远高于这个）。
+        audio_seconds = len(samples) / 16000 if pcm_for_check else 0
+        suspicious = audio_seconds > 2 and len(text) < audio_seconds * 0.5
+        if suspicious:
             os.makedirs(_DEBUG_AUDIO_DIR, exist_ok=True)
             debug_name = f"{uuid.uuid4().hex}.wav"
             with open(os.path.join(_DEBUG_AUDIO_DIR, debug_name), "wb") as f:
                 f.write(wav_bytes)
-            print(f"[转录诊断] 空结果，已存调试音频: {debug_name}")
+            print(f"[转录诊断] 结果可疑（音频{audio_seconds:.1f}s→文本{len(text)}字），已存调试音频: {debug_name}")
     except Exception as e:
         print(f"[转录] 错误: {e}")
         raise HTTPException(status_code=502, detail=f"语音识别错误: {e}")
