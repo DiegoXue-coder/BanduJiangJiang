@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { View, ActivityIndicator } from 'react-native';
+import { View, ActivityIndicator, Text } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { BottomSheetModalProvider } from '@gorhom/bottom-sheet';
@@ -35,6 +35,34 @@ const TAB_ICON_COMPONENT = { 书架: IconBooks, 划线复盘: IconHighlight, 我
 // patches/react-native+0.81.5.patch），在库内部处理完调用方自己的style后，
 // 没设fontFamily才补上默认值——只有那一处能同时覆盖"全局默认"和"看到
 // 显式指定就不覆盖"这两个要求。
+
+// 多机联调：华硕("1号工程师")、华为("2号工程师")各自起本地服务器时，
+// Expo Go 里显示的App名字/图标完全一样，真机测试时分不清连的是哪台机器。
+// 用 EXPO_PUBLIC_ 前缀的env var（各机器 npm run lan 时自己设置）在App右上角
+// 打一个小角标——不设这个变量时（包括所有正式EAS构建）完全不显示，不影响生产。
+const ENGINEER_LABEL = process.env.EXPO_PUBLIC_ENGINEER_LABEL;
+
+function EngineerBadge() {
+  if (!ENGINEER_LABEL) return null;
+  return (
+    <View
+      pointerEvents="none"
+      style={{
+        position: 'absolute',
+        top: 50,
+        right: 10,
+        backgroundColor: 'rgba(217, 45, 32, 0.9)',
+        paddingHorizontal: 10,
+        paddingVertical: 4,
+        borderRadius: 8,
+        zIndex: 9999,
+        elevation: 9999,
+      }}
+    >
+      <Text style={{ color: '#fff', fontSize: 12, fontWeight: '700' }}>{ENGINEER_LABEL}</Text>
+    </View>
+  );
+}
 
 const Tab = createBottomTabNavigator();
 const BookshelfStack = createNativeStackNavigator();
@@ -110,6 +138,7 @@ export default function App() {
     return (
       <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: theme.bg }}>
         <ActivityIndicator size="large" color={theme.accent} />
+        <EngineerBadge />
       </View>
     );
   }
@@ -119,12 +148,14 @@ export default function App() {
       <SafeAreaProvider>
         <StatusBar style="auto" />
         <LoginScreen onLoggedIn={handleLoggedIn} />
+        <EngineerBadge />
       </SafeAreaProvider>
     );
   }
 
   return (
     <SafeAreaProvider>
+      <EngineerBadge />
       <GestureHandlerRootView style={{ flex: 1 }}>
         <BottomSheetModalProvider>
           <ReaderProvider>
