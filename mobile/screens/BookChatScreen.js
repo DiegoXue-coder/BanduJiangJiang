@@ -30,6 +30,7 @@ const SENTENCE_END = /([。！？；\n])/;
 // 预取更快，是从根上减少请求次数、拉长每个音频片段的播放时长，给下一段
 // 的网络请求留出更宽裕的重叠窗口。
 const MIN_TTS_CHUNK_LEN = 20;
+const MAX_RECORDING_MS = 55000; // 腾讯云ASR单次连接音频时长硬上限60秒，留5秒安全余量
 
 function Bubble({ role, text, theme }) {
   const isUser = role === 'user';
@@ -95,6 +96,7 @@ export default function BookChatScreen({
 
   const recordingRef   = useRef(null);
   const startingRecordingRef = useRef(false); // 防止预热延迟期间重复点击开始录音
+  const maxDurationTimerRef = useRef(null); // 录音时长上限的自动停止定时器
   const soundRef       = useRef(null);
   const scrollRef      = useRef(null);
   const ttsQueueRef    = useRef([]);   // 按句切好、还没开始处理的文字队列
@@ -112,6 +114,13 @@ export default function BookChatScreen({
   // 面板一挂载就设一次，不依赖录音功能有没有被用过。
   useEffect(() => {
     Audio.setAudioModeAsync({ playsInSilentModeIOS: true }).catch(() => {});
+  }, []);
+
+  // 面板收起/卸载时清掉录音时长上限的定时器，避免卸载后还触发finishRecording
+  useEffect(() => {
+    return () => {
+      if (maxDurationTimerRef.current) clearTimeout(maxDurationTimerRef.current);
+    };
   }, []);
 
   // 键盘弹出/收起时直接顶输入区——不依赖 @gorhom/bottom-sheet 自己的
@@ -431,29 +440,41 @@ export default function BookChatScreen({
     setStatus('');
   }
 
+  // 停止录音+转写这部分单独拆出一个函数，不依赖isRecording这个state——
+  // 定时器触发的自动停止和用户手动点停止都要调用同一份逻辑，如果直接复用
+  // toggleRecording，定时器回调捕获的是设置定时器那一刻的旧闭包，isRecording
+  // 在那个闭包里还是false，会被误判成"开始录音"分支，而不是真正停止
+  async function finishRecording() {
+    if (maxDurationTimerRef.current) {
+      clearTimeout(maxDurationTimerRef.current);
+      maxDurationTimerRef.current = null;
+    }
+    setRecording(false);
+    setStatus('识别中…');
+    try {
+      const rec = recordingRef.current;
+      await rec.stopAndUnloadAsync();
+      const uri = rec.getURI();
+      recordingRef.current = null;
+      // 顺带保留 playsInSilentModeIOS: true——只关录音模式，别把这个字段
+      // 隐式重置掉，不然录过一次音之后TTS播放又会看手机静音开关脸色
+      await Audio.setAudioModeAsync({ allowsRecordingIOS: false, playsInSilentModeIOS: true });
+
+      const text = await transcribeAudio(uri, FileSystem.uploadAsync, FileSystem.FileSystemUploadType);
+      if (text?.trim()) {
+        setInput(text.trim());
+        setStatus('识别完成 — 确认后点发送');
+      } else {
+        setStatus('未识别到内容，请重试');
+      }
+    } catch (e) {
+      setStatus(`识别失败：${e.message}`);
+    }
+  }
+
   async function toggleRecording() {
     if (isRecording) {
-      setRecording(false);
-      setStatus('识别中…');
-      try {
-        const rec = recordingRef.current;
-        await rec.stopAndUnloadAsync();
-        const uri = rec.getURI();
-        recordingRef.current = null;
-        // 顺带保留 playsInSilentModeIOS: true——只关录音模式，别把这个字段
-        // 隐式重置掉，不然录过一次音之后TTS播放又会看手机静音开关脸色
-        await Audio.setAudioModeAsync({ allowsRecordingIOS: false, playsInSilentModeIOS: true });
-
-        const text = await transcribeAudio(uri, FileSystem.uploadAsync, FileSystem.FileSystemUploadType);
-        if (text?.trim()) {
-          setInput(text.trim());
-          setStatus('识别完成 — 确认后点发送');
-        } else {
-          setStatus('未识别到内容，请重试');
-        }
-      } catch (e) {
-        setStatus(`识别失败：${e.message}`);
-      }
+      await finishRecording();
     } else {
       if (startingRecordingRef.current) return; // 预热延迟期间重复点击，忽略
       startingRecordingRef.current = true;
@@ -477,6 +498,12 @@ export default function BookChatScreen({
         await new Promise(resolve => setTimeout(resolve, 300));
         setRecording(true);
         setStatus('录音中 — 再次点击停止');
+        // 真机反馈过录了43秒触发腾讯云ASR单次连接60秒硬上限、连接被强制断开
+        // ——"问AI"这个功能设计上是问一句话，不是念长文章，到点自动停止既
+        // 避免撞上接口限制，也是更合理的产品边界
+        maxDurationTimerRef.current = setTimeout(() => {
+          finishRecording();
+        }, MAX_RECORDING_MS);
       } catch (e) {
         setStatus(`无法启动录音：${e.message}`);
       } finally {

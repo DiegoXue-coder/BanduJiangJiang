@@ -736,6 +736,12 @@ async def _tencent_transcribe(wav_bytes: bytes) -> str:
         return await asyncio.wait_for(_run(), timeout=20)
     except asyncio.TimeoutError:
         raise RuntimeError("腾讯云语音识别响应超时（20秒），请重试")
+    except websockets.ConnectionClosed:
+        # 真机反馈过43秒长录音触发——腾讯云这个接口单次连接音频时长上限60秒，
+        # 快接近上限时服务端会不打招呼直接断连（不是走正常JSON错误消息那条
+        # 路），底层异常文案是"no close frame received or sent"，直接甩给
+        # 用户看不知所云，换成能看懂、能照着做的提示
+        raise RuntimeError("这次说得有点长，语音识别连接中断了，请尝试分成短一些的问题重新提问")
 
 # ── EPUB 章节目录提取 ──────────────────────────────────────────────
 
