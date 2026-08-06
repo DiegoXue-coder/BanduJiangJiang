@@ -668,10 +668,7 @@ def _tencent_asr_sign(query_string: str) -> str:
     digest = hmac.new(TENCENT_SECRET_KEY.encode(), signstr.encode(), hashlib.sha1).digest()
     return base64.b64encode(digest).decode()
 
-async def _tencent_transcribe(wav_bytes: bytes) -> str:
-    if not (TENCENT_APPID and TENCENT_SECRET_ID and TENCENT_SECRET_KEY):
-        raise RuntimeError("腾讯云语音识别未配置（缺 TENCENT_APPID/SECRET_ID/SECRET_KEY）")
-
+def _tencent_asr_url() -> str:
     now = int(time.time())
     params = {
         "secretid": TENCENT_SECRET_ID,
@@ -689,67 +686,66 @@ async def _tencent_transcribe(wav_bytes: bytes) -> str:
     sorted_query = "&".join(f"{k}={params[k]}" for k in sorted(params))
     signature = _tencent_asr_sign(sorted_query)
     url_query = "&".join(f"{k}={urllib.parse.quote_plus(v)}" for k, v in params.items())
-    url = f"wss://asr.cloud.tencent.com/asr/v2/{TENCENT_APPID}?{url_query}&signature={urllib.parse.quote_plus(signature)}"
+    return f"wss://asr.cloud.tencent.com/asr/v2/{TENCENT_APPID}?{url_query}&signature={urllib.parse.quote_plus(signature)}"
+
+async def _tencent_transcribe(wav_bytes: bytes) -> str:
+    if not (TENCENT_APPID and TENCENT_SECRET_ID and TENCENT_SECRET_KEY):
+        raise RuntimeError("腾讯云语音识别未配置（缺 TENCENT_APPID/SECRET_ID/SECRET_KEY）")
 
     # 跳过44字节WAV文件头，只发裸PCM——voice_format=1(PCM)已经告诉服务端这是
     # 不带容器头的裸音频数据，官方文档的分片发送示例发的都是PCM数据本身
     pcm = wav_bytes[44:] if wav_bytes[:4] == b"RIFF" else wav_bytes
     CHUNK = 6400  # 16kHz*16bit*mono下200ms的数据量，文档推荐的分片大小
 
-    # 真机反馈过一次卡死502（后端在美国sfo，腾讯云在国内，跨境这段连接偶尔
-    # 迟迟不回应），原来的代码没有任何超时保护，会一直干等到Railway自己的
-    # 网关超时才报错，用户看到的是不知所云的"Application failed to respond"。
-    # 包一层整体超时，卡住时给出我们自己的明确错误，不让请求无限挂起。
-    async def _run() -> str:
+    # 排查过一次"连接建立几十毫秒后就被直接掐断（无正常关闭握手）"的问题，
+    # 一度怀疑是跨境网络链路不稳定，最后用一次不发送任何音频、只等服务端
+    # 主动消息的裸连接测试坐实了真根因：账户欠费（code=4005），停服触发的
+    # 是硬性断连而不是正常的JSON错误消息。账户余额恢复后问题消失，不是
+    # 网络问题也不是代码逻辑问题。保留自动重试——虽然这次的具体原因是
+    # 欠费，但连接被服务端意外中断这个故障模式本身还可能因为其他瞬时原因
+    # 出现，重试的代价很低，不用用户自己手动重新提问。
+    async def _run(url: str) -> str:
         segments: dict[int, str] = {}
-        t_start = time.time()
         async with websockets.connect(url, open_timeout=10) as ws:
-            print(f"[腾讯云ASR诊断] 连接建立 +{time.time()-t_start:.2f}s，PCM长度={len(pcm)}字节≈{len(pcm)/32000:.1f}秒")
+            # 腾讯云限速"1秒内最多3倍实时速率"，一口气发完整段PCM会被拒绝
+            # （code=4000），按音频时长节流发送，控制在2.5倍速以内留余量
             SEND_SPEED_FACTOR = 2.5
             BYTES_PER_SECOND = 32000  # 16kHz * 16bit * mono
             start_wall = time.time()
             audio_seconds_sent = 0.0
-            try:
-                for i in range(0, len(pcm), CHUNK):
-                    await ws.send(pcm[i:i + CHUNK])
-                    audio_seconds_sent += len(pcm[i:i + CHUNK]) / BYTES_PER_SECOND
-                    min_wall_elapsed = audio_seconds_sent / SEND_SPEED_FACTOR
-                    wall_elapsed = time.time() - start_wall
-                    if wall_elapsed < min_wall_elapsed:
-                        await asyncio.sleep(min_wall_elapsed - wall_elapsed)
-                print(f"[腾讯云ASR诊断] 发送完毕 +{time.time()-t_start:.2f}s")
-            except websockets.ConnectionClosed as e:
-                print(f"[腾讯云ASR诊断] 发送阶段断连 +{time.time()-t_start:.2f}s rcvd={e.rcvd!r} sent={e.sent!r}")
-                raise
+            for i in range(0, len(pcm), CHUNK):
+                await ws.send(pcm[i:i + CHUNK])
+                audio_seconds_sent += len(pcm[i:i + CHUNK]) / BYTES_PER_SECOND
+                min_wall_elapsed = audio_seconds_sent / SEND_SPEED_FACTOR
+                wall_elapsed = time.time() - start_wall
+                if wall_elapsed < min_wall_elapsed:
+                    await asyncio.sleep(min_wall_elapsed - wall_elapsed)
             await ws.send(json.dumps({"type": "end"}))
-            print(f"[腾讯云ASR诊断] 已发end信号 +{time.time()-t_start:.2f}s")
 
-            try:
-                async for raw in ws:
-                    print(f"[腾讯云ASR诊断] 收到消息 +{time.time()-t_start:.2f}s: {raw}")
-                    msg = json.loads(raw)
-                    if msg.get("code", 0) != 0:
-                        raise RuntimeError(f"腾讯云ASR错误 {msg.get('code')}: {msg.get('message')}")
-                    result = msg.get("result")
-                    if result and result.get("slice_type") == 2:
-                        segments[result.get("index", 0)] = result.get("voice_text_str", "")
-                    if msg.get("final") == 1:
-                        break
-            except websockets.ConnectionClosed as e:
-                print(f"[腾讯云ASR诊断] 接收阶段断连 +{time.time()-t_start:.2f}s rcvd={e.rcvd!r} sent={e.sent!r}")
-                raise
+            async for raw in ws:
+                msg = json.loads(raw)
+                if msg.get("code", 0) != 0:
+                    raise RuntimeError(f"腾讯云ASR错误 {msg.get('code')}: {msg.get('message')}")
+                result = msg.get("result")
+                if result and result.get("slice_type") == 2:
+                    segments[result.get("index", 0)] = result.get("voice_text_str", "")
+                if msg.get("final") == 1:
+                    break
         return "".join(segments[i] for i in sorted(segments))
 
-    try:
-        return await asyncio.wait_for(_run(), timeout=20)
-    except asyncio.TimeoutError:
-        raise RuntimeError("腾讯云语音识别响应超时（20秒），请重试")
-    except websockets.ConnectionClosed:
-        # 真机反馈过43秒长录音触发——腾讯云这个接口单次连接音频时长上限60秒，
-        # 快接近上限时服务端会不打招呼直接断连（不是走正常JSON错误消息那条
-        # 路），底层异常文案是"no close frame received or sent"，直接甩给
-        # 用户看不知所云，换成能看懂、能照着做的提示
-        raise RuntimeError("这次说得有点长，语音识别连接中断了，请尝试分成短一些的问题重新提问")
+    MAX_ATTEMPTS = 3
+    last_error: Exception | None = None
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        url = _tencent_asr_url()  # 每次重试都重新签名，避免用旧的timestamp/nonce
+        try:
+            return await asyncio.wait_for(_run(url), timeout=20)
+        except asyncio.TimeoutError:
+            # 超时说明连接建立、通信正常但处理慢，重试大概率还是慢，不重试
+            raise RuntimeError("腾讯云语音识别响应超时（20秒），请重试")
+        except websockets.ConnectionClosed as e:
+            last_error = e
+            print(f"[腾讯云ASR] 第{attempt}次连接被意外中断，{'重试' if attempt < MAX_ATTEMPTS else '放弃'}")
+    raise RuntimeError(f"语音识别连接不稳定，已重试{MAX_ATTEMPTS}次仍失败，请稍后再试（{last_error}）")
 
 # ── EPUB 章节目录提取 ──────────────────────────────────────────────
 
