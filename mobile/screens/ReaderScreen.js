@@ -25,11 +25,15 @@ import BookChatScreen from './BookChatScreen';
 // 需要真机确认实际效果，若加载失败WebView会静默回退到默认字体，不会白屏。
 const EPUB_SERIF_FONT_FAMILY = 'SourceHanSerifSC';
 
+// 2026-08-06排版反馈：决策层用真实截图做before/after对比后确认，行高从
+// 默认1.5调到1.75，三档主题（亮色/护眼/夜间）都要统一生效，不是只改一档。
+const READING_LINE_HEIGHT = '1.75';
+
 // 三套主题：亮色 / 暖纸色（护眼） / 深色，对应范围声明里确认的阅读体验要求
 const THEMES = {
-  light: { body: { background: '#ffffff', color: '#1a1a2e' } },
-  paper: { body: { background: '#f4ecd8', color: '#5b4636' } },
-  dark:  { body: { background: '#1a1a2e', color: '#dcdce6' } },
+  light: { body: { background: '#ffffff', color: '#1a1a2e', 'line-height': READING_LINE_HEIGHT } },
+  paper: { body: { background: '#f4ecd8', color: '#5b4636', 'line-height': READING_LINE_HEIGHT } },
+  dark:  { body: { background: '#1a1a2e', color: '#dcdce6', 'line-height': READING_LINE_HEIGHT } },
 };
 const THEME_ORDER = ['light', 'paper', 'dark'];
 // 阶段十一：颜色/主题从"点一下循环切换"改成"三档横向切换控件"，标签跟着改
