@@ -1449,6 +1449,16 @@ async def transcribe(request: Request, _=ExtAuth):
         t0        = time.time()
         wav_bytes = await asyncio.to_thread(_webm_to_wav, audio_bytes)
         t1        = time.time()
+        # 临时诊断：真机反馈过好几次"未识别到内容"、返回空字符串，量一下
+        # 转码后的PCM实际响度，区分是"录音本身接近静音"（手机端问题）还是
+        # "音频正常、腾讯云没识别出来"（服务端/参数问题）。排查完就删。
+        pcm_for_check = wav_bytes[44:]
+        if pcm_for_check:
+            import array as _array
+            samples = _array.array('h')
+            samples.frombytes(pcm_for_check[:len(pcm_for_check) - len(pcm_for_check) % 2])
+            peak = max((abs(s) for s in samples), default=0)
+            print(f"[转录诊断] PCM样本数={len(samples)} 峰值={peak}(满幅32767，{peak/32767*100:.1f}%)")
         text      = await _tencent_transcribe(wav_bytes)
         # 拆开打日志：转码 vs 腾讯云ASR本身，方便以后排查延迟时一眼看出瓶颈在哪层
         print(f"[转录] 转码={t1-t0:.2f}s 腾讯云ASR={time.time()-t1:.2f}s 总计={time.time()-t0:.2f}s → {repr(text)}")
