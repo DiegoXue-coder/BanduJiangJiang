@@ -144,6 +144,12 @@ export async function getBookContext(bookId) {
   return appFetch(`/app/books/${bookId}/context`);
 }
 
+// 阶段十七：听书功能用，按章节拿逐段正文文字（不是epub文件本身，是后端
+// 解析好的纯文字段落数组），给ListenScreen逐段过TTS朗读。
+export async function getChapterText(bookId, chapterId) {
+  return appFetch(`/app/books/${bookId}/chapters/${chapterId}/text`);
+}
+
 // ── 阶段十五：PDF/TXT导入原型（内部原型，不对外部用户开放）──────────
 // 后端把PDF/TXT转换成EPUB后走跟直接导入EPUB一样的落地逻辑，这里只是多一个
 // 上传入口，不需要额外的轮询/进度接口。

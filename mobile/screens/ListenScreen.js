@@ -1,0 +1,382 @@
+// 阶段十七：听书核心体验v1（按钮打断版）——独立于ReaderScreen里"问AI"的
+// 聊天面板，这里是"持续朗读书本正文，随时能打断问问题，问完接着往下听"
+// 这条单独的交互线。跟BookChatScreen的TTS播放队列（预取下一句、拼短句）
+// 不是同一套代码——那套是给"AI流式吐字、边生成边念"设计的，这里书本内容
+// 是提前一次性知道的（不是流式生成的），用不着那套预取重叠优化，改成
+// 简单的"一段一段顺序加载播放"，代码简单很多，也不会带上那套至今还没
+// 排查清楚的乱序/丢句问题（阶段十七开工前置条件那次真机没能复现，日志
+// 还留着，详见04-开发进度记录.md）。
+import React, { useState, useRef, useEffect, useCallback } from 'react';
+import {
+  View, Text, StyleSheet, TouchableOpacity, TextInput,
+  ActivityIndicator, ScrollView, Platform, KeyboardAvoidingView,
+} from 'react-native';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { Audio } from 'expo-av';
+import { IconPlayerStop } from '@tabler/icons-react-native';
+import {
+  getBookContext, getChapterText, getTtsPlayUrl,
+  streamAsk, saveHighlight, saveQaHistory,
+} from '../lib/api';
+import { useTheme } from '../theme';
+
+// 章节标题精确匹配"目录"就跳过不朗读——已有真实案例证明目录会被当成
+// 普通章节混进朗读队列（IMG_1564排版反馈截图），不追求覆盖所有变体，
+// 简单规则，识别不到的边界情况留给以后真出现真实案例再处理。
+function isTocChapter(title) {
+  return (title || '').trim() === '目录';
+}
+
+export default function ListenScreen({ route, navigation }) {
+  const { bookId, bookTitle, author } = route.params;
+  const theme = useTheme();
+  const insets = useSafeAreaInsets();
+
+  // phase: loading-book(打开界面首次拉章节列表) / loading-chapter(章节文字
+  // 还没拉到) / playing / paused(打断后，等用户提问) / thinking(等AI回答)
+  // / answering(播AI回答语音) / ask-continue(回答完，问要不要继续) / done
+  // (全书听完) / error
+  const [phase, setPhase] = useState('loading-book');
+  const [errorMsg, setErrorMsg] = useState('');
+  const [chapterTitle, setChapterTitle] = useState('');
+  const [progressLabel, setProgressLabel] = useState('');
+  const [capturedText, setCapturedText] = useState('');
+  const [question, setQuestion] = useState('');
+  const [answerText, setAnswerText] = useState('');
+
+  const chaptersRef = useRef([]); // 已经过滤掉"目录"章节的列表
+  const paragraphCacheRef = useRef({}); // chapterId -> string[]
+  const epochRef = useRef(0); // 每次打断/停止自增，让还没awaitresolve的加载能认出自己过期
+  const soundRef = useRef(null);
+  const posRef = useRef({ chapterIdx: 0, paragraphIdx: 0 }); // 当前/暂停时的位置
+  const abortAskRef = useRef(null);
+
+  async function stopSound() {
+    if (soundRef.current) {
+      await soundRef.current.stopAsync().catch(() => {});
+      await soundRef.current.unloadAsync().catch(() => {});
+      soundRef.current = null;
+    }
+  }
+
+  async function playOneParagraph(text, epoch) {
+    const { sound } = await Audio.Sound.createAsync(
+      { uri: getTtsPlayUrl(text) },
+      { shouldPlay: false },
+    );
+    if (epoch !== epochRef.current) {
+      sound.unloadAsync().catch(() => {});
+      return;
+    }
+    soundRef.current = sound;
+    await new Promise((resolve) => {
+      sound.setOnPlaybackStatusUpdate((s) => {
+        if (s.didJustFinish) resolve();
+      });
+      sound.playAsync().catch(() => resolve()); // 播放本身失败也别卡住整个循环，跳过这段
+    });
+  }
+
+  // 从指定位置开始顺序朗读，直到打断（epoch变化）或全书听完。
+  // 打断的粒度是"段落"——不做音频内细粒度进度记录，暂停即重播该段
+  // （不是从头也不是丢段，是这次没有更细粒度可用时最合理的中间选择）。
+  const playFrom = useCallback(async (startChapterIdx, startParagraphIdx, epoch) => {
+    const chapters = chaptersRef.current;
+    let ci = startChapterIdx;
+    let pi = startParagraphIdx;
+    while (ci < chapters.length) {
+      if (epoch !== epochRef.current) return;
+      const chapter = chapters[ci];
+      let paragraphs = paragraphCacheRef.current[chapter.id];
+      if (!paragraphs) {
+        setPhase('loading-chapter');
+        setChapterTitle(chapter.title);
+        try {
+          const data = await getChapterText(bookId, chapter.id);
+          paragraphs = data.paragraphs || [];
+        } catch (e) {
+          if (epoch !== epochRef.current) return;
+          setErrorMsg(e.message || '章节加载失败');
+          setPhase('error');
+          return;
+        }
+        if (epoch !== epochRef.current) return;
+        paragraphCacheRef.current[chapter.id] = paragraphs;
+      }
+      while (pi < paragraphs.length) {
+        if (epoch !== epochRef.current) return;
+        posRef.current = { chapterIdx: ci, paragraphIdx: pi };
+        setChapterTitle(chapter.title);
+        setProgressLabel(`第${pi + 1}/${paragraphs.length}段`);
+        setPhase('playing');
+        try {
+          await playOneParagraph(paragraphs[pi], epoch);
+        } catch (e) {
+          // 单段加载/播放失败就跳过，不整段卡死听书流程
+        }
+        if (soundRef.current) {
+          soundRef.current.unloadAsync().catch(() => {});
+          soundRef.current = null;
+        }
+        if (epoch !== epochRef.current) return;
+        pi += 1;
+      }
+      ci += 1;
+      pi = 0;
+    }
+    if (epoch === epochRef.current) setPhase('done');
+  }, [bookId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    Audio.setAudioModeAsync({ playsInSilentModeIOS: true }).catch(() => {});
+    getBookContext(bookId).then((ctx) => {
+      if (cancelled) return;
+      const filtered = (ctx.chapters || []).filter((c) => !isTocChapter(c.title));
+      chaptersRef.current = filtered;
+      if (filtered.length === 0) {
+        setErrorMsg('这本书没有可朗读的章节');
+        setPhase('error');
+        return;
+      }
+      playFrom(0, 0, epochRef.current);
+    }).catch((e) => {
+      if (cancelled) return;
+      setErrorMsg(e.message || '书本信息加载失败');
+      setPhase('error');
+    });
+    return () => {
+      cancelled = true;
+      epochRef.current += 1;
+      stopSound();
+      abortAskRef.current?.();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bookId]);
+
+  function handleInterrupt() {
+    if (phase !== 'playing' && phase !== 'loading-chapter') return;
+    epochRef.current += 1;
+    stopSound();
+    const { chapterIdx, paragraphIdx } = posRef.current;
+    const chapter = chaptersRef.current[chapterIdx];
+    const paragraphs = paragraphCacheRef.current[chapter?.id] || [];
+    setCapturedText(paragraphs[paragraphIdx] || '');
+    setQuestion('');
+    setAnswerText('');
+    setPhase('paused');
+  }
+
+  function handleAsk() {
+    const q = question.trim();
+    if (!q) return;
+    setPhase('thinking');
+    const chapter = chaptersRef.current[posRef.current.chapterIdx];
+    let fullAnswer = '';
+    abortAskRef.current = streamAsk(
+      {
+        context: {
+          bookTitle, author, chapterTitle: chapter?.title || '',
+          selection: capturedText, pageText: '',
+          userHighlights: [], popularHighlights: [],
+        },
+        question: q,
+        style: 'simple',
+        history: [],
+      },
+      {
+        onDelta: (delta) => { fullAnswer += delta; },
+        onDone: async (answer) => {
+          abortAskRef.current = null;
+          setAnswerText(answer);
+          // 打断瞬间截取的段落，当成一次"自动划线"存下来，复用现有划线
+          // 数据结构——cfi_location用不了真实CFI（这里没有驱动epub.js，
+          // 只是纯数据段落），用"listen:章节id:段落序号"这种可辨识的
+          // 假位置代替，如实说明：从复盘页点这条划线跳回书里定位不了，
+          // 是已知限制，不是bug。
+          const fakeCfi = `listen:${chapter?.id}:${posRef.current.paragraphIdx}`;
+          saveHighlight(bookId, { cfiLocation: fakeCfi, highlightedText: capturedText }).catch(() => {});
+          saveQaHistory({
+            bookId, bookTitle, chapterTitle: chapter?.title || '',
+            question: q, answer, selection: capturedText, cfiRange: fakeCfi,
+          }).catch(() => {});
+          setPhase('answering');
+          const epoch = epochRef.current;
+          try {
+            await playOneParagraph(answer, epoch);
+          } catch (e) {
+            // 回答播放失败不影响后续"要不要继续"流程
+          }
+          if (soundRef.current) {
+            soundRef.current.unloadAsync().catch(() => {});
+            soundRef.current = null;
+          }
+          if (epoch === epochRef.current) setPhase('ask-continue');
+        },
+        onError: (e) => {
+          abortAskRef.current = null;
+          setErrorMsg(e.message || '提问失败');
+          setPhase('error');
+        },
+      },
+    );
+  }
+
+  function handleContinue() {
+    const { chapterIdx, paragraphIdx } = posRef.current;
+    playFrom(chapterIdx, paragraphIdx, epochRef.current);
+  }
+
+  function handleStopListening() {
+    epochRef.current += 1;
+    stopSound();
+    navigation.goBack();
+  }
+
+  return (
+    <SafeAreaView edges={['bottom', 'left', 'right']} style={[styles.safe, { backgroundColor: theme.bg }]}>
+      <View style={[styles.header, { backgroundColor: theme.accent, paddingTop: insets.top + 10 }]}>
+        <TouchableOpacity onPress={handleStopListening} style={styles.headerBtn}>
+          <Text style={[styles.headerBtnText, { color: theme.textOnAccent }]}>‹ 返回</Text>
+        </TouchableOpacity>
+        <Text style={[styles.headerTitle, { color: theme.textOnAccent }]} numberOfLines={1}>{bookTitle}</Text>
+        <View style={styles.headerBtn} />
+      </View>
+
+      <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        <View style={styles.body}>
+          {(phase === 'loading-book') && (
+            <View style={styles.centerBox}><ActivityIndicator color={theme.accent} /></View>
+          )}
+
+          {phase === 'error' && (
+            <View style={styles.centerBox}>
+              <Text style={[styles.errorText, { color: theme.danger }]}>{errorMsg}</Text>
+            </View>
+          )}
+
+          {(phase === 'playing' || phase === 'loading-chapter') && (
+            <View style={styles.centerBox}>
+              <Text style={[styles.chapterLabel, { color: theme.textSecondary }]}>{chapterTitle}</Text>
+              {phase === 'loading-chapter' ? (
+                <ActivityIndicator color={theme.accent} style={{ marginTop: 12 }} />
+              ) : (
+                <>
+                  <Text style={[styles.playingHint, { color: theme.text }]}>正在朗读…</Text>
+                  <Text style={[styles.progressLabel, { color: theme.textMuted }]}>{progressLabel}</Text>
+                </>
+              )}
+              <TouchableOpacity
+                style={[styles.interruptBtn, { backgroundColor: theme.danger, borderRadius: theme.radius }]}
+                onPress={handleInterrupt}
+              >
+                <IconPlayerStop color="#fff" size={20} strokeWidth={2} />
+                <Text style={styles.interruptBtnText}>打断</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+
+          {phase === 'paused' && (
+            <ScrollView contentContainerStyle={styles.pausedContent}>
+              <Text style={[styles.capturedLabel, { color: theme.textSecondary }]}>刚才讲到——</Text>
+              <View style={[styles.capturedBox, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder, borderRadius: theme.radius }]}>
+                <Text style={[styles.capturedText, { color: theme.text }]}>{capturedText}</Text>
+              </View>
+              <TextInput
+                style={[styles.questionInput, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder, color: theme.text, borderRadius: theme.radius }]}
+                placeholder={'想问点什么？（比如"你刚才说的这个是什么意思"）'}
+                placeholderTextColor={theme.textMuted}
+                value={question}
+                onChangeText={setQuestion}
+                multiline
+              />
+              <TouchableOpacity
+                style={[styles.primaryBtn, { backgroundColor: theme.accent, borderRadius: theme.radius }]}
+                onPress={handleAsk}
+                disabled={!question.trim()}
+              >
+                <Text style={[styles.primaryBtnText, { color: theme.textOnAccent }]}>提问</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.linkBtn} onPress={handleContinue}>
+                <Text style={[styles.linkBtnText, { color: theme.textSecondary }]}>不问了，接着听</Text>
+              </TouchableOpacity>
+            </ScrollView>
+          )}
+
+          {phase === 'thinking' && (
+            <View style={styles.centerBox}>
+              <ActivityIndicator color={theme.accent} />
+              <Text style={[styles.playingHint, { color: theme.textSecondary, marginTop: 10 }]}>AI正在思考…</Text>
+            </View>
+          )}
+
+          {phase === 'answering' && (
+            <ScrollView contentContainerStyle={styles.pausedContent}>
+              <Text style={[styles.capturedLabel, { color: theme.textSecondary }]}>回答：</Text>
+              <Text style={[styles.capturedText, { color: theme.text }]}>{answerText}</Text>
+            </ScrollView>
+          )}
+
+          {phase === 'ask-continue' && (
+            <View style={styles.centerBox}>
+              <Text style={[styles.playingHint, { color: theme.text }]}>需要我继续讲吗？</Text>
+              <TouchableOpacity
+                style={[styles.primaryBtn, { backgroundColor: theme.accent, borderRadius: theme.radius }]}
+                onPress={handleContinue}
+              >
+                <Text style={[styles.primaryBtnText, { color: theme.textOnAccent }]}>继续听书</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.linkBtn} onPress={handleStopListening}>
+                <Text style={[styles.linkBtnText, { color: theme.textSecondary }]}>先到这里</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+
+          {phase === 'done' && (
+            <View style={styles.centerBox}>
+              <Text style={[styles.playingHint, { color: theme.text }]}>这本书听完了</Text>
+              <TouchableOpacity
+                style={[styles.primaryBtn, { backgroundColor: theme.accent, borderRadius: theme.radius }]}
+                onPress={handleStopListening}
+              >
+                <Text style={[styles.primaryBtnText, { color: theme.textOnAccent }]}>返回</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+        </View>
+      </KeyboardAvoidingView>
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  safe: { flex: 1 },
+  flex: { flex: 1 },
+  header: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingHorizontal: 4, paddingBottom: 10,
+  },
+  headerBtn: { minWidth: 64, paddingHorizontal: 12, paddingVertical: 6 },
+  headerBtnText: { fontSize: 15 },
+  headerTitle: { fontSize: 17, fontWeight: '700', flex: 1, textAlign: 'center' },
+  body: { flex: 1, padding: 20 },
+  centerBox: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 8 },
+  errorText: { fontSize: 14, textAlign: 'center' },
+  chapterLabel: { fontSize: 14, marginBottom: 16 },
+  playingHint: { fontSize: 18, fontWeight: '600' },
+  progressLabel: { fontSize: 13, marginTop: 6 },
+  interruptBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    paddingHorizontal: 28, paddingVertical: 14, marginTop: 32,
+  },
+  interruptBtnText: { color: '#fff', fontSize: 16, fontWeight: '700' },
+  pausedContent: { padding: 4, gap: 12 },
+  capturedLabel: { fontSize: 13 },
+  capturedBox: { borderWidth: 1, padding: 12 },
+  capturedText: { fontSize: 15, lineHeight: 22 },
+  questionInput: { borderWidth: 1, padding: 12, fontSize: 14, minHeight: 80, textAlignVertical: 'top' },
+  primaryBtn: { paddingVertical: 13, alignItems: 'center', justifyContent: 'center', marginTop: 4 },
+  primaryBtnText: { fontSize: 15, fontWeight: '700' },
+  linkBtn: { alignItems: 'center', paddingVertical: 10 },
+  linkBtnText: { fontSize: 14 },
+});

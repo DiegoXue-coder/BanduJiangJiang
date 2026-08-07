@@ -13,6 +13,7 @@ import { IconBooks, IconHighlight, IconUserCircle } from '@tabler/icons-react-na
 
 import BookshelfScreen from './screens/BookshelfScreen';
 import ReaderScreen from './screens/ReaderScreen';
+import ListenScreen from './screens/ListenScreen';
 import ReviewScreen from './screens/ReviewScreen';
 import ReviewBookScreen from './screens/ReviewBookScreen';
 import ReviewDetailScreen from './screens/ReviewDetailScreen';
@@ -78,6 +79,7 @@ function BookshelfStackScreen() {
     <BookshelfStack.Navigator screenOptions={{ headerShown: false }}>
       <BookshelfStack.Screen name="BookshelfHome" component={BookshelfScreen} />
       <BookshelfStack.Screen name="Reader" component={ReaderScreen} />
+      <BookshelfStack.Screen name="Listen" component={ListenScreen} />
     </BookshelfStack.Navigator>
   );
 }

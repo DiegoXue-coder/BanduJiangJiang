@@ -7,7 +7,7 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { Reader, useReader } from '@epubjs-react-native/core';
 import { useFileSystem } from '@epubjs-react-native/expo-file-system';
 import { BottomSheetModal, BottomSheetBackdrop } from '@gorhom/bottom-sheet';
-import { IconList, IconMessageCircle, IconBrightness, IconTextSize } from '@tabler/icons-react-native';
+import { IconList, IconMessageCircle, IconBrightness, IconTextSize, IconHeadphones } from '@tabler/icons-react-native';
 import { Asset } from 'expo-asset';
 import * as FileSystem from 'expo-file-system/legacy';
 import {
@@ -325,6 +325,12 @@ function ReaderInner({
           </TouchableOpacity>
           <TouchableOpacity onPress={() => setShowToc(true)} style={styles.headerBtn}>
             <IconList color={uiTheme.textOnAccent} size={22} strokeWidth={1.75} />
+          </TouchableOpacity>
+          <TouchableOpacity
+            onPress={() => navigation.navigate('Listen', { bookId, bookTitle, author })}
+            style={styles.headerBtn}
+          >
+            <IconHeadphones color={uiTheme.textOnAccent} size={22} strokeWidth={1.75} />
           </TouchableOpacity>
           <TouchableOpacity onPress={() => openChat()} style={styles.headerBtn}>
             <IconMessageCircle color={uiTheme.textOnAccent} size={22} strokeWidth={1.75} />
