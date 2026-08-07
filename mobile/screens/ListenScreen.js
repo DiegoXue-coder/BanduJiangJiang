@@ -94,7 +94,12 @@ export default function ListenScreen({ route, navigation }) {
         try {
           const data = await getChapterText(bookId, chapter.id);
           paragraphs = data.paragraphs || [];
+          // 临时诊断：真机反馈"只听到'前言'两个字，后面都没有了"，加日志
+          // 确认到底是"这一章后端就只返回了一段"，还是"返回了多段但播放
+          // 循环提前退出"，不能靠猜。排查完就删。
+          console.log(`[听书诊断] 章节"${chapter.title}"(id=${chapter.id})拿到${paragraphs.length}段：`, paragraphs.map((p) => p.slice(0, 10)));
         } catch (e) {
+          console.log(`[听书诊断] 章节"${chapter.title}"加载失败：${e.message}`);
           if (epoch !== epochRef.current) return;
           setErrorMsg(e.message || '章节加载失败');
           setPhase('error');
@@ -104,26 +109,36 @@ export default function ListenScreen({ route, navigation }) {
         paragraphCacheRef.current[chapter.id] = paragraphs;
       }
       while (pi < paragraphs.length) {
-        if (epoch !== epochRef.current) return;
+        if (epoch !== epochRef.current) {
+          console.log(`[听书诊断] epoch过期(${epoch}→${epochRef.current})，播放循环退出，位置=${ci}/${pi}`);
+          return;
+        }
         posRef.current = { chapterIdx: ci, paragraphIdx: pi };
         setChapterTitle(chapter.title);
         setProgressLabel(`第${pi + 1}/${paragraphs.length}段`);
         setPhase('playing');
+        console.log(`[听书诊断] 开始播放 章节="${chapter.title}" 第${pi + 1}/${paragraphs.length}段`);
         try {
           await playOneParagraph(paragraphs[pi], epoch);
+          console.log(`[听书诊断] 播放完成 章节="${chapter.title}" 第${pi + 1}/${paragraphs.length}段`);
         } catch (e) {
-          // 单段加载/播放失败就跳过，不整段卡死听书流程
+          console.log(`[听书诊断] 播放出错，跳过这段：${e.message}`);
         }
         if (soundRef.current) {
           soundRef.current.unloadAsync().catch(() => {});
           soundRef.current = null;
         }
-        if (epoch !== epochRef.current) return;
+        if (epoch !== epochRef.current) {
+          console.log(`[听书诊断] 播完这段后epoch已过期，循环退出`);
+          return;
+        }
         pi += 1;
       }
+      console.log(`[听书诊断] 章节"${chapter.title}"全部段落播完，切下一章`);
       ci += 1;
       pi = 0;
     }
+    console.log('[听书诊断] 全书播放完毕');
     if (epoch === epochRef.current) setPhase('done');
   }, [bookId]);
 
