@@ -861,9 +861,93 @@ def _extract_chapter_titles(book: "epub.EpubBook") -> list[str]:
         return titles
     return [item.get_name() for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT)]
 
+def _is_toc_heading_text(text: str) -> bool:
+    """精确匹配"目录"/"Contents"这类标题文字（去空格、大小写不敏感），
+    用于识别原书自己写的目录内容页。只做精确匹配不猜别的变体——漏判顶多是
+    目录页被当成一章正文导入，用户能一眼看出来；误判会把真正有内容的章节
+    整个丢掉，风险不对等，所以宁可保守漏判。"""
+    normalized = re.sub(r"[\s　]+", "", text).lower()
+    return normalized in ("目录", "contents", "tableofcontents")
+
+def _html_table_to_rows(table_tag) -> list[list[str]]:
+    """把EPUB原书里真实的<table>标签转成文字网格，格式跟pdfplumber
+    提取出来的rows一致，复用同一套质量门槛(_is_valid_pdfplumber_table)和
+    HTML重建(_table_rows_to_html)，不用另外写一遍判断逻辑。"""
+    rows = []
+    for tr in table_tag.find_all("tr"):
+        cells = [c.get_text(strip=True) for c in tr.find_all(["td", "th"])]
+        if cells:
+            rows.append(cells)
+    return rows
+
+def _resolve_epub_image(book: "epub.EpubBook", doc_item, img_tag) -> str | None:
+    """从EPUB包内取出<img>标签指向的真实图片字节，跟PDF图片提取
+    (_extract_page_images)用同一套2KB~2MB过滤规则，取不到/不通过过滤就
+    返回None，调用方直接跳过这张图，不影响其他内容提取。"""
+    src = img_tag.get("src") or ""
+    if not src or src.startswith("data:"):
+        return None
+    resolved = urllib.parse.urljoin(doc_item.get_name(), src)
+    img_item = book.get_item_with_href(resolved)
+    if img_item is None:
+        return None
+    try:
+        data = img_item.get_content()
+    except Exception:
+        return None
+    if not data or len(data) < _MIN_IMAGE_BYTES or len(data) > _MAX_IMAGE_BYTES:
+        return None
+    ext = os.path.splitext(resolved)[1].lstrip(".").lower() or "jpg"
+    if ext not in _IMAGE_EXT_MEDIA_TYPE:
+        ext = "jpg"
+    return f"{ext}:{base64.b64encode(data).decode('ascii')}"
+
+def _epub_doc_to_marker_paragraphs(book: "epub.EpubBook", doc_item, soup) -> list[str]:
+    """把一篇EPUB文档解析成marker化的段落列表：标题(h1~h6)/表格/图片分别
+    转成_HEADING_MARKER/_TABLE_MARKER/_IMAGE_MARKER开头的特殊段落，跟PDF
+    那边(阶段十八)是同一套marker管线，直接复用_build_epub_from_sections
+    已有的渲染逻辑，不用另外写一套。普通正文仍然只认<p>标签，原因见下面
+    循环里的注释。
+
+    表格内部嵌套的<p>/<img>（比如单元格里有个<p>文字或图）要防止被外层
+    再当成独立段落重复提取一遍——表格质量门槛通过、真的生成了_TABLE_
+    MARKER的情况下才标记这些子标签"已消费"跳过；质量门槛没过、表格没被
+    使用时，不标记，让内部的<p>/<img>照常被单独提取，不比以前的纯<p>提取
+    丢东西。"""
+    paragraphs = []
+    consumed_ids = set()
+    for tag in soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6", "p", "table", "img"]):
+        if id(tag) in consumed_ids:
+            continue
+        if tag.name == "table":
+            rows = _html_table_to_rows(tag)
+            if _is_valid_pdfplumber_table(rows):
+                paragraphs.append(_TABLE_MARKER + _table_rows_to_html(rows))
+                for descendant in tag.find_all(["p", "img"]):
+                    consumed_ids.add(id(descendant))
+            continue
+        if tag.name == "img":
+            payload = _resolve_epub_image(book, doc_item, tag)
+            if payload:
+                paragraphs.append(_IMAGE_MARKER + payload)
+            continue
+        if tag.name == "p":
+            text = tag.get_text(strip=True)
+            if text:
+                paragraphs.append(text)
+            continue
+        # 剩下的只可能是h1~h6
+        text = tag.get_text(strip=True)
+        if text:
+            paragraphs.append(f"{_HEADING_MARKER}{tag.name[1]}\x00{text}")
+    return paragraphs
+
 def _epub_book_to_chapters(book: "epub.EpubBook") -> list[tuple[str, list[str]]]:
-    """把用户自己上传的epub提取成纯文字章节（跟PDF/TXT导入统一走
-    _build_epub_from_sections重建），丢弃原书自带的CSS/复杂标记。
+    """把用户自己上传的epub提取成章节（跟PDF/TXT导入统一走
+    _build_epub_from_sections重建），丢弃原书自带的CSS/复杂标记，但保留
+    标题层级(h1~h6)、真实的<table>表格、<img>图片——这三项是2026-08-08
+    真机验收发现漏掉的（原来的实现只认<p>标签，标题/表格/图片全部被
+    无视），根因是同一个："只挑<p>标签"这个规则定得太窄。
 
     真机反馈过：用户自己上传的epub选不了字、目录/正文颜色（比如荧光黄
     目录、黑色正文）不跟随深色模式/护眼模式调整——预置书库和PDF/TXT导入
@@ -893,14 +977,21 @@ def _epub_book_to_chapters(book: "epub.EpubBook") -> list[tuple[str, list[str]]]
         soup = BeautifulSoup(html_content, "html.parser")
         for tag in soup(["script", "style"]):
             tag.decompose()
-        # 只优先取<p>标签（绝大多数epub都用它包段落）。不混着选<div>/<li>——
-        # 这两种标签经常互相嵌套（比如<div>里包着多个<p>），一起选会把父
+
+        # 原书自己写的目录内容页（不是EpubNav自动生成的导航，是spine里一篇
+        # 普通文档，内容是一堆指向各章节的链接）——App自己的章节列表就是
+        # 目录功能，这种页面不该混进正文当成"一章"导入。用"这篇文档的第
+        # 一个标题就是'目录'"做精确匹配识别，命中就跳过整篇不导入。
+        first_heading = soup.find(["h1", "h2", "h3", "h4", "h5", "h6"])
+        if first_heading and _is_toc_heading_text(first_heading.get_text(strip=True)):
+            continue
+
+        # 只优先取<p>/标题/表格/图片这几种标签，不混着选<div>/<li>——这些
+        # 容器标签经常互相嵌套（比如<div>里包着多个<p>），一起选会把父
         # 容器的文字和它内部子标签的文字重复选中两遍，实测真的复现过这个
-        # 重复bug。真的一个<p>都没有才退化成取纯文本按行分段，不逐标签选。
-        p_tags = soup.find_all("p")
-        if p_tags:
-            paragraphs = [p.get_text(strip=True) for p in p_tags if p.get_text(strip=True)]
-        else:
+        # 重复bug。真的什么都没提取到才退化成取纯文本按行分段，不逐标签选。
+        paragraphs = _epub_doc_to_marker_paragraphs(book, item, soup)
+        if not paragraphs:
             text = soup.get_text("\n")
             paragraphs = [line.strip() for line in text.split("\n") if line.strip()]
         if not paragraphs:
@@ -927,8 +1018,9 @@ def _merge_short_paragraphs(paragraphs: list[str], min_chars: int = MIN_CHAPTER_
         # 阶段十八：表格HTML块（_TABLE_MARKER开头）和图片数据块（_IMAGE_
         # MARKER开头）必须原样单独成一项，不能被这里当成普通段落跟前后
         # 文字合并——合并会把HTML/base64数据拆散拼进别的段落字符串里，
-        # _build_epub_from_sections按\\n展开<p>标签时就整个错乱了。
-        if p.startswith(_TABLE_MARKER) or p.startswith(_IMAGE_MARKER):
+        # _build_epub_from_sections按\\n展开<p>标签时就整个错乱了。标题
+        # （_HEADING_MARKER开头）同理，合并进普通段落会丢失标题的独立性。
+        if p.startswith(_TABLE_MARKER) or p.startswith(_IMAGE_MARKER) or p.startswith(_HEADING_MARKER):
             if buffer:
                 merged.append(buffer)
                 buffer = ""
@@ -999,6 +1091,17 @@ def _build_epub_from_sections(dst_path: str, title: str, author: str, chapters: 
                         html_parts.append(f'<img src="{img_name}" alt="" />')
                     except Exception:
                         continue
+                elif sub.startswith(_HEADING_MARKER):
+                    # 格式："{level}\x00{标题文字}"，level对应原书h1~h6的
+                    # 层级，直接渲染成对应的<h{level}>标签，不套<p>——这样
+                    # WebView阅读器才能保留原书标题跟正文的字号区分。
+                    try:
+                        payload = sub[len(_HEADING_MARKER):]
+                        level_str, heading_text = payload.split("\x00", 1)
+                        level = min(max(int(level_str), 1), 6)
+                        html_parts.append(f"<h{level}>{html.escape(heading_text)}</h{level}>")
+                    except Exception:
+                        html_parts.append(f"<p>{html.escape(sub)}</p>")
                 else:
                     html_parts.append(f"<p>{html.escape(sub)}</p>")
         paragraphs_html = "".join(html_parts)
@@ -1154,6 +1257,10 @@ def _rejoin_pdf_lines_into_paragraphs(full_text: str) -> list[str]:
 # 纯文字提取（阶段十八验收标准明确允许的兜底），不能因为"技术上识别到了
 # 东西"就不管质量硬套一个可能是错的表格结构。
 _TABLE_MARKER = "\x00TABLE\x00"
+# 阶段十八续：EPUB原书的标题标签(h1~h6)。跟表格/图片一样是"必须独立成一项、
+# 不能被_merge_short_paragraphs合并、渲染时不能套<p>"的特殊段落，格式是
+# "{marker}{level}\x00{标题文字}"，level是1~6的数字字符。
+_HEADING_MARKER = "\x00HEADING\x00"
 
 def _is_valid_pdfplumber_table(rows: list[list]) -> bool:
     """质量门槛：至少2行、至少2列，且大部分格子不是空的——过滤掉"只识别出
