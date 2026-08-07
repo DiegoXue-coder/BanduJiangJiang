@@ -2464,6 +2464,60 @@ async def app_get_book_context(book_id: int, user_id: int = CurrentUser):
         current_cfi_location=progress["current_cfi_location"] if progress else "",
     )
 
+@app.get("/app/books/{book_id}/chapters/{chapter_id}/text")
+async def app_get_chapter_text(book_id: int, chapter_id: int, user_id: int = CurrentUser):
+    """阶段十七听书功能：把一章的正文按段落文字返回给手机端逐段TTS朗读。
+    书本内容只存在EPUB文件本身，没有单独的文字表——复用阶段十八/EPUB清洗
+    那套 _epub_doc_to_marker_paragraphs 解析逻辑。能这样做是因为本项目
+    所有书（预置、PDF/TXT导入、用户上传EPUB）最终都经过同一套
+    _build_epub_from_sections 重建落地，存的是结构统一、可预测的干净EPUB
+    （spine顺序 = chapters.order_index），不是原始五花八门的用户文件，
+    可以放心按下标索引对应章节，不用像清洗阶段那样处理任意结构。表格/
+    图片这类没法朗读的内容直接跳过，标题转成普通文字混在正文里一起读。
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        chapter = await conn.fetchrow(
+            "SELECT order_index, title FROM chapters WHERE id = $1 AND book_id = $2",
+            chapter_id, book_id,
+        )
+        if not chapter:
+            raise HTTPException(status_code=404, detail="章节不存在")
+        book_row = await conn.fetchrow("SELECT file_path FROM books WHERE id = $1", book_id)
+    if not book_row or not os.path.isfile(book_row["file_path"]):
+        raise HTTPException(status_code=404, detail="书本文件不存在")
+
+    def _extract() -> list[str]:
+        book = epub.read_epub(book_row["file_path"])
+        doc_items = [
+            item for item in (book.get_item_with_id(idref) for idref, _ in book.spine)
+            if item is not None and item.get_type() == ebooklib.ITEM_DOCUMENT
+            and not isinstance(item, epub.EpubNav)
+        ]
+        idx = chapter["order_index"]
+        if idx < 0 or idx >= len(doc_items):
+            return []
+        item = doc_items[idx]
+        html_content = item.get_content().decode("utf-8", errors="replace")
+        soup = BeautifulSoup(html_content, "html.parser")
+        for tag in soup(["script", "style"]):
+            tag.decompose()
+        raw_paragraphs = _epub_doc_to_marker_paragraphs(book, item, soup)
+        result = []
+        for p in raw_paragraphs:
+            if p.startswith(_TABLE_MARKER) or p.startswith(_IMAGE_MARKER):
+                continue
+            if p.startswith(_HEADING_MARKER):
+                _, text = p[len(_HEADING_MARKER):].split("\x00", 1)
+                if text:
+                    result.append(text)
+                continue
+            result.append(p)
+        return result
+
+    paragraphs = await asyncio.to_thread(_extract)
+    return {"title": chapter["title"], "paragraphs": paragraphs}
+
 @app.get("/app/books/{book_id}/file.epub")
 async def app_get_book_file(book_id: int, user_id: int = CurrentUser):
     """阅读器下载原始 EPUB 文件。
