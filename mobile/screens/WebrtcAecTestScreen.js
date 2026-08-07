@@ -2,7 +2,6 @@ import React, { useRef, useState, useCallback } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, ScrollView, PermissionsAndroid, Platform } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Audio } from 'expo-av';
-import { mediaDevices, RTCPeerConnection } from 'react-native-webrtc';
 import { useTheme } from '../theme';
 import { getTtsPlayUrl } from '../lib/api';
 
@@ -32,6 +31,18 @@ export default function WebrtcAecTestScreen() {
   }, []);
 
   async function startLoopback() {
+    // react-native-webrtc必须用运行时require、不能在文件顶层静态import——
+    // 库内部EventEmitter.js模块加载时会立刻执行
+    // `new NativeEventEmitter(NativeModules.WebRTCModule)`，Expo Go里这个
+    // 原生模块不存在，NativeEventEmitter收到undefined直接抛
+    // Invariant Violation，而且是在App.js顶层import链路上同步触发的——
+    // 不是等用户点进这个页面才崩，是整个App一启动就"App entry not found"，
+    // 真机实测过（1号工程师2026-08-08反馈）。改成只有真按下"开始回环"这个
+    // 按钮时才require，崩溃范围precise收窄到"点这个按钮"，Expo Go里其他
+    // 页面（包括阶段十七听书）完全不受影响；真要触发原生WebRTC功能本来就
+    // 需要走eas build的开发客户端，Expo Go点这个按钮本来就该失败，只是
+    // 不该拖累整个App打不开。
+    const { mediaDevices, RTCPeerConnection } = require('react-native-webrtc');
     if (Platform.OS === 'android') {
       const granted = await PermissionsAndroid.request(
         PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
