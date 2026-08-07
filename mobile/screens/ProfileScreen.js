@@ -34,6 +34,12 @@ export default function ProfileScreen({ navigation }) {
         </TouchableOpacity>
         <TouchableOpacity
           style={[styles.actionBtn, { borderColor: theme.cardBorder, borderRadius: theme.radius }]}
+          onPress={() => navigation.navigate('WebrtcAecTest')}
+        >
+          <Text style={[styles.actionBtnText, { color: theme.text }]}>AEC技术验证（内部）</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.actionBtn, { borderColor: theme.cardBorder, borderRadius: theme.radius }]}
           onPress={() => logout()}
         >
           <Text style={[styles.actionBtnText, { color: theme.danger }]}>退出登录</Text>

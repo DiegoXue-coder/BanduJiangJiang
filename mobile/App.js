@@ -20,6 +20,7 @@ import ReviewDetailScreen from './screens/ReviewDetailScreen';
 import ProfileScreen from './screens/ProfileScreen';
 import BugReportScreen from './screens/BugReportScreen';
 import FeedbackWallScreen from './screens/FeedbackWallScreen';
+import WebrtcAecTestScreen from './screens/WebrtcAecTestScreen';
 import LoginScreen from './screens/LoginScreen';
 import { useTheme } from './theme';
 import { FONT_ASSETS } from './fonts';
@@ -106,13 +107,14 @@ function ProfileStackScreen() {
       <ProfileStack.Screen name="ProfileHome" component={ProfileScreen} />
       <ProfileStack.Screen name="BugReport" component={BugReportScreen} />
       <ProfileStack.Screen name="FeedbackWall" component={FeedbackWallScreen} />
+      <ProfileStack.Screen name="WebrtcAecTest" component={WebrtcAecTestScreen} />
     </ProfileStack.Navigator>
   );
 }
 
 function getTabBarStyle(route, visibleStyle) {
   const focusedRoute = getFocusedRouteNameFromRoute(route) ?? 'BookshelfHome';
-  if (['Reader', 'ReviewBook', 'ReviewDetail', 'BugReport'].includes(focusedRoute)) return { display: 'none' };
+  if (['Reader', 'ReviewBook', 'ReviewDetail', 'BugReport', 'WebrtcAecTest'].includes(focusedRoute)) return { display: 'none' };
   return visibleStyle;
 }
 
