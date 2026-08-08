@@ -3171,10 +3171,18 @@ async def app_get_concept_graph(user_id: int = CurrentUser):
         concept_rows = await conn.fetch(
             "SELECT id, label FROM concepts WHERE user_id = $1 ORDER BY id", user_id
         )
+        # concept_sources.book_id没有外键约束（设计如此，删书不会级联
+        # 删掉这里的记录——图谱节点记录的是"用户的理解轨迹"，不是"书本库存"，
+        # 删书不该抹掉已经形成的理解，决策层2026-08-08明确拍板过）。这里额外
+        # LEFT JOIN一下books表，只是为了检测"这个来源指向的书还在不在"，
+        # 不影响sources本身会不会被查出来——book_title/excerpt在提取那一刻
+        # 已经存成快照文字了，不依赖这次JOIN也能正常显示。
         source_rows = await conn.fetch("""
-            SELECT cs.concept_id, cs.source_type, cs.source_id, cs.book_title, cs.excerpt, cs.explanation
+            SELECT cs.concept_id, cs.source_type, cs.source_id, cs.book_title, cs.excerpt,
+                   cs.explanation, (b.id IS NULL) AS source_deleted
             FROM concept_sources cs
             JOIN concepts c ON c.id = cs.concept_id
+            LEFT JOIN books b ON b.id = cs.book_id
             WHERE c.user_id = $1
             ORDER BY cs.concept_id, cs.created_at
         """, user_id)
@@ -3191,6 +3199,7 @@ async def app_get_concept_graph(user_id: int = CurrentUser):
         sources_by_concept[r["concept_id"]].append({
             "type": r["source_type"], "id": r["source_id"],
             "book_title": r["book_title"], "excerpt": r["excerpt"], "explanation": r["explanation"],
+            "source_deleted": r["source_deleted"],
         })
         schools_by_concept[r["concept_id"]].append(BOOK_SCHOOL.get(r["book_title"], "其他"))
 

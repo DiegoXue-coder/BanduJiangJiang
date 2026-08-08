@@ -462,7 +462,15 @@ function NodeDetailModal({ node, theme, onClose }) {
                 key={i}
                 style={[styles.sourceItem, i > 0 && { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: theme.cardBorder }]}
               >
-                <Text style={[styles.sourceBook, { color: theme.accent }]}>{s.book_title}</Text>
+                <View style={styles.sourceBookRow}>
+                  <Text style={[styles.sourceBook, { color: theme.accent }]}>{s.book_title}</Text>
+                  {/* 划线/问答提炼出的概念是"用户已经形成的理解"，源书被删除
+                      不影响这条理解本身的价值，摘录/解释照常显示；但要诚实
+                      标出原书已经不在了，不能让用户误以为书还在书架上。 */}
+                  {s.source_deleted && (
+                    <Text style={[styles.sourceDeletedTag, { color: theme.textMuted }]}>原文来源已删除</Text>
+                  )}
+                </View>
                 <Text style={[styles.sourceExcerpt, { color: theme.text }]}>"{s.excerpt}"</Text>
                 {!!s.explanation && (
                   <Text style={[styles.sourceExplain, { color: theme.textSecondary }]}>{s.explanation}</Text>
@@ -483,7 +491,7 @@ function EdgeDetailModal({ edge, nodeA, nodeB, theme, onClose }) {
       <Text style={[styles.mindmapExplain, { color: theme.textSecondary }]}>{explanation}</Text>
       {!!node?.sources?.length && (
         <Text style={[styles.mindmapSource, { color: theme.textMuted }]} numberOfLines={2}>
-          {node.sources[0].book_title} · "{node.sources[0].excerpt}"
+          {node.sources[0].book_title}{node.sources[0].source_deleted ? '（原文已删除）' : ''} · "{node.sources[0].excerpt}"
         </Text>
       )}
     </View>
@@ -701,7 +709,9 @@ const styles = StyleSheet.create({
   modalBody: { maxHeight: 360 },
 
   sourceItem: { paddingVertical: 10 },
-  sourceBook: { fontSize: 12, fontWeight: '700', marginBottom: 4 },
+  sourceBookRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 4 },
+  sourceBook: { fontSize: 12, fontWeight: '700' },
+  sourceDeletedTag: { fontSize: 10 },
   sourceExcerpt: { fontSize: 14, lineHeight: 21, fontStyle: 'italic', fontFamily: FONTS.serifRegular, marginBottom: 4 },
   sourceExplain: { fontSize: 12, lineHeight: 18 },
 
