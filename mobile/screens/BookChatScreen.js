@@ -616,11 +616,9 @@ export default function BookChatScreen({
           消息区多长都不会把它挤走。msgContent 的 paddingBottom 留够这块的高度，
           避免最后几条消息被这里挡住。 */}
       <View style={[styles.footerGroup, { backgroundColor: theme.bg, bottom: keyboardHeight }]}>
-        {!!status && (
-          <View style={styles.statusRow}>
-            {transcribing && <ActivityIndicator size="small" color={theme.textMuted} />}
-            <Text style={[styles.status, { color: theme.textMuted }]} numberOfLines={2}>{status}</Text>
-          </View>
+        {/* 识别中已经顶替输入框显示动效了，这里不重复显示同一个状态 */}
+        {!!status && !transcribing && (
+          <Text style={[styles.status, { color: theme.textMuted }]} numberOfLines={2}>{status}</Text>
         )}
 
         {(isThinking || isSpeaking) && (
@@ -646,16 +644,25 @@ export default function BookChatScreen({
             <Text style={styles.voiceIcon}>{isRecording ? '⏹' : '🎤'}</Text>
           </TouchableOpacity>
 
-          <TextInput
-            style={[styles.textInput, { borderRadius: theme.radius, backgroundColor: theme.bg, borderColor: theme.cardBorder, color: theme.text }]}
-            value={input}
-            onChangeText={setInput}
-            placeholder="输入问题…"
-            placeholderTextColor={theme.textMuted}
-            returnKeyType="send"
-            onSubmitEditing={() => handleSend(input)}
-            editable={!isThinking}
-          />
+          {transcribing ? (
+            // 真机反馈：识别中只在下面一小行字提示，容易被忽略、以为卡住了。
+            // 改成顶替输入框本身的显示内容，转圈放在用户视线正对着的地方。
+            <View style={[styles.textInput, styles.transcribingBox, { borderRadius: theme.radius, backgroundColor: theme.bg, borderColor: theme.cardBorder }]}>
+              <ActivityIndicator size="small" color={theme.accent} />
+              <Text style={[styles.transcribingText, { color: theme.textSecondary }]}>正在识别语音…</Text>
+            </View>
+          ) : (
+            <TextInput
+              style={[styles.textInput, { borderRadius: theme.radius, backgroundColor: theme.bg, borderColor: theme.cardBorder, color: theme.text }]}
+              value={input}
+              onChangeText={setInput}
+              placeholder="输入问题…"
+              placeholderTextColor={theme.textMuted}
+              returnKeyType="send"
+              onSubmitEditing={() => handleSend(input)}
+              editable={!isThinking}
+            />
+          )}
 
           <TouchableOpacity
             style={[
@@ -760,6 +767,8 @@ const styles = StyleSheet.create({
     flex: 1, height: 44, paddingHorizontal: 12,
     fontSize: 14, borderWidth: 1.5, fontFamily: FONTS.sansRegular,
   },
+  transcribingBox: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
+  transcribingText: { fontSize: 13 },
   sendBtn: {
     height: 44, paddingHorizontal: 16,
     alignItems: 'center', justifyContent: 'center',

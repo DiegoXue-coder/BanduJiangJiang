@@ -165,21 +165,22 @@ export default function ListenScreen({ route, navigation }) {
 
   async function playOneParagraph(text, epoch, onAudioStart, presetSoundPromise) {
     let sound = null;
+    const t0 = Date.now();
     if (presetSoundPromise) {
       try {
         sound = await presetSoundPromise;
+        console.log(`[听书诊断] 播放段落(用预取好的，等待${Date.now() - t0}ms) voice=${voiceRef.current} rate=${rateRef.current} 字数=${text.length}`);
       } catch (e) {
         sound = null; // 预取失败就退化成现场加载，不让这段直接播放失败
       }
     }
     if (!sound) {
-      console.log(`[听书诊断] 播放段落(现场加载) voice=${voiceRef.current} rate=${rateRef.current} 字数=${text.length}`);
+      const t1 = Date.now();
       ({ sound } = await Audio.Sound.createAsync(
         { uri: getTtsPlayUrl(text, voiceRef.current, rateRef.current) },
         { shouldPlay: false },
       ));
-    } else {
-      console.log(`[听书诊断] 播放段落(用预取好的) voice=${voiceRef.current} rate=${rateRef.current} 字数=${text.length}`);
+      console.log(`[听书诊断] 播放段落(现场加载，耗时${Date.now() - t1}ms) voice=${voiceRef.current} rate=${rateRef.current} 字数=${text.length}`);
     }
     if (epoch !== epochRef.current) {
       sound.unloadAsync().catch(() => {});
@@ -267,10 +268,15 @@ export default function ListenScreen({ route, navigation }) {
             if (nextPi < paragraphs.length) {
               const v = voiceRef.current;
               const r = rateRef.current;
+              const tPrefetchStart = Date.now();
+              console.log(`[听书诊断] 预取开始 第${nextPi + 1}段 字数=${paragraphs[nextPi].length}`);
               const promise = Audio.Sound.createAsync(
                 { uri: getTtsPlayUrl(paragraphs[nextPi], v, r) },
                 { shouldPlay: false },
-              ).then(({ sound: s }) => s);
+              ).then(({ sound: s }) => {
+                console.log(`[听书诊断] 预取完成 第${nextPi + 1}段 耗时${Date.now() - tPrefetchStart}ms`);
+                return s;
+              });
               preparedRef.current = { ci, pi: nextPi, voice: v, rate: r, promise };
             }
           }, presetPromise);
@@ -307,11 +313,21 @@ export default function ListenScreen({ route, navigation }) {
   useEffect(() => {
     const changed = prevVoiceRateRef.current.voice !== voice || prevVoiceRateRef.current.rate !== rate;
     prevVoiceRateRef.current = { voice, rate };
+    console.log(`[听书诊断] 设置变化effect触发 changed=${changed} phase=${phase} voice=${voice} rate=${rate}`);
     if (!changed || phase !== 'playing') return;
     const { chapterIdx, paragraphIdx } = posRef.current;
     epochRef.current += 1;
-    stopSound();
-    playFrom(chapterIdx, paragraphIdx, epochRef.current);
+    // 真机反馈"切换没有立即生效"，排查代码发现一个真实的时序bug：这里
+    // 之前没有await stopSound()就紧接着调用playFrom——stopSound内部对
+    // soundRef.current做stopAsync/unloadAsync是异步的，如果playFrom那边
+    // 更快地把新sound对象赋给了soundRef.current，stopSound后续resolve时
+    // 会错误地操作/清空新sound，而不是它本来该清理的旧sound。改成
+    // 老老实实await完stopSound再启动新的playFrom，消除这个竞态。
+    (async () => {
+      await stopSound();
+      console.log(`[听书诊断] 设置切换：停止旧音频完成，从${chapterIdx}/${paragraphIdx}用新设置重新播放`);
+      playFrom(chapterIdx, paragraphIdx, epochRef.current);
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [voice, rate]);
 
@@ -600,14 +616,24 @@ export default function ListenScreen({ route, navigation }) {
                 <Text style={[styles.capturedText, { color: theme.text }]}>{capturedText}</Text>
               </View>
               <View style={styles.questionRow}>
-                <TextInput
-                  style={[styles.questionInput, styles.questionInputFlex, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder, color: theme.text, borderRadius: theme.radius }]}
-                  placeholder={'想问点什么？（比如"你刚才说的这个是什么意思"）'}
-                  placeholderTextColor={theme.textMuted}
-                  value={question}
-                  onChangeText={setQuestion}
-                  multiline
-                />
+                {isTranscribing ? (
+                  // 真机反馈：识别中的状态之前只在输入框下面一小行字提示，
+                  // 容易被忽略、以为"卡住了"。改成直接顶替输入框本身的显示
+                  // 内容，转圈+文字放在用户视线正对着的输入区域里，更显眼。
+                  <View style={[styles.questionInput, styles.questionInputFlex, styles.transcribingBox, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder, borderRadius: theme.radius }]}>
+                    <ActivityIndicator size="small" color={theme.accent} />
+                    <Text style={[styles.transcribingText, { color: theme.textSecondary }]}>正在识别语音…</Text>
+                  </View>
+                ) : (
+                  <TextInput
+                    style={[styles.questionInput, styles.questionInputFlex, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder, color: theme.text, borderRadius: theme.radius }]}
+                    placeholder={'想问点什么？（比如"你刚才说的这个是什么意思"）'}
+                    placeholderTextColor={theme.textMuted}
+                    value={question}
+                    onChangeText={setQuestion}
+                    multiline
+                  />
+                )}
                 <TouchableOpacity
                   style={[
                     styles.micBtn,
@@ -619,11 +645,10 @@ export default function ListenScreen({ route, navigation }) {
                   <IconMicrophone color={isRecording ? '#fff' : theme.text} size={20} strokeWidth={1.75} />
                 </TouchableOpacity>
               </View>
-              {!!recordingStatus && (
-                <View style={styles.recordingStatusRow}>
-                  {isTranscribing && <ActivityIndicator size="small" color={theme.textMuted} />}
-                  <Text style={[styles.recordingStatus, { color: theme.textMuted }]}>{recordingStatus}</Text>
-                </View>
+              {/* 识别中已经在上面输入框位置显示了动效，这里不重复显示，
+                  避免两处同时出现"识别中"造成视觉上的冗余。 */}
+              {!!recordingStatus && !isTranscribing && (
+                <Text style={[styles.recordingStatus, { color: theme.textMuted }]}>{recordingStatus}</Text>
               )}
               <View style={styles.saveHighlightRow}>
                 <Switch value={saveAsHighlight} onValueChange={setSaveAsHighlight} />
@@ -731,6 +756,8 @@ const styles = StyleSheet.create({
   chipText: { fontSize: 13 },
   questionRow: { flexDirection: 'row', gap: 8, alignItems: 'flex-start' },
   questionInputFlex: { flex: 1 },
+  transcribingBox: { flexDirection: 'row', alignItems: 'center', gap: 8, justifyContent: 'center' },
+  transcribingText: { fontSize: 14 },
   micBtn: { borderWidth: 1, width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
   recordingStatusRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   recordingStatus: { fontSize: 12 },
