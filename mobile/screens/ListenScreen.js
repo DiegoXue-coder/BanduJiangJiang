@@ -28,7 +28,7 @@ function isTocChapter(title) {
 }
 
 export default function ListenScreen({ route, navigation }) {
-  const { bookId, bookTitle, author } = route.params;
+  const { bookId, bookTitle, author, initialChapterTitle } = route.params;
   const theme = useTheme();
   const insets = useSafeAreaInsets();
 
@@ -154,7 +154,14 @@ export default function ListenScreen({ route, navigation }) {
         setPhase('error');
         return;
       }
-      playFrom(0, 0, epochRef.current);
+      // 用户反馈"一点听书就只能从前言开始，不会从当前页开始"——从阅读器
+      // 传来的initialChapterTitle（epub.js当前location的章节标题）按标题
+      // 文本匹配定位起始章节，找不到（标题不完全一致、或没传）就退回从头。
+      // 只能定位到"章"这个粒度，不是段落精确位置——章节内epub.js的CFI跟
+      // 这边独立拉取的段落数组之间没有直接映射关系，做不到更精确的定位。
+      const wanted = (initialChapterTitle || '').trim();
+      const startIdx = wanted ? filtered.findIndex((c) => c.title.trim() === wanted) : -1;
+      playFrom(startIdx >= 0 ? startIdx : 0, 0, epochRef.current);
     }).catch((e) => {
       if (cancelled) return;
       setErrorMsg(e.message || '书本信息加载失败');

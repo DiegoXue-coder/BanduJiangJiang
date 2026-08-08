@@ -327,7 +327,7 @@ function ReaderInner({
             <IconList color={uiTheme.textOnAccent} size={22} strokeWidth={1.75} />
           </TouchableOpacity>
           <TouchableOpacity
-            onPress={() => navigation.navigate('Listen', { bookId, bookTitle, author })}
+            onPress={() => navigation.navigate('Listen', { bookId, bookTitle, author, initialChapterTitle: currentSectionTitle })}
             style={styles.headerBtn}
           >
             <IconHeadphones color={uiTheme.textOnAccent} size={22} strokeWidth={1.75} />
