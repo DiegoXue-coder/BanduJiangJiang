@@ -934,8 +934,25 @@ def _epub_doc_to_marker_paragraphs(book: "epub.EpubBook", doc_item, soup) -> lis
             continue
         if tag.name == "p":
             text = tag.get_text(strip=True)
-            if text:
-                paragraphs.append(text)
+            if not text:
+                continue
+            # 真实案例（《后资本主义时代》单文件结构EPUB）暴露的漏洞：之前
+            # 设计方案时说过要过滤"整段就是一个内部锚点链接"的<p>（原书自己
+            # 写的目录，一条条"标题→章节锚点"的链接罗列，不是EpubNav那种能
+            # 靠isinstance整篇排除的自动导航页），但写代码时漏掉了，没有
+            # 实际实现，导致这上百行目录链接文字被当成正文提取出来，混进了
+            # 紧邻的第一个真实章节（真实复现过：会被错误地并进"前言"这个
+            # 标题名下，变出两个同名的"前言"）。这里补上：<p>标签如果只包着
+            # 一个指向本文档内部锚点(#开头)的链接、没有其他文字，判定为目录
+            # 条目，跳过不当正文；"目录"/"Contents"这种独立的标签行（不一定
+            # 是h1~h6标题标签，也可能就是普通<p>）复用_is_toc_heading_text
+            # 同一条精确匹配规则，也跳过。
+            links = tag.find_all("a", href=True)
+            if len(links) == 1 and links[0]["href"].startswith("#") and links[0].get_text(strip=True) == text:
+                continue
+            if _is_toc_heading_text(text):
+                continue
+            paragraphs.append(text)
             continue
         # 剩下的只可能是h1~h6
         text = tag.get_text(strip=True)
