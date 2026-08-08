@@ -54,7 +54,7 @@ function ReaderInner({
   bookId, bookTitle, author, initialLocation, initialAnnotations, navigation,
   jumpToCfi, jumpNonce, epubSrc,
 }) {
-  const { addAnnotation, changeTheme, changeFontSize, changeFontFamily, toc, goToLocation, goNext, goPrevious, injectJavascript } = useReader();
+  const { addAnnotation, changeTheme, changeFontSize, changeFontFamily, toc, goToLocation, goNext, goPrevious, injectJavascript, currentLocation } = useReader();
 
   // 目录跳转不能直接把 toc 里的 href（形如"chap_005.xhtml"）丢给 goToLocation——
   // 那个函数最终是调 epub.js 的 rendition.display(target)，虽然理论上支持
@@ -339,7 +339,27 @@ function ReaderInner({
             <IconList color={uiTheme.textOnAccent} size={22} strokeWidth={1.75} />
           </TouchableOpacity>
           <TouchableOpacity
-            onPress={() => navigation.navigate('Listen', { bookId, bookTitle, author, initialChapterTitle: currentSectionTitle })}
+            onPress={() => {
+              // 真机反馈：点听书永远从这一章最开头开始，不能接着阅读器
+              // 翻阅的当前位置继续——查过epub.js内部机制，"精确到具体
+              // 哪一段"需要往WebView里注入脚本解析CFI、再靠postMessage
+              // 传结果回来，但@epubjs-react-native/core没有对外暴露自定义
+              // WebView消息的公开接口，这条路走不通，不改这个库源码做不到
+              // 精确匹配。改用已经现成公开的数据做近似估算：epub.js分页
+              // 后会给出"当前在这一章第几页/共几页"（displayed.page/total），
+              // 换算成一个0~1的比例，传给听书页面，听书页面再按这个比例
+              // 换算成"该从章节正文数组的第几段开始"——不是精确到字，是
+              // "大致在你翻到的位置附近开始"，比"永远从头开始"好很多。
+              const displayed = currentLocation?.start?.displayed;
+              const startFraction = displayed && displayed.total > 1
+                ? Math.max(0, Math.min(1, (displayed.page - 1) / displayed.total))
+                : 0;
+              navigation.navigate('Listen', {
+                bookId, bookTitle, author,
+                initialChapterTitle: currentSectionTitle,
+                startFraction,
+              });
+            }}
             style={styles.headerBtn}
           >
             <IconHeadphones color={uiTheme.textOnAccent} size={22} strokeWidth={1.75} />

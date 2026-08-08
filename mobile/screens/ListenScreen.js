@@ -122,7 +122,7 @@ function mergeParagraphsForNarration(paragraphs) {
 }
 
 export default function ListenScreen({ route, navigation }) {
-  const { bookId, bookTitle, author, initialChapterTitle } = route.params;
+  const { bookId, bookTitle, author, initialChapterTitle, startFraction } = route.params;
   const theme = useTheme();
   const insets = useSafeAreaInsets();
 
@@ -387,11 +387,33 @@ export default function ListenScreen({ route, navigation }) {
       // 用户反馈"一点听书就只能从前言开始，不会从当前页开始"——从阅读器
       // 传来的initialChapterTitle（epub.js当前location的章节标题）按标题
       // 文本匹配定位起始章节，找不到（标题不完全一致、或没传）就退回从头。
-      // 只能定位到"章"这个粒度，不是段落精确位置——章节内epub.js的CFI跟
-      // 这边独立拉取的段落数组之间没有直接映射关系，做不到更精确的定位。
       const wanted = (initialChapterTitle || '').trim();
       const startIdx = wanted ? filtered.findIndex((c) => c.title.trim() === wanted) : -1;
-      playFrom(startIdx >= 0 ? startIdx : 0, 0, epochRef.current);
+      const targetChapterIdx = startIdx >= 0 ? startIdx : 0;
+
+      // 继续处理段落级起点：阅读器那边传来的startFraction是"当前在这一章
+      // 翻到大概百分之多少"（epub.js分页信息换算出来的，不是精确到字，
+      // 查证过epubjs-react-native没有对外暴露自定义WebView消息通道，做不到
+      // 更精确的DOM级定位）。这里预先把目标章节的正文拉下来存进缓存，算出
+      // 对应的起始段落下标，playFrom内部发现缓存已经有这一章就不会重复拉。
+      const startFractionValue = typeof startFraction === 'number' && startFraction > 0 ? startFraction : 0;
+      if (startFractionValue > 0) {
+        const targetChapter = filtered[targetChapterIdx];
+        getChapterText(bookId, targetChapter.id).then((data) => {
+          if (cancelled) return;
+          const paragraphs = mergeParagraphsForNarration(data.paragraphs || []);
+          paragraphCacheRef.current[targetChapter.id] = paragraphs;
+          const startParagraphIdx = paragraphs.length > 0
+            ? Math.max(0, Math.min(paragraphs.length - 1, Math.floor(startFractionValue * paragraphs.length)))
+            : 0;
+          playFrom(targetChapterIdx, startParagraphIdx, epochRef.current);
+        }).catch(() => {
+          if (cancelled) return;
+          playFrom(targetChapterIdx, 0, epochRef.current); // 算起点失败就退化成从头，不阻塞播放
+        });
+      } else {
+        playFrom(targetChapterIdx, 0, epochRef.current);
+      }
     }).catch((e) => {
       if (cancelled) return;
       setErrorMsg(e.message || '书本信息加载失败');
