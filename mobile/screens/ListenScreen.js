@@ -14,6 +14,7 @@ import {
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Audio } from 'expo-av';
 import * as FileSystem from 'expo-file-system/legacy';
+import Slider from '@react-native-community/slider';
 import { IconPlayerStop, IconSettings, IconMicrophone } from '@tabler/icons-react-native';
 import {
   getBookContext, getChapterText, getTtsPlayUrl, transcribeAudio,
@@ -25,19 +26,25 @@ import { useTheme } from '../theme';
 // 参照用户真机反馈（中庸默认语速"灾难级别"、想要更沉稳的男声）给一组
 // 精选预设——语速3档、声音4档（默认女声+3个候选男声，云健最接近用户
 // 描述的"智者感"），够用且不用维护一个复杂的选择UI。
-// 真机反馈：3档（慢/正常/快）不够用，希望像视频/音乐播放器一样有倍速档位。
-// edge_tts的rate参数是"比该声音的基准语速快/慢百分之多少"，近似等于播放
-// 倍速的百分比换算（1.5倍速≈"+50%"，0.75倍速≈"-25%"）——不是像视频播放器
-// 那样对已有音频做变速处理，是让TTS合成时就用这个速率说话，效果类似但
-// 原理不同，如实说明这是近似值不是精确的秒数换算。
-const RATE_OPTIONS = [
-  { label: '0.75×', value: '-25%' },
-  { label: '1×', value: '+0%' },
-  { label: '1.25×', value: '+25%' },
-  { label: '1.5×', value: '+50%' },
-  { label: '2×', value: '+100%' },
-  { label: '3×', value: '+200%' },
-];
+// 真机反馈过两轮：先是3档（慢/正常/快）不够用，改成6档倍速；这次真机
+// 反馈6档也不够细，要求能像滑动条一样自由微调到0.8x/0.7x这种任意值，
+// 范围定成0.75x~2x（比上一版的0.75x~3x收窄，3倍速这类极端值用户反馈
+// 用不上）。edge_tts的rate参数是"比该声音的基准语速快/慢百分之多少"，
+// 近似等于播放倍速的百分比换算（1.5倍速≈"+50%"，0.75倍速≈"-25%"）——
+// 不是像视频播放器那样对已有音频做变速处理，是让TTS合成时就用这个速率
+// 说话，效果类似但原理不同，如实说明这是近似值不是精确的秒数换算。
+const RATE_MIN = 0.75;
+const RATE_MAX = 2;
+const RATE_STEP = 0.05;
+
+function rateMultiplierToStr(m) {
+  const pct = Math.round((m - 1) * 100);
+  return (pct >= 0 ? '+' : '') + pct + '%';
+}
+function rateStrToMultiplier(str) {
+  const pct = parseInt(str, 10);
+  return Number.isFinite(pct) ? 1 + pct / 100 : 1;
+}
 const VOICE_OPTIONS = [
   { label: '晓晓（默认女声）', value: 'zh-CN-XiaoxiaoNeural' },
   { label: '云健（沉稳男声）', value: 'zh-CN-YunjianNeural' },
@@ -51,6 +58,12 @@ const MAX_RECORDING_MS = 55000; // 跟BookChatScreen同一个上限，腾讯云A
 // 简单规则，识别不到的边界情况留给以后真出现真实案例再处理。
 function isTocChapter(title) {
   return (title || '').trim() === '目录';
+}
+
+const LIST_MARKER_PAUSE_MS = 350; // 念到编号开头的段落前，额外停顿这么久
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // 真机反馈：有些书的<p>标签切得很碎，逐段单独发一次TTS请求，段与段之间
@@ -74,11 +87,26 @@ function isTocChapter(title) {
 const NARRATION_SENTENCE_END = /([。！？；\n])/;
 const NARRATION_MIN_CHUNK_LEN = 60;
 
+// 真机反馈：编号列表（"一、……二、……"这类）朗读起来听不出层次，跟前后
+// 文字粘在一起。查证过技术方案：edge_tts从5.0起微软禁掉了自定义SSML，
+// 没法让TTS引擎自己在指定文字位置插入静音，只能在应用层做——识别编号
+// 标记在文本里的位置，强制在那里断成独立的一段（哪怕没攒够
+// NARRATION_MIN_CHUNK_LEN也要断，这条边界不能被长度累积吞并），播放
+// 循环里切到这种"以编号开头"的段落前，额外插入一小段静音停顿。只处理
+// 中文数字/阿拉伯数字+顿号或括号这类明确、低误判风险的标记（比如"一、"
+// "（1）"），不处理阿拉伯数字+逗号这种（"2，"太容易跟普通数字撞车，
+// 比如"2019，"），是刻意收窄的范围，不追求覆盖所有列表写法。
+const LIST_MARKER_RE = /^([一二三四五六七八九十百]{1,3}[、，]|[（(][一二三四五六七八九十0-9]{1,3}[）)]|[0-9]{1,3}、)/;
+
 function mergeParagraphsForNarration(paragraphs) {
   let buffer = paragraphs.join('');
   const merged = [];
   let pending = '';
   for (;;) {
+    if (pending && LIST_MARKER_RE.test(buffer)) {
+      merged.push(pending);
+      pending = '';
+    }
     const idx = buffer.search(NARRATION_SENTENCE_END);
     if (idx === -1) break;
     pending += buffer.slice(0, idx + 1);
@@ -111,6 +139,11 @@ export default function ListenScreen({ route, navigation }) {
   const [answerText, setAnswerText] = useState('');
   const [showSettings, setShowSettings] = useState(false);
   const [rate, setRate] = useState('+0%');
+  // 滑动条拖动过程中的实时显示值——跟rate分开，拖动时只更新这个数字标签
+  // （流畅、不触发任何副作用），松手那一刻才调setRate真正提交（触发下面
+  // 监听voice/rate变化、打断重播的effect）。如果拖动过程中就直接调
+  // setRate，效果会是"每移动一点点就打断重播一次"，声音卡成一片。
+  const [rateDisplay, setRateDisplay] = useState(1);
   const [voice, setVoice] = useState('zh-CN-XiaoxiaoNeural');
   // 决策层这轮派发：划线自动保存改成默认不存，用户自己勾选才存——之前
   // 每次打断提问都无条件写highlights，用户验收时明确提出想要选择权。
@@ -235,6 +268,14 @@ export default function ListenScreen({ route, navigation }) {
         setChapterTitle(chapter.title);
         setProgressLabel(`第${pi + 1}/${paragraphs.length}段（加载中…）`);
         setPhase('playing');
+
+        // 这一段是编号列表的开头（"一、""（1）"这类），额外停顿一下再念，
+        // 更接近真人朗读到编号时先顿一下的节奏。停顿期间也要认epoch，
+        // 用户在这段静默里打断的话不能继续往下播。
+        if (LIST_MARKER_RE.test(paragraphs[pi])) {
+          await sleep(LIST_MARKER_PAUSE_MS);
+          if (epoch !== epochRef.current) return;
+        }
 
         // 取出预取好的音频——位置(ci,pi)和当时预取用的voice/rate都要跟
         // 现在完全一致才能用，任何一处对不上（比如设置面板中途改了声音）
@@ -541,22 +582,22 @@ export default function ListenScreen({ route, navigation }) {
 
       {showSettings && (
         <View style={[styles.settingsPanel, { backgroundColor: theme.cardBg, borderBottomColor: theme.cardBorder }]}>
-          <Text style={[styles.settingsLabel, { color: theme.textSecondary }]}>语速</Text>
-          <View style={styles.chipRow}>
-            {RATE_OPTIONS.map((opt) => (
-              <TouchableOpacity
-                key={opt.value}
-                style={[
-                  styles.chip,
-                  { borderColor: theme.cardBorder, borderRadius: theme.radius },
-                  rate === opt.value && { backgroundColor: theme.accent, borderColor: theme.accent },
-                ]}
-                onPress={() => setRate(opt.value)}
-              >
-                <Text style={[styles.chipText, { color: rate === opt.value ? theme.textOnAccent : theme.text }]}>{opt.label}</Text>
-              </TouchableOpacity>
-            ))}
+          <View style={styles.rateLabelRow}>
+            <Text style={[styles.settingsLabel, { color: theme.textSecondary }]}>语速</Text>
+            <Text style={[styles.rateValueText, { color: theme.text }]}>{rateDisplay.toFixed(2)}×</Text>
           </View>
+          <Slider
+            style={styles.rateSlider}
+            minimumValue={RATE_MIN}
+            maximumValue={RATE_MAX}
+            step={RATE_STEP}
+            value={rateStrToMultiplier(rate)}
+            minimumTrackTintColor={theme.accent}
+            maximumTrackTintColor={theme.cardBorder}
+            thumbTintColor={theme.accent}
+            onValueChange={setRateDisplay}
+            onSlidingComplete={(v) => setRate(rateMultiplierToStr(v))}
+          />
           <Text style={[styles.settingsLabel, { color: theme.textSecondary, marginTop: 10 }]}>声音</Text>
           <View style={styles.chipRow}>
             {VOICE_OPTIONS.map((opt) => (
@@ -751,6 +792,9 @@ const styles = StyleSheet.create({
   linkBtnText: { fontSize: 14 },
   settingsPanel: { paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1 },
   settingsLabel: { fontSize: 12, marginBottom: 6 },
+  rateLabelRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline' },
+  rateValueText: { fontSize: 13, fontWeight: '600', marginBottom: 6 },
+  rateSlider: { width: '100%', height: 32 },
   chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   chip: { borderWidth: 1, paddingHorizontal: 12, paddingVertical: 6 },
   chipText: { fontSize: 13 },

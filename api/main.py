@@ -1336,12 +1336,23 @@ def _is_valid_pdfplumber_table(rows: list[list]) -> bool:
 def _table_rows_to_html(rows: list[list]) -> str:
     """把pdfplumber提取出的表格数据转成真正的HTML<table>，单元格内容做HTML
     转义（复用跟正文一样的转义逻辑，避免表格里出现&/</>把XHTML弄坏——阶段
-    十五已经踩过一次这个坑，这里不能再犯）。"""
+    十五已经踩过一次这个坑，这里不能再犯）。
+
+    真机反馈过之前生成的<table>没有任何样式（浏览器默认渲染没有边框），
+    看起来就是一坨纯文字，看不出是表格。这里用内联style加边框/间距——
+    边框颜色用`currentColor`（继承当前文字颜色）而不是写死一个具体颜色值，
+    是因为阅读器会给正文注入深色模式/护眼模式的动态颜色（阶段十五续那次
+    "用户上传epub黑色正文不跟随深色模式"就是因为原书CSS写死了颜色，这次
+    不能重蹈覆辙），`currentColor`能让边框自动跟着当前主题的文字颜色走，
+    不用关心阅读器到底注入的是哪套配色。"""
     html_rows = []
     for row in rows:
-        cells = "".join(f"<td>{html.escape((c or '').strip())}</td>" for c in row)
+        cells = "".join(
+            f'<td style="border:1px solid currentColor;padding:4px 8px;">{html.escape((c or "").strip())}</td>'
+            for c in row
+        )
         html_rows.append(f"<tr>{cells}</tr>")
-    return f"<table>{''.join(html_rows)}</table>"
+    return f'<table style="border-collapse:collapse;width:100%;margin:8px 0;">{"".join(html_rows)}</table>'
 
 def _extract_page_text_with_tables(pypdf_page, plumber_page, page_idx: int = -1) -> str:
     """单页的文字+表格+图片提取：先用pdfplumber找表格并过质量门槛，通过的
