@@ -51,7 +51,8 @@
           "backgroundColor": "#EAE3D3"
         }
       ],
-      "@config-plugins/react-native-webrtc"
+      "@config-plugins/react-native-webrtc",
+      "expo-config-plugin-incall-manager"
     ]
   }
 }
