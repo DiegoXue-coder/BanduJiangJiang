@@ -59,7 +59,7 @@ export default function ListenScreen({ route, navigation }) {
     }
   }
 
-  async function playOneParagraph(text, epoch) {
+  async function playOneParagraph(text, epoch, onAudioStart) {
     const { sound } = await Audio.Sound.createAsync(
       { uri: getTtsPlayUrl(text) },
       { shouldPlay: false },
@@ -69,6 +69,7 @@ export default function ListenScreen({ route, navigation }) {
       return;
     }
     soundRef.current = sound;
+    onAudioStart?.(); // 真正要出声了才回调——见调用处注释，打断截取的位置要跟这个对齐
     await new Promise((resolve) => {
       sound.setOnPlaybackStatusUpdate((s) => {
         if (s.didJustFinish) resolve();
@@ -113,13 +114,22 @@ export default function ListenScreen({ route, navigation }) {
           console.log(`[听书诊断] epoch过期(${epoch}→${epochRef.current})，播放循环退出，位置=${ci}/${pi}`);
           return;
         }
-        posRef.current = { chapterIdx: ci, paragraphIdx: pi };
         setChapterTitle(chapter.title);
-        setProgressLabel(`第${pi + 1}/${paragraphs.length}段`);
+        setProgressLabel(`第${pi + 1}/${paragraphs.length}段（加载中…）`);
         setPhase('playing');
-        console.log(`[听书诊断] 开始播放 章节="${chapter.title}" 第${pi + 1}/${paragraphs.length}段`);
+        console.log(`[听书诊断] 开始加载 章节="${chapter.title}" 第${pi + 1}/${paragraphs.length}段`);
         try {
-          await playOneParagraph(paragraphs[pi], epoch);
+          await playOneParagraph(paragraphs[pi], epoch, () => {
+            // 真机反馈过"打断时截取的是刚讲到那段的后面一段，不是刚讲到
+            // 的那段"——根因是原来在"这段还没开始出声、还在等TTS合成"
+            // 这个加载阶段，就把posRef改成了这一段，用户如果在这段真正
+            // 出声之前打断（比如以为卡住了、在10秒静默间隔里点了打断），
+            // 截取到的就是用户实际上根本没听到的下一段。改成真正开始
+            // 出声这一刻才更新posRef，跟用户耳朵听到的内容对齐。
+            posRef.current = { chapterIdx: ci, paragraphIdx: pi };
+            setProgressLabel(`第${pi + 1}/${paragraphs.length}段`);
+            console.log(`[听书诊断] 开始出声 章节="${chapter.title}" 第${pi + 1}/${paragraphs.length}段`);
+          });
           console.log(`[听书诊断] 播放完成 章节="${chapter.title}" 第${pi + 1}/${paragraphs.length}段`);
         } catch (e) {
           console.log(`[听书诊断] 播放出错，跳过这段：${e.message}`);
