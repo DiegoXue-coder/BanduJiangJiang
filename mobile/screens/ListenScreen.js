@@ -9,16 +9,34 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, TextInput,
-  ActivityIndicator, ScrollView, Platform, KeyboardAvoidingView,
+  ActivityIndicator, ScrollView, Platform, KeyboardAvoidingView, Switch,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Audio } from 'expo-av';
-import { IconPlayerStop } from '@tabler/icons-react-native';
+import * as FileSystem from 'expo-file-system/legacy';
+import { IconPlayerStop, IconSettings, IconMicrophone } from '@tabler/icons-react-native';
 import {
-  getBookContext, getChapterText, getTtsPlayUrl,
+  getBookContext, getChapterText, getTtsPlayUrl, transcribeAudio,
   streamAsk, saveHighlight, saveQaHistory,
 } from '../lib/api';
 import { useTheme } from '../theme';
+
+// 决策层这轮派发的任务之一：语速/声音可调。不做完整的14个声音选择器，
+// 参照用户真机反馈（中庸默认语速"灾难级别"、想要更沉稳的男声）给一组
+// 精选预设——语速3档、声音4档（默认女声+3个候选男声，云健最接近用户
+// 描述的"智者感"），够用且不用维护一个复杂的选择UI。
+const RATE_OPTIONS = [
+  { label: '慢', value: '-30%' },
+  { label: '正常', value: '+0%' },
+  { label: '快', value: '+20%' },
+];
+const VOICE_OPTIONS = [
+  { label: '晓晓（默认女声）', value: 'zh-CN-XiaoxiaoNeural' },
+  { label: '云健（沉稳男声）', value: 'zh-CN-YunjianNeural' },
+  { label: '云希（男声）', value: 'zh-CN-YunxiNeural' },
+  { label: '晓伊（女声）', value: 'zh-CN-XiaoyiNeural' },
+];
+const MAX_RECORDING_MS = 55000; // 跟BookChatScreen同一个上限，腾讯云ASR单次连接60秒硬顶
 
 // 章节标题精确匹配"目录"就跳过不朗读——已有真实案例证明目录会被当成
 // 普通章节混进朗读队列（IMG_1564排版反馈截图），不追求覆盖所有变体，
@@ -74,8 +92,8 @@ export default function ListenScreen({ route, navigation }) {
 
   // phase: loading-book(打开界面首次拉章节列表) / loading-chapter(章节文字
   // 还没拉到) / playing / paused(打断后，等用户提问) / thinking(等AI回答)
-  // / answering(播AI回答语音) / ask-continue(回答完，问要不要继续) / done
-  // (全书听完) / error
+  // / answering(播AI回答语音) / post-answer(回答完，可以追问/继续听书/结束)
+  // / done(全书听完) / error
   const [phase, setPhase] = useState('loading-book');
   const [errorMsg, setErrorMsg] = useState('');
   const [chapterTitle, setChapterTitle] = useState('');
@@ -83,6 +101,23 @@ export default function ListenScreen({ route, navigation }) {
   const [capturedText, setCapturedText] = useState('');
   const [question, setQuestion] = useState('');
   const [answerText, setAnswerText] = useState('');
+  const [showSettings, setShowSettings] = useState(false);
+  const [rate, setRate] = useState('+0%');
+  const [voice, setVoice] = useState('zh-CN-XiaoxiaoNeural');
+  // 决策层这轮派发：划线自动保存改成默认不存，用户自己勾选才存——之前
+  // 每次打断提问都无条件写highlights，用户验收时明确提出想要选择权。
+  const [saveAsHighlight, setSaveAsHighlight] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordingStatus, setRecordingStatus] = useState('');
+
+  // playOneParagraph在playFrom的异步循环里调用，如果直接读voice/rate这两个
+  // state会有闭包过期的问题（循环开始时闭包捕获的是当时的值，用户中途在
+  // 设置面板改了声音，正在进行的循环感知不到）——用ref同步更新，效果是
+  // "下一句开始播放就用新设置"，不用整个重启听书。
+  const rateRef = useRef(rate);
+  const voiceRef = useRef(voice);
+  useEffect(() => { rateRef.current = rate; }, [rate]);
+  useEffect(() => { voiceRef.current = voice; }, [voice]);
 
   const chaptersRef = useRef([]); // 已经过滤掉"目录"章节的列表
   const paragraphCacheRef = useRef({}); // chapterId -> string[]
@@ -90,6 +125,13 @@ export default function ListenScreen({ route, navigation }) {
   const soundRef = useRef(null);
   const posRef = useRef({ chapterIdx: 0, paragraphIdx: 0 }); // 当前/暂停时的位置
   const abortAskRef = useRef(null);
+  // 决策层这轮派发：打断提问支持连续追问。这一轮打断期间的问答历史存这里
+  // （不是整本书的历史，每次打断/继续听书都会清空），追问时当成history喂
+  // 给streamAsk，让AI知道"追问"跟前一个问题是同一轮对话，不是从零开始。
+  const conversationRef = useRef([]);
+  const recordingRef = useRef(null);
+  const startingRecordingRef = useRef(false);
+  const maxDurationTimerRef = useRef(null);
 
   async function stopSound() {
     if (soundRef.current) {
@@ -101,7 +143,7 @@ export default function ListenScreen({ route, navigation }) {
 
   async function playOneParagraph(text, epoch, onAudioStart) {
     const { sound } = await Audio.Sound.createAsync(
-      { uri: getTtsPlayUrl(text) },
+      { uri: getTtsPlayUrl(text, voiceRef.current, rateRef.current) },
       { shouldPlay: false },
     );
     if (epoch !== epochRef.current) {
@@ -222,6 +264,7 @@ export default function ListenScreen({ route, navigation }) {
       epochRef.current += 1;
       stopSound();
       abortAskRef.current?.();
+      if (maxDurationTimerRef.current) clearTimeout(maxDurationTimerRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bookId]);
@@ -234,6 +277,16 @@ export default function ListenScreen({ route, navigation }) {
     const chapter = chaptersRef.current[chapterIdx];
     const paragraphs = paragraphCacheRef.current[chapter?.id] || [];
     setCapturedText(paragraphs[paragraphIdx] || '');
+    setQuestion('');
+    setAnswerText('');
+    conversationRef.current = []; // 新一次打断，追问历史清空重新开始
+    setPhase('paused');
+  }
+
+  // 回答完之后想继续追问——回到提问界面，但保留capturedText（还是同一段
+  // 上下文）和conversationRef（这一轮已经问过的内容，喂给下一次streamAsk
+  // 当history，让AI知道这是连续对话，不是全新的孤立提问）。
+  function handleAskAgain() {
     setQuestion('');
     setAnswerText('');
     setPhase('paused');
@@ -254,20 +307,29 @@ export default function ListenScreen({ route, navigation }) {
         },
         question: q,
         style: 'simple',
-        history: [],
+        history: conversationRef.current,
       },
       {
         onDelta: (delta) => { fullAnswer += delta; },
         onDone: async (answer) => {
           abortAskRef.current = null;
           setAnswerText(answer);
-          // 打断瞬间截取的段落，当成一次"自动划线"存下来，复用现有划线
-          // 数据结构——cfi_location用不了真实CFI（这里没有驱动epub.js，
+          conversationRef.current = [
+            ...conversationRef.current,
+            { role: 'user', content: q },
+            { role: 'assistant', content: answer },
+          ];
+          // 打断瞬间截取的段落，本来无条件当成一次"自动划线"存下来——
+          // 用户验收时明确提出想自己决定要不要存，改成只有勾选了"保存为
+          // 划线"才写。cfi_location用不了真实CFI（这里没有驱动epub.js，
           // 只是纯数据段落），用"listen:章节id:段落序号"这种可辨识的
           // 假位置代替，如实说明：从复盘页点这条划线跳回书里定位不了，
-          // 是已知限制，不是bug。
+          // 是已知限制，不是bug。问答记录（qa_history）不受这个开关影响，
+          // 始终保存——用户要自己选的是"划线"，不是"这次问答有没有记录"。
           const fakeCfi = `listen:${chapter?.id}:${posRef.current.paragraphIdx}`;
-          saveHighlight(bookId, { cfiLocation: fakeCfi, highlightedText: capturedText }).catch(() => {});
+          if (saveAsHighlight) {
+            saveHighlight(bookId, { cfiLocation: fakeCfi, highlightedText: capturedText }).catch(() => {});
+          }
           saveQaHistory({
             bookId, bookTitle, chapterTitle: chapter?.title || '',
             question: q, answer, selection: capturedText, cfiRange: fakeCfi,
@@ -277,13 +339,13 @@ export default function ListenScreen({ route, navigation }) {
           try {
             await playOneParagraph(answer, epoch);
           } catch (e) {
-            // 回答播放失败不影响后续"要不要继续"流程
+            // 回答播放失败不影响后续流程
           }
           if (soundRef.current) {
             soundRef.current.unloadAsync().catch(() => {});
             soundRef.current = null;
           }
-          if (epoch === epochRef.current) setPhase('ask-continue');
+          if (epoch === epochRef.current) setPhase('post-answer');
         },
         onError: (e) => {
           abortAskRef.current = null;
@@ -295,6 +357,7 @@ export default function ListenScreen({ route, navigation }) {
   }
 
   function handleContinue() {
+    conversationRef.current = []; // 回到听书主线，这一轮打断的追问历史结束
     const { chapterIdx, paragraphIdx } = posRef.current;
     playFrom(chapterIdx, paragraphIdx, epochRef.current);
   }
@@ -305,6 +368,65 @@ export default function ListenScreen({ route, navigation }) {
     navigation.goBack();
   }
 
+  // 决策层这轮派发：打断提问改成语音输入。逻辑照抄BookChatScreen已经在
+  // 真机上验证过的录音实现（prepareToRecordAsync+startAsync两步走绕开
+  // iOS麦克风预热延迟、55秒自动停止避免撞腾讯云ASR60秒硬顶）——同一套
+  // 麦克风坑没必要重新踩一遍。区别只是识别完文字填进question而不是input。
+  async function finishRecording() {
+    if (maxDurationTimerRef.current) {
+      clearTimeout(maxDurationTimerRef.current);
+      maxDurationTimerRef.current = null;
+    }
+    setIsRecording(false);
+    setRecordingStatus('识别中…');
+    try {
+      const rec = recordingRef.current;
+      await rec.stopAndUnloadAsync();
+      const uri = rec.getURI();
+      recordingRef.current = null;
+      await Audio.setAudioModeAsync({ allowsRecordingIOS: false, playsInSilentModeIOS: true });
+      const text = await transcribeAudio(uri, FileSystem.uploadAsync, FileSystem.FileSystemUploadType);
+      if (text?.trim()) {
+        setQuestion(text.trim());
+        setRecordingStatus('识别完成 — 确认后点提问');
+      } else {
+        setRecordingStatus('未识别到内容，请重试');
+      }
+    } catch (e) {
+      setRecordingStatus(`识别失败：${e.message}`);
+    }
+  }
+
+  async function toggleRecording() {
+    if (isRecording) {
+      await finishRecording();
+      return;
+    }
+    if (startingRecordingRef.current) return;
+    startingRecordingRef.current = true;
+    try {
+      const { status: perm } = await Audio.requestPermissionsAsync();
+      if (perm !== 'granted') {
+        setRecordingStatus('需要麦克风权限，请到系统设置里开启');
+        return;
+      }
+      setRecordingStatus('准备麦克风…');
+      await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
+      const recording = new Audio.Recording();
+      await recording.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
+      await recording.startAsync();
+      recordingRef.current = recording;
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      setIsRecording(true);
+      setRecordingStatus('录音中 — 再次点击停止');
+      maxDurationTimerRef.current = setTimeout(() => { finishRecording(); }, MAX_RECORDING_MS);
+    } catch (e) {
+      setRecordingStatus(`无法启动录音：${e.message}`);
+    } finally {
+      startingRecordingRef.current = false;
+    }
+  }
+
   return (
     <SafeAreaView edges={['bottom', 'left', 'right']} style={[styles.safe, { backgroundColor: theme.bg }]}>
       <View style={[styles.header, { backgroundColor: theme.accent, paddingTop: insets.top + 10 }]}>
@@ -312,8 +434,47 @@ export default function ListenScreen({ route, navigation }) {
           <Text style={[styles.headerBtnText, { color: theme.textOnAccent }]}>‹ 返回</Text>
         </TouchableOpacity>
         <Text style={[styles.headerTitle, { color: theme.textOnAccent }]} numberOfLines={1}>{bookTitle}</Text>
-        <View style={styles.headerBtn} />
+        <TouchableOpacity onPress={() => setShowSettings((v) => !v)} style={styles.headerBtn}>
+          <IconSettings color={theme.textOnAccent} size={20} strokeWidth={1.75} />
+        </TouchableOpacity>
       </View>
+
+      {showSettings && (
+        <View style={[styles.settingsPanel, { backgroundColor: theme.cardBg, borderBottomColor: theme.cardBorder }]}>
+          <Text style={[styles.settingsLabel, { color: theme.textSecondary }]}>语速</Text>
+          <View style={styles.chipRow}>
+            {RATE_OPTIONS.map((opt) => (
+              <TouchableOpacity
+                key={opt.value}
+                style={[
+                  styles.chip,
+                  { borderColor: theme.cardBorder, borderRadius: theme.radius },
+                  rate === opt.value && { backgroundColor: theme.accent, borderColor: theme.accent },
+                ]}
+                onPress={() => setRate(opt.value)}
+              >
+                <Text style={[styles.chipText, { color: rate === opt.value ? theme.textOnAccent : theme.text }]}>{opt.label}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+          <Text style={[styles.settingsLabel, { color: theme.textSecondary, marginTop: 10 }]}>声音</Text>
+          <View style={styles.chipRow}>
+            {VOICE_OPTIONS.map((opt) => (
+              <TouchableOpacity
+                key={opt.value}
+                style={[
+                  styles.chip,
+                  { borderColor: theme.cardBorder, borderRadius: theme.radius },
+                  voice === opt.value && { backgroundColor: theme.accent, borderColor: theme.accent },
+                ]}
+                onPress={() => setVoice(opt.value)}
+              >
+                <Text style={[styles.chipText, { color: voice === opt.value ? theme.textOnAccent : theme.text }]}>{opt.label}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </View>
+      )}
 
       <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         <View style={styles.body}>
@@ -354,14 +515,33 @@ export default function ListenScreen({ route, navigation }) {
               <View style={[styles.capturedBox, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder, borderRadius: theme.radius }]}>
                 <Text style={[styles.capturedText, { color: theme.text }]}>{capturedText}</Text>
               </View>
-              <TextInput
-                style={[styles.questionInput, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder, color: theme.text, borderRadius: theme.radius }]}
-                placeholder={'想问点什么？（比如"你刚才说的这个是什么意思"）'}
-                placeholderTextColor={theme.textMuted}
-                value={question}
-                onChangeText={setQuestion}
-                multiline
-              />
+              <View style={styles.questionRow}>
+                <TextInput
+                  style={[styles.questionInput, styles.questionInputFlex, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder, color: theme.text, borderRadius: theme.radius }]}
+                  placeholder={'想问点什么？（比如"你刚才说的这个是什么意思"）'}
+                  placeholderTextColor={theme.textMuted}
+                  value={question}
+                  onChangeText={setQuestion}
+                  multiline
+                />
+                <TouchableOpacity
+                  style={[
+                    styles.micBtn,
+                    { borderColor: theme.cardBorder, borderRadius: theme.radius },
+                    isRecording && { backgroundColor: theme.danger, borderColor: theme.danger },
+                  ]}
+                  onPress={toggleRecording}
+                >
+                  <IconMicrophone color={isRecording ? '#fff' : theme.text} size={20} strokeWidth={1.75} />
+                </TouchableOpacity>
+              </View>
+              {!!recordingStatus && (
+                <Text style={[styles.recordingStatus, { color: theme.textMuted }]}>{recordingStatus}</Text>
+              )}
+              <View style={styles.saveHighlightRow}>
+                <Switch value={saveAsHighlight} onValueChange={setSaveAsHighlight} />
+                <Text style={[styles.saveHighlightText, { color: theme.textSecondary }]}>把刚才这段保存为划线</Text>
+              </View>
               <TouchableOpacity
                 style={[styles.primaryBtn, { backgroundColor: theme.accent, borderRadius: theme.radius }]}
                 onPress={handleAsk}
@@ -389,14 +569,20 @@ export default function ListenScreen({ route, navigation }) {
             </ScrollView>
           )}
 
-          {phase === 'ask-continue' && (
+          {phase === 'post-answer' && (
             <View style={styles.centerBox}>
-              <Text style={[styles.playingHint, { color: theme.text }]}>需要我继续讲吗？</Text>
+              <Text style={[styles.playingHint, { color: theme.text }]}>还要继续问，还是接着听？</Text>
               <TouchableOpacity
                 style={[styles.primaryBtn, { backgroundColor: theme.accent, borderRadius: theme.radius }]}
+                onPress={handleAskAgain}
+              >
+                <Text style={[styles.primaryBtnText, { color: theme.textOnAccent }]}>继续追问</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.primaryBtn, { backgroundColor: theme.accentSoft, borderRadius: theme.radius }]}
                 onPress={handleContinue}
               >
-                <Text style={[styles.primaryBtnText, { color: theme.textOnAccent }]}>继续听书</Text>
+                <Text style={[styles.primaryBtnText, { color: theme.text }]}>继续听书</Text>
               </TouchableOpacity>
               <TouchableOpacity style={styles.linkBtn} onPress={handleStopListening}>
                 <Text style={[styles.linkBtnText, { color: theme.textSecondary }]}>先到这里</Text>
@@ -451,4 +637,15 @@ const styles = StyleSheet.create({
   primaryBtnText: { fontSize: 15, fontWeight: '700' },
   linkBtn: { alignItems: 'center', paddingVertical: 10 },
   linkBtnText: { fontSize: 14 },
+  settingsPanel: { paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1 },
+  settingsLabel: { fontSize: 12, marginBottom: 6 },
+  chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  chip: { borderWidth: 1, paddingHorizontal: 12, paddingVertical: 6 },
+  chipText: { fontSize: 13 },
+  questionRow: { flexDirection: 'row', gap: 8, alignItems: 'flex-start' },
+  questionInputFlex: { flex: 1 },
+  micBtn: { borderWidth: 1, width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
+  recordingStatus: { fontSize: 12 },
+  saveHighlightRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  saveHighlightText: { fontSize: 13 },
 });

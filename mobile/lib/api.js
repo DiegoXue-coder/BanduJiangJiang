@@ -296,8 +296,8 @@ export function streamAsk({ context, question, style = 'simple', history = [] },
 
 // /tts/play 这个接口本身不带鉴权（跟 /app/books/{id}/file.epub 同理，是要
 // 直接当音频播放地址用的，expo-av 不会带自定义请求头）。
-export function getTtsPlayUrl(text, voice = 'zh-CN-XiaoxiaoNeural') {
-  return `${API_BASE}/tts/play?text=${encodeURIComponent(text)}&voice=${encodeURIComponent(voice)}`;
+export function getTtsPlayUrl(text, voice = 'zh-CN-XiaoxiaoNeural', rate = '+0%') {
+  return `${API_BASE}/tts/play?text=${encodeURIComponent(text)}&voice=${encodeURIComponent(voice)}&rate=${encodeURIComponent(rate)}`;
 }
 
 export async function transcribeAudio(fileUri, uploadAsync, FileSystemUploadType) {
