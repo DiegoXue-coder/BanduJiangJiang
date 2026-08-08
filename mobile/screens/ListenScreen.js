@@ -142,6 +142,12 @@ export default function ListenScreen({ route, navigation }) {
   }
 
   async function playOneParagraph(text, epoch, onAudioStart) {
+    // 临时诊断：真机反馈"设置面板改了语速/声音，没有立即生效"。理论上
+    // voiceRef/rateRef是实时读取的，改了设置下一段就该用新值——但用户
+    // 可能是在一段较长的合并段落播放过程中改的设置，误以为"没生效"，
+    // 实际是那一整段本来就要放完才轮到下一段。打日志确认每段实际用的
+    // 是哪个voice/rate、这段文字多长，排查完就删。
+    console.log(`[听书诊断] 播放段落 voice=${voiceRef.current} rate=${rateRef.current} 字数=${text.length}`);
     const { sound } = await Audio.Sound.createAsync(
       { uri: getTtsPlayUrl(text, voiceRef.current, rateRef.current) },
       { shouldPlay: false },

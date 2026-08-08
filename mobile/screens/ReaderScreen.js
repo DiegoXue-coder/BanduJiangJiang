@@ -134,11 +134,23 @@ function ReaderInner({
 
   // initialAnnotations 要等 Reader 的 onReady 触发（book 真正渲染完成）才能加，
   // 提前调用 addAnnotation 会静默失效，所以不能放进 mount 时的 effect 里。
+  //
+  // 真机反馈"not a valid argument for epubcfi"：ListenScreen听书功能打断
+  // 提问时，会把截取的段落存成一条highlights记录，但那边没有真实epub.js
+  // CFI可用（没有驱动WebView渲染，只是纯数据段落），用的是"listen:章节id:
+  // 段落序号"这种自造的占位格式，不是真CFI。这条记录混进这本书的划线
+  // 列表后，阅读器打开时这个循环会把它也传给addAnnotation，epub.js内部
+  // 解析CFI字符串失败直接抛错，会阻断循环导致后面真正的划线也加不上。
+  // 真实CFI固定以"epubcfi("开头（EPUB CFI规范），过滤掉不是这个格式的
+  // 记录，不传给addAnnotation——这类划线本来就没法在阅读器里精确定位
+  // 展示，跳过是合理的，不是丢数据（数据库里还在，只是不在阅读器里画
+  // 高亮框）。
   function handleReady() {
     setIsReady(true);
     if (annotationsRestored.current) return;
     annotationsRestored.current = true;
     for (const h of initialAnnotations) {
+      if (!h.cfi_location || !h.cfi_location.startsWith('epubcfi(')) continue;
       addAnnotation('highlight', h.cfi_location, { id: h.id }, { color: '#ffd54f' });
     }
   }
