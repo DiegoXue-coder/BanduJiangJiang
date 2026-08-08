@@ -14,8 +14,9 @@ import hashlib
 import datetime
 import asyncio
 import threading
+import unicodedata
 import urllib.parse
-from collections import defaultdict
+from collections import defaultdict, Counter
 from contextlib import asynccontextmanager
 
 import asyncpg
@@ -942,6 +943,50 @@ def _epub_doc_to_marker_paragraphs(book: "epub.EpubBook", doc_item, soup) -> lis
             paragraphs.append(f"{_HEADING_MARKER}{tag.name[1]}\x00{text}")
     return paragraphs
 
+# EPUB单文件结构（全书内容塞进一个HTML文档，靠内部锚点区分章节，不是常见
+# 的"一章一个文件"结构）——真实案例验证过：h1(部)出现3次、h2(章)出现14次、
+# h3(章内小节)出现87次，"数量适中"的h2才是真正的分章粒度，h1太粗、h3太碎。
+# 用数量区间挑选级别，不写死具体是h几，不同书的标题层级习惯不一样。
+_EPUB_SPLIT_MIN_HEADING_COUNT = 4   # 少于这个数量，太粗（比如只有"部"级）
+_EPUB_SPLIT_MAX_HEADING_COUNT = 80  # 多于这个数量，太碎（比如到了小节级）
+
+def _pick_heading_split_level(paragraphs: list[str]) -> int | None:
+    """统计h1~h6各级标题在这份单文档里出现的次数，找一个数量落在
+    [_EPUB_SPLIT_MIN_HEADING_COUNT, _EPUB_SPLIT_MAX_HEADING_COUNT]区间的
+    级别做分章边界，从粗到细找第一个满足的。找不到合适的级别（比如这份
+    文档本来就没几个标题，或者标题级别本身不规律）就返回None，调用方
+    退回"整篇当一章"的老行为，不会比以前更差。"""
+    counts = Counter()
+    for p in paragraphs:
+        if p.startswith(_HEADING_MARKER):
+            counts[int(p[len(_HEADING_MARKER)])] += 1
+    for level in range(1, 7):
+        c = counts.get(level, 0)
+        if _EPUB_SPLIT_MIN_HEADING_COUNT <= c <= _EPUB_SPLIT_MAX_HEADING_COUNT:
+            return level
+    return None
+
+def _split_paragraphs_by_heading_level(paragraphs: list[str], level: int) -> list[tuple[str, list[str]]]:
+    """按选中的标题级别切分单文档的段落列表成多章，标题直接取切分点的
+    标题文字（不依赖book.toc的位置对齐，比原来"按spine文档顺序对应目录
+    条目"的方式更准确）。切点之前如果有没归属任何标题的内容（比如版权页
+    残留文字），自成一节，标题用"前言"占位。"""
+    sections: list[tuple[str, list[str]]] = []
+    current_title = None
+    current: list[str] = []
+    prefix = f"{_HEADING_MARKER}{level}\x00"
+    for p in paragraphs:
+        if p.startswith(prefix):
+            if current:
+                sections.append((current_title or "前言", current))
+            current_title = p[len(prefix):]
+            current = [p]
+            continue
+        current.append(p)
+    if current:
+        sections.append((current_title or "前言", current))
+    return sections
+
 def _epub_book_to_chapters(book: "epub.EpubBook") -> list[tuple[str, list[str]]]:
     """把用户自己上传的epub提取成章节（跟PDF/TXT导入统一走
     _build_epub_from_sections重建），丢弃原书自带的CSS/复杂标记，但保留
@@ -996,10 +1041,24 @@ def _epub_book_to_chapters(book: "epub.EpubBook") -> list[tuple[str, list[str]]]
             paragraphs = [line.strip() for line in text.split("\n") if line.strip()]
         if not paragraphs:
             continue
+
+        # 单文件结构的EPUB（全书塞进一个文档，靠内部标题层级分章，不是
+        # "一章一个文件"）——这份文档内部如果有数量适中的同级标题，按那个
+        # 级别拆成多章，不再把整篇当成一章硬塞。多文件结构的正常EPUB（每篇
+        # 文档本来就只有零星1个标题，够不到_EPUB_SPLIT_MIN_HEADING_COUNT）
+        # 不受影响，走老逻辑。
+        split_level = _pick_heading_split_level(paragraphs)
+        if split_level is not None:
+            for sub_title, sub_paragraphs in _split_paragraphs_by_heading_level(paragraphs, split_level):
+                merged = _merge_short_paragraphs(sub_paragraphs)
+                if merged:
+                    chapters.append((sub_title, merged))
+            continue
+
         merged = _merge_short_paragraphs(paragraphs)
         title = titles[idx] if idx < len(titles) else f"第{idx + 1}节"
         chapters.append((title, merged))
-    return chapters
+    return _subdivide_oversized_chapters(chapters)
 
 # ── PDF/TXT → EPUB 转换（阶段十五，内部原型）────────────────────────
 # 不新建PDF/TXT专用渲染引擎：把导入文件在后端转换成一份"干净EPUB"，直接复用
@@ -1383,13 +1442,27 @@ _IMAGE_EXT_MEDIA_TYPE = {
 }
 
 _CHAPTER_HEADING_RE = re.compile(
-    r"^(第[〇零一二三四五六七八九十百千0-9]{1,8}[章回篇卷部节讲]|"
+    # 真实PDF测出来的两处放宽：1) "第"和数字、数字和"章"之间可能有PDF提取
+    # 带出来的空格（比如"第 1 章"而不是"第1章"，大概率是原书西文数字混排
+    # 时的半角间距被原样保留），加\s*容忍；2) 补上"序章""终章""参考文献"
+    # 这几个原来没覆盖到的常见标题词（原来只有"序言"没有"序章"、只有
+    # "结语/结论"没有"终章"、完全没有"参考文献"）。
+    r"^(第\s*[〇零一二三四五六七八九十百千0-9]{1,8}\s*[章回篇卷部节讲]|"
     r"(Chapter|CHAPTER)\s*\d+|"
-    r"(引言|序言|前言|导言|绪论|导论|结语|结论|后记|附录|尾声|楔子)|"
+    r"(引言|序言|前言|序章|导言|绪论|导论|结语|结论|终章|后记|附录|尾声|楔子|参考文献)|"
     r"(Introduction|Conclusion|Preface|Prologue|Epilogue|Appendix)\s*[0-9]*)"
-    r"[\s、：:.．]{0,3}.{0,30}$",
+    # 标题后面的内容不能带逗号/顿号/括号——放宽上面两条之后，真实PDF里
+    # "正如第3章介绍的……"这类引用其他章节的完整句子会被误判成新标题
+    # （真实复现过），真正的标题是短短的书名式短语，不会带逗号，用这条
+    # 排除掉这类误判。
+    r"[\s、：:.．]{0,3}[^，,。！？；;（(]{0,30}$",
     re.IGNORECASE,
 )
+
+# 印刷版目录页里每一条"标题"之间几乎没有正文（真实测过13~105字符），
+# 真正的章节正文起步都是几千字——用这个数量级差异做过滤阈值，不跟
+# MIN_CHAPTER_CHARS(150，管的是"单个段落别太短")混用，是两件不同的事。
+MIN_HEADING_CHAPTER_CHARS = 300
 
 def _split_pdf_into_chapters(full_text: str) -> list[tuple[str, list[str]]]:
     """优先识别PDF正文里真实的章节标题（"第一章"/"Chapter 3"/"引言"这类短
@@ -1435,7 +1508,15 @@ def _split_pdf_into_chapters(full_text: str) -> list[tuple[str, list[str]]]:
             title = raw_lines[start].strip()[:40]
             body_text = "\n".join(raw_lines[start + 1:bounds[i + 1]])
             body_paras = _merge_short_paragraphs(_rejoin_pdf_lines_into_paragraphs(body_text))
-            if body_paras:
+            # 印刷版目录页（书名+副标题连续列成一片，每行都长得像标题）放宽
+            # 正则之后也会被误判成一串标题，真实复现过：全书标题只识别到4处
+            # 时没这问题，补全"序章/终章/参考文献"这几个关键词、加上数字间
+            # 空格容忍之后，前面印刷目录页里同样的这些词也全部被当成标题，
+            # 变成十几个只有几十字符的"迷你假章节"。真正的章节内容都是几千
+            # 字起步，目录页每一条之间几乎没有内容——用这个悬殊的量级差异
+            # 做过滤：正文太短的直接丢弃，不当成独立章节（不是合并到别处，
+            # 目录页文字本来就是全书标题的重复罗列，丢了不影响任何真实内容）。
+            if body_paras and sum(len(p) for p in body_paras) >= MIN_HEADING_CHAPTER_CHARS:
                 chapters.append((title, body_paras))
         if chapters:
             return _subdivide_oversized_chapters(chapters)
@@ -1467,6 +1548,31 @@ def _subdivide_oversized_chapters(chapters: list[tuple[str, list[str]]]) -> list
         for idx, g in enumerate(groups):
             result.append((f"{title} ({idx + 1})", g))
     return result
+
+# 部分PDF的字体把汉字映射到了Unicode"部首变体"区（Kangxi Radicals区
+# U+2F00~U+2FDF、CJK Radicals Supplement区U+2E80~U+2EFF），肉眼看着和正常
+# 汉字一模一样（比如"参考文献"提取出来变成"参考⽂献"，这个"⽂"不是真正的
+# "文"字），但编码上是完全不同的字符——用真实PDF验证过：这类变体字符会让
+# 任何依赖精确文字匹配的逻辑（章节标题关键词识别等）失效。全文扫描过一本
+# 真实的书，这类变体字符出现了118种：其中100种落在Kangxi Radicals区，
+# Unicode官方本来就给这个区定义了到正常汉字的兼容分解，`unicodedata.
+# normalize("NFKC", ...)`能自动转换；剩下18种落在CJK Radicals Supplement区
+# （都是"简化字部首"变体，比如"长"的部首变体"⻓"），没有官方映射，手工补
+# 一张对照表——这18个字数量固定、Unicode字符名称里直接写着对应哪个简化字
+# （比如"C-SIMPLIFIED LONG"对应"长"），不是猜的。
+_CJK_RADICAL_VARIANT_MAP = str.maketrans({
+    "⺠": "民", "⻄": "西", "⻅": "见", "⻉": "贝",
+    "⻋": "车", "⻑": "长", "⻓": "长", "⻘": "青",
+    "⻙": "韦", "⻚": "页", "⻛": "风", "⻜": "飞",
+    "⻢": "马", "⻥": "鱼", "⻦": "鸟", "⻨": "麦",
+    "⻩": "黄", "⻬": "齐",
+})
+
+def _normalize_pdf_text(text: str) -> str:
+    """把上面说的Unicode部首变体字符规范化成正常汉字，NFKC处理不了的
+    18个字用补充表兜底。对\\x00开头的表格/图片marker、base64数据、HTML
+    标签这些ASCII内容无影响（NFKC和这张对照表都只对非ASCII字符起作用）。"""
+    return unicodedata.normalize("NFKC", text).translate(_CJK_RADICAL_VARIANT_MAP)
 
 def _pdf_bytes_to_sections(raw: bytes) -> list[tuple[str, list[str]]]:
     """只支持文字版PDF（可选中文字），扫描版/图片版PDF提取不到文字，明确报错，
@@ -1520,7 +1626,14 @@ def _pdf_bytes_to_sections(raw: bytes) -> list[tuple[str, list[str]]]:
         except Exception:
             pass
 
-    full_text = "\n\n".join(page_texts)
+    # 页与页之间只用单换行拼接，不能用双换行（等于强插一个空行）——真实
+    # PDF测出来的bug：双换行会被_rejoin_pdf_lines_into_paragraphs当成"真正
+    # 的段落边界"，导致内容跨页时（比如一个词正好被翻页断成两半，真实复现
+    # 过"古典"被拆成"古"+"典"）被强行打断。改成单换行后，跨页的行边界走
+    # 跟页内完全一样的判断路径（首行缩进/上一行以句末标点结尾这套现有逻辑），
+    # 该断的地方（页面恰好在真实段落结尾处翻页）依然能正确识别，不该断的
+    # 地方不会再被强制打断。
+    full_text = _normalize_pdf_text("\n".join(page_texts))
     # 扫描版/图片版PDF提取不出文字（或只有寥寥几个字的页眉页脚），用总字数
     # 相对页数的密度判断，而不是"完全为空"这种过于宽松的条件——避免把"提取
     # 出来的全是噪音"误判成"提取成功"。
