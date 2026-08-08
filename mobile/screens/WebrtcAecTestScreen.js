@@ -14,8 +14,15 @@ import { getTtsPlayUrl } from '../lib/api';
 // 服务器，offer/answer直接在同一个JS进程里互相设置。本地麦克风流经过
 // echoCancellation处理后，pc2收到的remote track会由react-native-webrtc
 // 自动路由到设备当前音频输出播放出来；同时另外触发一段TTS朗读播放，
-// 测试者戴耳机对着手机说话，听回环声音里有没有掺进TTS朗读，就是AEC
-// 有没有生效的直接判断依据。
+// 强制走扬声器外放（不戴耳机），让麦克风真实拾取扬声器声音形成声学回声，
+// 这才是AEC要处理的真实场景。判断依据：听TTS朗读有没有被回环延迟重复
+// 播放一遍（回声的听感），没有就是AEC生效了。
+//
+// 第一版（戴耳机+不设置通话音频模式）真机测试反馈"没有效果"，查证到
+// react-native-webrtc不会自动切换安卓音频会话到通话模式，"音频设备管理
+// 留给应用自己做"（官方讨论区原话），必须用react-native-incall-manager
+// 显式调用MODE_IN_COMMUNICATION，这是社区确认过的真实解法，见startLoopback
+// 里的详细注释。
 export default function WebrtcAecTestScreen() {
   const theme = useTheme();
   const [status, setStatus] = useState('未开始');
@@ -24,6 +31,7 @@ export default function WebrtcAecTestScreen() {
   const pc1Ref = useRef(null);
   const pc2Ref = useRef(null);
   const localStreamRef = useRef(null);
+  const inCallManagerRef = useRef(null);
 
   const log = useCallback((msg) => {
     console.log('[AEC测试]', msg);
@@ -43,6 +51,8 @@ export default function WebrtcAecTestScreen() {
     // 需要走eas build的开发客户端，Expo Go点这个按钮本来就该失败，只是
     // 不该拖累整个App打不开。
     const { mediaDevices, RTCPeerConnection } = require('react-native-webrtc');
+    // 同上，运行时require——InCallManager原生模块Expo Go里也不存在。
+    const InCallManager = require('react-native-incall-manager').default;
     if (Platform.OS === 'android') {
       const granted = await PermissionsAndroid.request(
         PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
@@ -54,6 +64,18 @@ export default function WebrtcAecTestScreen() {
       }
     }
     try {
+      // 第一版测试用户真机反馈"回声消除没有效果"之后查证到的真实原因：
+      // react-native-webrtc不会自动把安卓音频会话切到通话模式，"音频设备
+      // 管理留给应用自己做"（react-native-webrtc官方讨论区原话）——不设置
+      // AudioManager.MODE_IN_COMMUNICATION，系统级/WebRTC自带的回声消除都
+      // 没有正确的参照信号可用，`echoCancellation:true`这个约束单独设置
+      // 是不够的。这次改用react-native-incall-manager显式切换通话模式，
+      // 这是社区确认过的真实解法，不是猜的。
+      InCallManager.start({ media: 'audio' });
+      InCallManager.setForceSpeakerphoneOn(true);
+      inCallManagerRef.current = InCallManager;
+      log('InCallManager已启动（通话音频模式+强制扬声器）');
+
       setStatus('获取麦克风流…');
       const stream = await mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
@@ -103,12 +125,14 @@ export default function WebrtcAecTestScreen() {
     localStreamRef.current?.getTracks().forEach((t) => t.stop());
     pc1Ref.current?.close();
     pc2Ref.current?.close();
+    inCallManagerRef.current?.stop();
     localStreamRef.current = null;
     pc1Ref.current = null;
     pc2Ref.current = null;
+    inCallManagerRef.current = null;
     setConnected(false);
     setStatus('已停止');
-    log('回环已关闭');
+    log('回环已关闭，InCallManager已停止');
   }
 
   async function playTestTts() {
@@ -139,7 +163,7 @@ export default function WebrtcAecTestScreen() {
       <ScrollView contentContainerStyle={styles.content}>
         <Text style={[styles.title, { color: theme.text }]}>WebRTC回声消除(AEC)测试</Text>
         <Text style={[styles.hint, { color: theme.textSecondary }]}>
-          技术验证spike，不是正式功能。建议戴耳机测试：点"开始回环"授权麦克风后，回环建立会自动把处理后的麦克风声音从设备当前音频输出播放出来；再点"播放TTS测试音频"，对着手机说话，同时留意回环声音里有没有掺进TTS朗读——听不到就是AEC生效了。
+          技术验证spike，不是正式功能。这一版改成强制扬声器外放（不用戴耳机），因为AEC测的就是"外放的声音被麦克风拾到之后能不能被消掉"这个真实场景。点"开始回环"授权麦克风，再点"播放TTS测试音频"，判断方法：仔细听TTS这段朗读有没有像回声一样被延迟重复播了一遍（这是回环把麦克风原样录下的TTS又传回来放了一次）——如果只听到TTS清晰地播一遍、之后能听到你自己的说话声混进来，没有TTS的重复/拖尾，说明AEC生效了；如果TTS明显被重复播放/拖出回声尾巴，说明没生效。
         </Text>
         <Text style={[styles.status, { color: theme.text }]}>状态：{status}</Text>
         <TouchableOpacity
