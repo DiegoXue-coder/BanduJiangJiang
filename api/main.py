@@ -983,11 +983,25 @@ def _pick_heading_split_level(paragraphs: list[str]) -> int | None:
             return level
     return None
 
+def _first_heading_text(paragraphs: list[str]) -> str | None:
+    """从段落列表里找第一个标题marker（不管是h几级），取它的文字。找不到
+    返回None。"""
+    for p in paragraphs:
+        if p.startswith(_HEADING_MARKER):
+            return p[len(_HEADING_MARKER):].split("\x00", 1)[1]
+    return None
+
 def _split_paragraphs_by_heading_level(paragraphs: list[str], level: int) -> list[tuple[str, list[str]]]:
     """按选中的标题级别切分单文档的段落列表成多章，标题直接取切分点的
     标题文字（不依赖book.toc的位置对齐，比原来"按spine文档顺序对应目录
     条目"的方式更准确）。切点之前如果有没归属任何标题的内容（比如版权页
-    残留文字），自成一节，标题用"前言"占位。"""
+    残留文字、或者比拆分级别更粗一级的标题，比如拆分级别选中h3时，前面
+    出现的h2标题会先落进这一段"剩余内容"里），用剩余内容里实际存在的
+    标题文字当标题（不管是哪个层级）——真实案例（《负动产时代》，一本书
+    40个文档、每个文档单独调用这个函数）暴露过的bug：这里原来写死用
+    "前言"占位，每个文档各自的"剩余内容"都套用同一个词，会在结果里反复
+    出现一堆同名的"前言"，看着像标题错位，其实是这个占位符本身设计得
+    太窄。真的连一个标题都没有（比如纯粹的版权页残留文字）才退回"前言"。"""
     sections: list[tuple[str, list[str]]] = []
     current_title = None
     current: list[str] = []
@@ -995,13 +1009,13 @@ def _split_paragraphs_by_heading_level(paragraphs: list[str], level: int) -> lis
     for p in paragraphs:
         if p.startswith(prefix):
             if current:
-                sections.append((current_title or "前言", current))
+                sections.append((current_title or _first_heading_text(current) or "前言", current))
             current_title = p[len(prefix):]
             current = [p]
             continue
         current.append(p)
     if current:
-        sections.append((current_title or "前言", current))
+        sections.append((current_title or _first_heading_text(current) or "前言", current))
     return sections
 
 def _epub_book_to_chapters(book: "epub.EpubBook") -> list[tuple[str, list[str]]]:
@@ -1029,6 +1043,16 @@ def _epub_book_to_chapters(book: "epub.EpubBook") -> list[tuple[str, list[str]]]
         # 一个"章节"内容其实是目录链接文字，后面章节标题全部错位一个）。
         if item is not None and item.get_type() == ebooklib.ITEM_DOCUMENT and not isinstance(item, epub.EpubNav)
     ]
+
+    # 真实案例（《负动产时代》）暴露的bug："按位置对应titles[idx]给每篇文档
+    # 分配标题"这个假设，只有在book.toc条目数量正好等于正文文档数量时才
+    # 成立。这本书目录是"部/章/节"三层嵌套结构（40篇文档，但book.toc铺平
+    # 后有142条），按位置对应完全对不上——真实验证过：给版权页文档错误
+    # 分配了"前言"标题、给正文第2篇文档分配了本该属于第7篇文档内部小节的
+    # 标题"碍事的空屋"。数量对不上时titles整条列表不可信，宁可退回用文档
+    # 自己的标题（如果有）或者通用占位符，也不用这个错位的位置猜测——
+    # 数量对上时（大多数常规"一章一个文件"结构的EPUB）维持原有行为不变。
+    titles_reliable = len(titles) == len(doc_items)
 
     chapters: list[tuple[str, list[str]]] = []
     for idx, item in enumerate(doc_items):
@@ -1073,7 +1097,16 @@ def _epub_book_to_chapters(book: "epub.EpubBook") -> list[tuple[str, list[str]]]
             continue
 
         merged = _merge_short_paragraphs(paragraphs)
-        title = titles[idx] if idx < len(titles) else f"第{idx + 1}节"
+        # 标题优先级：这篇文档自己的标题（哪怕只有1个、够不到拆分阈值，
+        # 也比位置错位的book.toc猜测靠谱）> book.toc按位置对应（仅在数量
+        # 对得上、这个假设成立时才用）> 通用占位符。
+        own_title = _first_heading_text(paragraphs)
+        if own_title:
+            title = own_title
+        elif titles_reliable and idx < len(titles):
+            title = titles[idx]
+        else:
+            title = f"第{idx + 1}节"
         chapters.append((title, merged))
     return _subdivide_oversized_chapters(chapters)
 
@@ -1469,15 +1502,30 @@ _IMAGE_EXT_MEDIA_TYPE = {
     "gif": "image/gif", "bmp": "image/bmp",
 }
 
+_CHAPTER_HEADING_KEYWORDS = [
+    "引言", "序言", "前言", "序章", "导言", "绪论", "导论",
+    "结语", "结论", "终章", "后记", "附录", "尾声", "楔子", "参考文献",
+]
+
+def _space_tolerant(word: str) -> str:
+    """把关键词拆成一个个字符、中间插\\s*——真实PDF测出来的坑：不只是
+    "第1章"这种数字两侧会被提取带出空格，固定关键词内部也会（真实复现：
+    《负动产时代》"后记"这个真实章节标题被提取成"后\\u2003记"，中间夹了
+    一个全角空格，导致原来要求"后记"两个字紧挨着的精确匹配失败，这个
+    真实存在的章节整个没被识别到）。不能只给数字加空格容忍，固定关键词
+    也要同样处理，不然同一类问题换个地方还会再踩一次。"""
+    return r"\s*".join(re.escape(ch) for ch in word)
+
 _CHAPTER_HEADING_RE = re.compile(
-    # 真实PDF测出来的两处放宽：1) "第"和数字、数字和"章"之间可能有PDF提取
+    # 真实PDF测出来的几处放宽：1) "第"和数字、数字和"章"之间可能有PDF提取
     # 带出来的空格（比如"第 1 章"而不是"第1章"，大概率是原书西文数字混排
     # 时的半角间距被原样保留），加\s*容忍；2) 补上"序章""终章""参考文献"
     # 这几个原来没覆盖到的常见标题词（原来只有"序言"没有"序章"、只有
-    # "结语/结论"没有"终章"、完全没有"参考文献"）。
+    # "结语/结论"没有"终章"、完全没有"参考文献"）；3) 固定关键词内部也要
+    # 容忍空格，不只是数字两侧（见_space_tolerant注释）。
     r"^(第\s*[〇零一二三四五六七八九十百千0-9]{1,8}\s*[章回篇卷部节讲]|"
     r"(Chapter|CHAPTER)\s*\d+|"
-    r"(引言|序言|前言|序章|导言|绪论|导论|结语|结论|终章|后记|附录|尾声|楔子|参考文献)|"
+    r"(" + "|".join(_space_tolerant(w) for w in _CHAPTER_HEADING_KEYWORDS) + r")|"
     r"(Introduction|Conclusion|Preface|Prologue|Epilogue|Appendix)\s*[0-9]*)"
     # 标题后面的内容不能带逗号/顿号/括号——放宽上面两条之后，真实PDF里
     # "正如第3章介绍的……"这类引用其他章节的完整句子会被误判成新标题
