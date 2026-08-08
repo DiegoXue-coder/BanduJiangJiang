@@ -33,19 +33,37 @@ function isTocChapter(title) {
 // 那套已经验证过的思路（同一个项目的既有模式，不是新发明），把连续的
 // 短段落合并到一定长度再当一整段发去TTS，减少请求次数、拉长每段播放
 // 时长，让停顿没那么频繁。
+//
+// 2026-08-08真机反馈坐实过一版纯按长度切的bug：原书文字提取本身有时会
+// 把一个词从中间切断（比如"古典"被切成两个相邻段落"...成了古"+"典派
+// 的遗韵..."），第一版合并逻辑只看攒够长度就切，切的时候不看切在哪个
+// 字上，刚好切在段落边界=刚好切在这个词中间，把词audibly拆成了两次
+// 独立的TTS请求，中间隔了十几秒——比不合并时更违和，因为其他正常断句
+// 的地方没有这个问题，唯独这种"词跨段落边界"的地方会撞上。改成跟
+// BookChatScreen的flushSentences完全一样的算法：先把整章所有段落拼成
+// 一整块文本（拼接时不加任何分隔符，让原本被错误切断的词重新连续），
+// 再按句末标点(。！？；换行)找真正的句子边界切，只在标点处切、攒够
+// 长度才切——绝不会再切在句子中间，天然连"古典"这种词跨段落的情况都能
+// 正确愈合，不用额外判断。
+const NARRATION_SENTENCE_END = /([。！？；\n])/;
 const NARRATION_MIN_CHUNK_LEN = 60;
 
 function mergeParagraphsForNarration(paragraphs) {
+  let buffer = paragraphs.join('');
   const merged = [];
-  let buffer = '';
-  for (const p of paragraphs) {
-    buffer = buffer ? buffer + p : p;
-    if (buffer.length >= NARRATION_MIN_CHUNK_LEN) {
-      merged.push(buffer);
-      buffer = '';
+  let pending = '';
+  for (;;) {
+    const idx = buffer.search(NARRATION_SENTENCE_END);
+    if (idx === -1) break;
+    pending += buffer.slice(0, idx + 1);
+    buffer = buffer.slice(idx + 1);
+    if (pending.length >= NARRATION_MIN_CHUNK_LEN) {
+      merged.push(pending);
+      pending = '';
     }
   }
-  if (buffer) merged.push(buffer);
+  pending += buffer; // 结尾不满一句/不够长度的尾巴，直接并进最后一段，不丢内容
+  if (pending) merged.push(pending);
   return merged;
 }
 
