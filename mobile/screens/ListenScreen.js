@@ -25,10 +25,18 @@ import { useTheme } from '../theme';
 // 参照用户真机反馈（中庸默认语速"灾难级别"、想要更沉稳的男声）给一组
 // 精选预设——语速3档、声音4档（默认女声+3个候选男声，云健最接近用户
 // 描述的"智者感"），够用且不用维护一个复杂的选择UI。
+// 真机反馈：3档（慢/正常/快）不够用，希望像视频/音乐播放器一样有倍速档位。
+// edge_tts的rate参数是"比该声音的基准语速快/慢百分之多少"，近似等于播放
+// 倍速的百分比换算（1.5倍速≈"+50%"，0.75倍速≈"-25%"）——不是像视频播放器
+// 那样对已有音频做变速处理，是让TTS合成时就用这个速率说话，效果类似但
+// 原理不同，如实说明这是近似值不是精确的秒数换算。
 const RATE_OPTIONS = [
-  { label: '慢', value: '-30%' },
-  { label: '正常', value: '+0%' },
-  { label: '快', value: '+20%' },
+  { label: '0.75×', value: '-25%' },
+  { label: '1×', value: '+0%' },
+  { label: '1.25×', value: '+25%' },
+  { label: '1.5×', value: '+50%' },
+  { label: '2×', value: '+100%' },
+  { label: '3×', value: '+200%' },
 ];
 const VOICE_OPTIONS = [
   { label: '晓晓（默认女声）', value: 'zh-CN-XiaoxiaoNeural' },
@@ -108,6 +116,7 @@ export default function ListenScreen({ route, navigation }) {
   // 每次打断提问都无条件写highlights，用户验收时明确提出想要选择权。
   const [saveAsHighlight, setSaveAsHighlight] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
   const [recordingStatus, setRecordingStatus] = useState('');
 
   // playOneParagraph在playFrom的异步循环里调用，如果直接读voice/rate这两个
@@ -123,6 +132,13 @@ export default function ListenScreen({ route, navigation }) {
   const paragraphCacheRef = useRef({}); // chapterId -> string[]
   const epochRef = useRef(0); // 每次打断/停止自增，让还没awaitresolve的加载能认出自己过期
   const soundRef = useRef(null);
+  // 真机反馈"段跟段之间停顿太长"——加预取：当前段刚开始出声，就在后台
+  // 把下一段的TTS请求发出去，让加载时间跟当前段的播放时间重叠。跟
+  // BookChatScreen"预取下一句"是同一个思路，但这边是ListenScreen自己的
+  // 单线顺序循环（没有并发enqueue触发多次预取的场景），不会重演那边
+  // 排查过的乱序/丢句那类问题——按位置(ci,pi)+voice+rate做匹配校验，
+  // 位置或设置对不上就整个丢弃重新现场加载，不会把过期音频当成当前段播。
+  const preparedRef = useRef(null); // { ci, pi, voice, rate, promise }
   const posRef = useRef({ chapterIdx: 0, paragraphIdx: 0 }); // 当前/暂停时的位置
   const abortAskRef = useRef(null);
   // 决策层这轮派发：打断提问支持连续追问。这一轮打断期间的问答历史存这里
@@ -139,19 +155,32 @@ export default function ListenScreen({ route, navigation }) {
       await soundRef.current.unloadAsync().catch(() => {});
       soundRef.current = null;
     }
+    // 打断/停止听书时，预取好但还没用上的下一段音频也要一并释放，
+    // 不然这份资源没人管，白占着。
+    if (preparedRef.current) {
+      preparedRef.current.promise.then((s) => s.unloadAsync().catch(() => {})).catch(() => {});
+      preparedRef.current = null;
+    }
   }
 
-  async function playOneParagraph(text, epoch, onAudioStart) {
-    // 临时诊断：真机反馈"设置面板改了语速/声音，没有立即生效"。理论上
-    // voiceRef/rateRef是实时读取的，改了设置下一段就该用新值——但用户
-    // 可能是在一段较长的合并段落播放过程中改的设置，误以为"没生效"，
-    // 实际是那一整段本来就要放完才轮到下一段。打日志确认每段实际用的
-    // 是哪个voice/rate、这段文字多长，排查完就删。
-    console.log(`[听书诊断] 播放段落 voice=${voiceRef.current} rate=${rateRef.current} 字数=${text.length}`);
-    const { sound } = await Audio.Sound.createAsync(
-      { uri: getTtsPlayUrl(text, voiceRef.current, rateRef.current) },
-      { shouldPlay: false },
-    );
+  async function playOneParagraph(text, epoch, onAudioStart, presetSoundPromise) {
+    let sound = null;
+    if (presetSoundPromise) {
+      try {
+        sound = await presetSoundPromise;
+      } catch (e) {
+        sound = null; // 预取失败就退化成现场加载，不让这段直接播放失败
+      }
+    }
+    if (!sound) {
+      console.log(`[听书诊断] 播放段落(现场加载) voice=${voiceRef.current} rate=${rateRef.current} 字数=${text.length}`);
+      ({ sound } = await Audio.Sound.createAsync(
+        { uri: getTtsPlayUrl(text, voiceRef.current, rateRef.current) },
+        { shouldPlay: false },
+      ));
+    } else {
+      console.log(`[听书诊断] 播放段落(用预取好的) voice=${voiceRef.current} rate=${rateRef.current} 字数=${text.length}`);
+    }
     if (epoch !== epochRef.current) {
       sound.unloadAsync().catch(() => {});
       return;
@@ -205,7 +234,22 @@ export default function ListenScreen({ route, navigation }) {
         setChapterTitle(chapter.title);
         setProgressLabel(`第${pi + 1}/${paragraphs.length}段（加载中…）`);
         setPhase('playing');
-        console.log(`[听书诊断] 开始加载 章节="${chapter.title}" 第${pi + 1}/${paragraphs.length}段`);
+
+        // 取出预取好的音频——位置(ci,pi)和当时预取用的voice/rate都要跟
+        // 现在完全一致才能用，任何一处对不上（比如设置面板中途改了声音）
+        // 都整个丢弃，退化成现场加载，不会把过期音频当成当前这段播出来。
+        let presetPromise = null;
+        const prepared = preparedRef.current;
+        if (prepared && prepared.ci === ci && prepared.pi === pi
+            && prepared.voice === voiceRef.current && prepared.rate === rateRef.current) {
+          presetPromise = prepared.promise;
+          preparedRef.current = null;
+        } else if (prepared) {
+          prepared.promise.then((s) => s.unloadAsync().catch(() => {})).catch(() => {});
+          preparedRef.current = null;
+        }
+
+        console.log(`[听书诊断] 开始加载 章节="${chapter.title}" 第${pi + 1}/${paragraphs.length}段 预取命中=${!!presetPromise}`);
         try {
           await playOneParagraph(paragraphs[pi], epoch, () => {
             // 真机反馈过"打断时截取的是刚讲到那段的后面一段，不是刚讲到
@@ -217,7 +261,19 @@ export default function ListenScreen({ route, navigation }) {
             posRef.current = { chapterIdx: ci, paragraphIdx: pi };
             setProgressLabel(`第${pi + 1}/${paragraphs.length}段`);
             console.log(`[听书诊断] 开始出声 章节="${chapter.title}" 第${pi + 1}/${paragraphs.length}段`);
-          });
+            // 这段刚出声，立刻在后台把下一段的TTS请求发出去（不等待），
+            // 让加载时间跟当前段的播放时间重叠，减少段与段之间的停顿。
+            const nextPi = pi + 1;
+            if (nextPi < paragraphs.length) {
+              const v = voiceRef.current;
+              const r = rateRef.current;
+              const promise = Audio.Sound.createAsync(
+                { uri: getTtsPlayUrl(paragraphs[nextPi], v, r) },
+                { shouldPlay: false },
+              ).then(({ sound: s }) => s);
+              preparedRef.current = { ci, pi: nextPi, voice: v, rate: r, promise };
+            }
+          }, presetPromise);
           console.log(`[听书诊断] 播放完成 章节="${chapter.title}" 第${pi + 1}/${paragraphs.length}段`);
         } catch (e) {
           console.log(`[听书诊断] 播放出错，跳过这段：${e.message}`);
@@ -239,6 +295,25 @@ export default function ListenScreen({ route, navigation }) {
     console.log('[听书诊断] 全书播放完毕');
     if (epoch === epochRef.current) setPhase('done');
   }, [bookId]);
+
+  // 真机反馈"切换声音要及时，不要等到下一部分"——已经在播的这一段音频
+  // 没法中途换嗓音（已经合成好的音频文件改不了），做不到真正意义上的
+  // "无缝切换"，但可以做到"立刻用新设置重新开始播这一段"，比"等这一整段
+  // （可能merge了好几句、能长达十几秒）自然放完"快很多。只在真的正在
+  // 朗读（phase==='playing'）时触发这个"打断重放"，其他阶段（暂停/回答
+  // 中/加载中）没有"正在出声"这件事，不需要这个体验，等自然轮到下一次
+  // 播放用新设置就够了，不用画蛇添足地打断。
+  const prevVoiceRateRef = useRef({ voice, rate });
+  useEffect(() => {
+    const changed = prevVoiceRateRef.current.voice !== voice || prevVoiceRateRef.current.rate !== rate;
+    prevVoiceRateRef.current = { voice, rate };
+    if (!changed || phase !== 'playing') return;
+    const { chapterIdx, paragraphIdx } = posRef.current;
+    epochRef.current += 1;
+    stopSound();
+    playFrom(chapterIdx, paragraphIdx, epochRef.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [voice, rate]);
 
   useEffect(() => {
     let cancelled = false;
@@ -384,6 +459,7 @@ export default function ListenScreen({ route, navigation }) {
       maxDurationTimerRef.current = null;
     }
     setIsRecording(false);
+    setIsTranscribing(true);
     setRecordingStatus('识别中…');
     try {
       const rec = recordingRef.current;
@@ -400,6 +476,8 @@ export default function ListenScreen({ route, navigation }) {
       }
     } catch (e) {
       setRecordingStatus(`识别失败：${e.message}`);
+    } finally {
+      setIsTranscribing(false);
     }
   }
 
@@ -542,7 +620,10 @@ export default function ListenScreen({ route, navigation }) {
                 </TouchableOpacity>
               </View>
               {!!recordingStatus && (
-                <Text style={[styles.recordingStatus, { color: theme.textMuted }]}>{recordingStatus}</Text>
+                <View style={styles.recordingStatusRow}>
+                  {isTranscribing && <ActivityIndicator size="small" color={theme.textMuted} />}
+                  <Text style={[styles.recordingStatus, { color: theme.textMuted }]}>{recordingStatus}</Text>
+                </View>
               )}
               <View style={styles.saveHighlightRow}>
                 <Switch value={saveAsHighlight} onValueChange={setSaveAsHighlight} />
@@ -651,6 +732,7 @@ const styles = StyleSheet.create({
   questionRow: { flexDirection: 'row', gap: 8, alignItems: 'flex-start' },
   questionInputFlex: { flex: 1 },
   micBtn: { borderWidth: 1, width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
+  recordingStatusRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   recordingStatus: { fontSize: 12 },
   saveHighlightRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   saveHighlightText: { fontSize: 13 },

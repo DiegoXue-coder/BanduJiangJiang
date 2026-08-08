@@ -5,7 +5,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity,
-  StyleSheet, Alert, Keyboard, Platform,
+  StyleSheet, Alert, Keyboard, Platform, ActivityIndicator,
 } from 'react-native';
 import { BottomSheetScrollView } from '@gorhom/bottom-sheet';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -76,6 +76,10 @@ export default function BookChatScreen({
   // 不是两个同时显示
   const [streamingId, setStreamingId] = useState(null);
   const [isRecording, setRecording] = useState(false);
+  // 真机反馈：语音转文字这段等待期间用户看不出"正在识别"还是"卡住了"，
+  // 只有一行小字容易被忽略。加个专门的loading标记配ActivityIndicator，
+  // 跟ListenScreen那边同一次真机反馈一起改的，两处都要加。
+  const [transcribing, setTranscribing] = useState(false);
   // isSpeaking 是给 UI 用的（要不要显示"打断"按钮）；ttsPlayingRef 是给
   // playNextInQueue 内部判断"现在能不能开始播下一句"用的，两个都要维护，
   // 一个是 state 一个是 ref，职责不一样，不能只留一个
@@ -464,6 +468,7 @@ export default function BookChatScreen({
       maxDurationTimerRef.current = null;
     }
     setRecording(false);
+    setTranscribing(true);
     setStatus('识别中…');
     try {
       const rec = recordingRef.current;
@@ -483,6 +488,8 @@ export default function BookChatScreen({
       }
     } catch (e) {
       setStatus(`识别失败：${e.message}`);
+    } finally {
+      setTranscribing(false);
     }
   }
 
@@ -609,7 +616,12 @@ export default function BookChatScreen({
           消息区多长都不会把它挤走。msgContent 的 paddingBottom 留够这块的高度，
           避免最后几条消息被这里挡住。 */}
       <View style={[styles.footerGroup, { backgroundColor: theme.bg, bottom: keyboardHeight }]}>
-        {!!status && <Text style={[styles.status, { color: theme.textMuted }]} numberOfLines={2}>{status}</Text>}
+        {!!status && (
+          <View style={styles.statusRow}>
+            {transcribing && <ActivityIndicator size="small" color={theme.textMuted} />}
+            <Text style={[styles.status, { color: theme.textMuted }]} numberOfLines={2}>{status}</Text>
+          </View>
+        )}
 
         {(isThinking || isSpeaking) && (
           <TouchableOpacity
@@ -713,9 +725,12 @@ const styles = StyleSheet.create({
   bubbleText: { fontSize: 14, lineHeight: 22 },
   typingText: { letterSpacing: 6 },
 
+  statusRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
+    paddingHorizontal: 16, paddingVertical: 5,
+  },
   status: {
     textAlign: 'center', fontSize: 12,
-    paddingHorizontal: 16, paddingVertical: 5,
   },
 
   interruptBar: {
