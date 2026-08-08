@@ -27,6 +27,28 @@ function isTocChapter(title) {
   return (title || '').trim() === '目录';
 }
 
+// 真机反馈：有些书的<p>标签切得很碎，逐段单独发一次TTS请求，段与段之间
+// 的网络往返间隔听起来就是"总之。当时的资本主义。和科学。"这种一顿一顿
+// 的蠢断句——不是卡顿，是请求次数太多。参照BookChatScreen"攒够字数再发"
+// 那套已经验证过的思路（同一个项目的既有模式，不是新发明），把连续的
+// 短段落合并到一定长度再当一整段发去TTS，减少请求次数、拉长每段播放
+// 时长，让停顿没那么频繁。
+const NARRATION_MIN_CHUNK_LEN = 60;
+
+function mergeParagraphsForNarration(paragraphs) {
+  const merged = [];
+  let buffer = '';
+  for (const p of paragraphs) {
+    buffer = buffer ? buffer + p : p;
+    if (buffer.length >= NARRATION_MIN_CHUNK_LEN) {
+      merged.push(buffer);
+      buffer = '';
+    }
+  }
+  if (buffer) merged.push(buffer);
+  return merged;
+}
+
 export default function ListenScreen({ route, navigation }) {
   const { bookId, bookTitle, author, initialChapterTitle } = route.params;
   const theme = useTheme();
@@ -94,11 +116,11 @@ export default function ListenScreen({ route, navigation }) {
         setChapterTitle(chapter.title);
         try {
           const data = await getChapterText(bookId, chapter.id);
-          paragraphs = data.paragraphs || [];
+          paragraphs = mergeParagraphsForNarration(data.paragraphs || []);
           // 临时诊断：真机反馈"只听到'前言'两个字，后面都没有了"，加日志
           // 确认到底是"这一章后端就只返回了一段"，还是"返回了多段但播放
           // 循环提前退出"，不能靠猜。排查完就删。
-          console.log(`[听书诊断] 章节"${chapter.title}"(id=${chapter.id})拿到${paragraphs.length}段：`, paragraphs.map((p) => p.slice(0, 10)));
+          console.log(`[听书诊断] 章节"${chapter.title}"(id=${chapter.id})合并后${paragraphs.length}段：`, paragraphs.map((p) => p.slice(0, 10)));
         } catch (e) {
           console.log(`[听书诊断] 章节"${chapter.title}"加载失败：${e.message}`);
           if (epoch !== epochRef.current) return;
