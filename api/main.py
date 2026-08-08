@@ -2063,10 +2063,18 @@ async def tts(req: TTSRequest, _=ExtAuth):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"TTS 错误: {e}")
 
+_RATE_PATTERN = re.compile(r"^[+-]\d{1,3}%$")
+
 @app.get("/tts/play")
-async def tts_play(text: str, voice: str = "zh-CN-XiaoxiaoNeural"):
+async def tts_play(text: str, voice: str = "zh-CN-XiaoxiaoNeural", rate: str = "+0%"):
+    # 阶段十七听书功能真机反馈：默认语速对文言文听众来说太快。edge_tts.
+    # Communicate原生支持rate参数（"+0%"这种百分比格式），只是之前接口
+    # 没把它暴露出来。校验格式避免把任意字符串直接传给底层库（这是外部
+    # 请求的query参数，不能照单全收）。
+    if not _RATE_PATTERN.match(rate):
+        raise HTTPException(status_code=400, detail="rate参数格式错误，应为类似+0%/-20%这样的百分比")
     try:
-        communicate = edge_tts.Communicate(clean_for_tts(text), voice)
+        communicate = edge_tts.Communicate(clean_for_tts(text), voice, rate=rate)
         chunks = []
         async for chunk in communicate.stream():
             if chunk["type"] == "audio":
