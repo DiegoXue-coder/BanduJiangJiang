@@ -967,6 +967,24 @@ def _epub_doc_to_marker_paragraphs(book: "epub.EpubBook", doc_item, soup) -> lis
 _EPUB_SPLIT_MIN_HEADING_COUNT = 4   # 少于这个数量，太粗（比如只有"部"级）
 _EPUB_SPLIT_MAX_HEADING_COUNT = 80  # 多于这个数量，太碎（比如到了小节级）
 
+# 2026-08-09真机反馈发现：上面这套"数量落在区间内就当分章级别"的启发式，
+# 隐含假设"这份文档=整本书"——真实案例（《负动产时代》，40个物理文件，
+# 每个文件本身已经大致是一"章"）暴露了这个假设不成立的场景：单个文件内部
+# "章"级标题（比如"第1章被抛弃的房屋和土地"）天然只出现1次（一个文件本来
+# 就只讲一章），够不到MIN阈值(4)，于是这套启发式会继续往细找，误把文件内部
+# 真正的"节"级副标题（比如"突然变窄的人行道之谜"，13~15个）当成分章边界，
+# 结果这些本该隶属于"第1章"的副标题被拆成一堆和"第1章"并列的独立章节——
+# 目录面板变成一大排同级平铺条目，阅读器里也因为每个"节"各自成一个独立
+# 文档产生额外分页，读起来支离破碎。
+#
+# 根治思路：这套数量启发式只在"一份文档大概率就是整本书"的场景下才成立
+# （文档数量很少，比如8月8日修的《后资本主义时代》只有titlepage+index.html
+# 两篇实际内容文档）。文档数量已经很多的书（正常"大致一章一个文件"结构），
+# 每个文档天然就该整篇当一章，内部不管有多少层副标题，都不该再拆成独立
+# 章节——应该保留在同一章内当"章内小节"，用嵌套目录+锚点跳转呈现（见
+# _build_chapter_toc_entry），不是拆平级。
+_EPUB_FEW_DOCS_THRESHOLD = 3
+
 def _pick_heading_split_level(paragraphs: list[str]) -> int | None:
     """统计h1~h6各级标题在这份单文档里出现的次数，找一个数量落在
     [_EPUB_SPLIT_MIN_HEADING_COUNT, _EPUB_SPLIT_MAX_HEADING_COUNT]区间的
@@ -1075,6 +1093,11 @@ def _epub_book_to_chapters(book: "epub.EpubBook") -> list[tuple[str, list[str]]]
     # 自己的标题（如果有）或者通用占位符，也不用这个错位的位置猜测——
     # 数量对上时（大多数常规"一章一个文件"结构的EPUB）维持原有行为不变。
     titles_reliable = len(titles) == len(doc_items)
+    # 见上面_EPUB_FEW_DOCS_THRESHOLD的注释：只有文档数量很少（大概率是"整本书
+    # 塞进一两个文档"）时，才需要靠数量启发式在文档内部找分章边界；文档数量
+    # 已经很多的书，每个文档天然就是一章，内部的副标题留在同一章里当"章内
+    # 小节"处理，不再拆成并列的独立章节。
+    allow_heading_split = len(doc_items) <= _EPUB_FEW_DOCS_THRESHOLD
 
     chapters: list[tuple[str, list[str]]] = []
     for idx, item in enumerate(doc_items):
@@ -1110,7 +1133,7 @@ def _epub_book_to_chapters(book: "epub.EpubBook") -> list[tuple[str, list[str]]]
         # 级别拆成多章，不再把整篇当成一章硬塞。多文件结构的正常EPUB（每篇
         # 文档本来就只有零星1个标题，够不到_EPUB_SPLIT_MIN_HEADING_COUNT）
         # 不受影响，走老逻辑。
-        split_level = _pick_heading_split_level(paragraphs)
+        split_level = _pick_heading_split_level(paragraphs) if allow_heading_split else None
         if split_level is not None:
             for sub_title, sub_paragraphs in _split_paragraphs_by_heading_level(paragraphs, split_level):
                 merged = _merge_short_paragraphs(sub_paragraphs)
@@ -1171,7 +1194,14 @@ def _merge_short_paragraphs(paragraphs: list[str], min_chars: int = MIN_CHAPTER_
             merged.append(buffer)
             buffer = ""
     if buffer:
-        if merged:
+        # 2026-08-09发现的真实边界bug：如果merged的最后一项是标题/表格/图片
+        # 这类marker段落（比如整个章节最后一个段落恰好紧跟在标题后面、又
+        # 太短没攒够min_chars），直接拼到merged[-1]会把这段普通文字焊进
+        # marker字符串里——标题被拼接成"标题文字\n正文"，_build_epub_from_
+        # sections解析时会把这段正文也一起渲染进<h{level}>标签，读起来像
+        # 标题特别长，其实是不相关的两段内容被粘在一起了。这种情况下把
+        # buffer当独立的新一项追加，不去动前一个marker段落。
+        if merged and not (merged[-1].startswith(_TABLE_MARKER) or merged[-1].startswith(_IMAGE_MARKER) or merged[-1].startswith(_HEADING_MARKER)):
             merged[-1] = f"{merged[-1]}\n{buffer}"
         else:
             merged.append(buffer)
@@ -1188,7 +1218,13 @@ def _build_epub_from_sections(dst_path: str, title: str, author: str, chapters: 
     "a > 0"）这类字符，原样塞进`<p>`标签会把XHTML解析弄坏（这两个符号在
     XML里有特殊含义）。用`html.escape()`转义之后再拼进标签，从根上解决，
     不是猜的——用真实PDF文件测出来的（提取文本里`&`出现1次、`<`3次、
-    `>`7次，都是这个原因）。"""
+    `>`7次，都是这个原因）。
+
+    2026-08-09：章节正文里如果还留有_HEADING_MARKER段落（比如_epub_book_to_
+    chapters这次改成"多文件结构不再把章内小节拆成并列章节"之后，小节标题
+    会作为普通段落留在同一章的paragraphs里），除了渲染成<h2>~<h6>，还要
+    给标签加锚点id、记下来生成嵌套目录——不然这些小节虽然还在正文里，但
+    目录面板完全看不到、跳不过去，体验上等于消失了。"""
     new_book = epub.EpubBook()
     new_book.set_identifier(f"imported-{uuid.uuid4().hex}")
     new_book.set_title(title)
@@ -1198,10 +1234,13 @@ def _build_epub_from_sections(dst_path: str, title: str, author: str, chapters: 
 
     chapter_titles = []
     items = []
+    toc_entries = []
     image_seq = 0
     for idx, (chapter_title, paragraphs) in enumerate(chapters):
         chapter_titles.append(chapter_title)
         html_parts = []
+        inline_headings: list[tuple[int, str, str]] = []  # (level, anchor_id, text)——章内小节，供生成嵌套目录用
+        heading_seq = 0
         for p in paragraphs:
             for sub in p.split("\n"):
                 if not sub.strip():
@@ -1234,12 +1273,18 @@ def _build_epub_from_sections(dst_path: str, title: str, author: str, chapters: 
                 elif sub.startswith(_HEADING_MARKER):
                     # 格式："{level}\x00{标题文字}"，level对应原书h1~h6的
                     # 层级，直接渲染成对应的<h{level}>标签，不套<p>——这样
-                    # WebView阅读器才能保留原书标题跟正文的字号区分。
+                    # WebView阅读器才能保留原书标题跟正文的字号区分。这里的
+                    # 标题是"章内小节"（章节自己的标题在外层用own_title/
+                    # _pop_first_heading取走了，不会再以段落形式出现在这里），
+                    # 加个锚点id，方便目录面板生成嵌套条目直接跳转过来。
                     try:
                         payload = sub[len(_HEADING_MARKER):]
                         level_str, heading_text = payload.split("\x00", 1)
                         level = min(max(int(level_str), 1), 6)
-                        html_parts.append(f"<h{level}>{html.escape(heading_text)}</h{level}>")
+                        heading_seq += 1
+                        anchor_id = f"h_{idx}_{heading_seq}"
+                        html_parts.append(f'<h{level} id="{anchor_id}">{html.escape(heading_text)}</h{level}>')
+                        inline_headings.append((level, anchor_id, heading_text))
                     except Exception:
                         html_parts.append(f"<p>{html.escape(sub)}</p>")
                 else:
@@ -1249,13 +1294,48 @@ def _build_epub_from_sections(dst_path: str, title: str, author: str, chapters: 
         c.content = f"<h1>{html.escape(chapter_title)}</h1>{paragraphs_html}"
         new_book.add_item(c)
         items.append(c)
+        toc_entries.append(_build_chapter_toc_entry(c, inline_headings))
 
-    new_book.toc = tuple(items)
+    new_book.toc = tuple(toc_entries)
     new_book.add_item(epub.EpubNcx())
     new_book.add_item(epub.EpubNav())
     new_book.spine = ["nav"] + items
     epub.write_epub(dst_path, new_book)
     return chapter_titles
+
+def _build_chapter_toc_entry(chapter_item: "epub.EpubHtml", inline_headings: list[tuple[int, str, str]]):
+    """章节内部没有小节标题（inline_headings为空）就返回普通的Link——跟
+    以前"目录条目=一堆EpubHtml"完全一样，不引入任何变化。有小节标题的话，
+    构造ebooklib认的嵌套目录元组格式`(父条目, (子条目, ...))`：父条目还是
+    指向章节本身（点了跳到章节开头），子条目是各个小节标题+对应锚点。
+
+    嵌套层级按小节标题自己的h级别（level）用一个栈搭出树——不写死只处理
+    两层（章+节），真按level相对大小嵌套，理论上碰到h2下面还有h3、h3下面
+    还有h4这种更深的层级也能处理，不是只覆盖目前两本真实书验证过的场景。
+
+    ebooklib的NCX生成（_get_ncx）对Link类型的目录条目会直接拿`item.uid`
+    当XML的id属性用——uid给None会生成非法XML，这里复用锚点字符串本身当
+    uid（本来就全书唯一，两个用途共用一份，不用另起一套编号）。"""
+    if not inline_headings:
+        return chapter_item
+
+    root: list[tuple["epub.Link", list]] = []
+    stack: list[tuple[int, list]] = [(0, root)]  # level=0当哨兵，比任何真实标题(1~6)都粗
+    for level, anchor_id, text in inline_headings:
+        while len(stack) > 1 and stack[-1][0] >= level:
+            stack.pop()
+        node_children: list = []
+        link = epub.Link(f"{chapter_item.file_name}#{anchor_id}", text, anchor_id)
+        stack[-1][1].append((link, node_children))
+        stack.append((level, node_children))
+
+    def _finalize(nodes: list[tuple["epub.Link", list]]) -> list:
+        result = []
+        for link, children in nodes:
+            result.append((link, tuple(_finalize(children))) if children else link)
+        return result
+
+    return (chapter_item, tuple(_finalize(root)))
 
 # 一本正常长度的书（几万字）如果按MIN_CHAPTER_CHARS(150)这个"避免单个段落
 # 太短导致WebView选字失败"的极小阈值直接当成"一个分组=一章"，会被切成几百
