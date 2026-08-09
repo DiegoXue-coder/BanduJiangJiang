@@ -492,7 +492,7 @@ export default function ListenScreen({ route, navigation }) {
           }
           saveQaHistory({
             bookId, bookTitle, chapterTitle: chapter?.title || '',
-            question: q, answer, selection: capturedText, cfiRange: fakeCfi,
+            question: q, answer, selection: capturedText, cfiRange: fakeCfi, style: 'simple',
           }).catch(() => {});
           setPhase('answering');
           const epoch = epochRef.current;
