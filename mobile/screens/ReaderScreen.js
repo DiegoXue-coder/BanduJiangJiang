@@ -54,6 +54,15 @@ function ReaderInner({
   bookId, bookTitle, author, initialLocation, initialAnnotations, navigation,
   jumpToCfi, jumpNonce, epubSrc,
 }) {
+  // 1号任务诊断打点：这里挂载即代表epubUri（Base64字符串）已经通过RN桥
+  // 传给了<Reader>，接下来是epub.js在WebView内部解压+解析的阶段——跟
+  // handleReady里的打点配对，算出来的差值就是"WebView内部到底花了多久"，
+  // 这一段之前完全是黑盒，只显示"正在下载书本…"这个笼统提示。
+  const readerInnerMountedAtRef = useRef(Date.now());
+  useEffect(() => {
+    console.log(`[打开诊断] ReaderInner挂载，开始把EPUB交给WebView内的epub.js解析`);
+  }, []);
+
   const { addAnnotation, changeTheme, changeFontSize, changeFontFamily, toc, goToLocation, goNext, goPrevious, injectJavascript, currentLocation } = useReader();
 
   // 目录跳转不能直接把 toc 里的 href（形如"chap_005.xhtml"）丢给 goToLocation——
@@ -163,6 +172,7 @@ function ReaderInner({
   // 展示，跳过是合理的，不是丢数据（数据库里还在，只是不在阅读器里画
   // 高亮框）。
   function handleReady() {
+    console.log(`[打开诊断] epub.js onReady触发，WebView内部解析耗时=${Date.now() - readerInnerMountedAtRef.current}ms`);
     setIsReady(true);
     if (annotationsRestored.current) return;
     annotationsRestored.current = true;
@@ -607,20 +617,34 @@ export default function ReaderScreen({ route, navigation }) {
   // 这里改成预下载+读成Base64传给<Reader>，是在排查过程中顺带做的加固：
   // 避免依赖库内部在WebView里对file://路径发起fetch()（Chromium的fetch()
   // 不支持file:协议），让EPUB内容完全走内存解码，不经过WebView网络层。
+  // 1号任务：诊断"打开导入书籍加载慢"卡在哪一步——不先优化，先用真实
+  // 耗时数据定位瓶颈在下载/Base64编码/epub.js内部解析这几段里的哪一段。
+  // 打点会跟这次真机诊断一起用完即删，不是要长期留着的埋点。
   const loadEpub = useCallback(async () => {
+    const t0 = Date.now();
     const dir = FileSystem.documentDirectory + 'epub_cache/';
     const localUri = dir + `book_${bookId}.epub`;
     const info = await FileSystem.getInfoAsync(localUri);
     if (!info.exists) {
       await FileSystem.makeDirectoryAsync(dir, { intermediates: true });
       await FileSystem.downloadAsync(getBookFileUrl(bookId), localUri);
+      const dlInfo = await FileSystem.getInfoAsync(localUri);
+      console.log(`[打开诊断] EPUB下载完成 耗时=${Date.now() - t0}ms 文件大小=${dlInfo.size}bytes`);
+    } else {
+      console.log(`[打开诊断] EPUB本地已缓存 跳过下载 文件大小=${info.size}bytes`);
     }
-    return FileSystem.readAsStringAsync(localUri, { encoding: FileSystem.EncodingType.Base64 });
+    const t1 = Date.now();
+    const b64 = await FileSystem.readAsStringAsync(localUri, { encoding: FileSystem.EncodingType.Base64 });
+    console.log(`[打开诊断] Base64编码完成 耗时=${Date.now() - t1}ms 编码后字符数=${b64.length}`);
+    return b64;
   }, [bookId]);
 
   const load = useCallback(async () => {
+    const tStart = Date.now();
+    console.log(`[打开诊断] 开始加载 bookId=${bookId}`);
     try {
       const [c, h, uri] = await Promise.all([getBookContext(bookId), getHighlights(bookId), loadEpub()]);
+      console.log(`[打开诊断] context+highlights+EPUB文件全部就绪 累计耗时=${Date.now() - tStart}ms（此时epub.js还没开始在WebView里解析）`);
       setCtx(c);
       setHighlights(h);
       setEpubUri(uri);

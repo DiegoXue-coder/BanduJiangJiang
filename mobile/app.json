@@ -11,7 +11,8 @@
       "supportsTablet": true,
       "infoPlist": {
         "NSMicrophoneUsageDescription": "伴读讲讲需要麦克风权限来进行语音提问",
-        "NSSpeechRecognitionUsageDescription": "伴读讲讲使用语音识别将提问转为文字"
+        "NSSpeechRecognitionUsageDescription": "伴读讲讲使用语音识别将提问转为文字",
+        "UIBackgroundModes": ["audio"]
       }
     },
     "android": {

@@ -12,7 +12,7 @@ import {
   ActivityIndicator, ScrollView, Platform, KeyboardAvoidingView, Switch,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Audio } from 'expo-av';
+import { Audio, InterruptionModeIOS, InterruptionModeAndroid } from 'expo-av';
 import * as FileSystem from 'expo-file-system/legacy';
 import Slider from '@react-native-community/slider';
 import { IconPlayerStop, IconSettings, IconMicrophone } from '@tabler/icons-react-native';
@@ -379,7 +379,18 @@ export default function ListenScreen({ route, navigation }) {
 
   useEffect(() => {
     let cancelled = false;
-    Audio.setAudioModeAsync({ playsInSilentModeIOS: true }).catch(() => {});
+    // 决策层这轮派发的高优先级任务：听书场景本来就是通勤/做家务这类碎片
+    // 时间，锁屏/切后台必须能继续播——staysActiveInBackground是expo-av
+    // 官方提供的后台播放开关，不是自己发明机制。iOS这个参数在Expo Go里
+    // 不生效（官方文档原文："不适用于Expo Go的iOS，仅在独立应用中有效"），
+    // 需要走eas build出真机包才能验证，这点已经如实记入开发进度记录。
+    Audio.setAudioModeAsync({
+      playsInSilentModeIOS: true,
+      staysActiveInBackground: true,
+      interruptionModeIOS: InterruptionModeIOS.DoNotMix,
+      interruptionModeAndroid: InterruptionModeAndroid.DoNotMix,
+      shouldDuckAndroid: false,
+    }).catch(() => {});
     getBookContext(bookId).then((ctx) => {
       if (cancelled) return;
       const filtered = (ctx.chapters || []).filter((c) => !isTocChapter(c.title));

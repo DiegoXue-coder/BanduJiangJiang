@@ -1,7 +1,7 @@
 import React, { useCallback, useState } from 'react';
 import {
   View, Text, FlatList, TouchableOpacity, StyleSheet,
-  ActivityIndicator, RefreshControl, Alert,
+  ActivityIndicator, RefreshControl, Alert, Modal,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
@@ -9,6 +9,7 @@ import * as DocumentPicker from 'expo-document-picker';
 import { IconUpload, IconTrash } from '@tabler/icons-react-native';
 import { getLibrary, importFile, importEpub, deleteMyBook } from '../lib/api';
 import { useTheme } from '../theme';
+import KnownIssueNotice from '../components/KnownIssueNotice';
 
 // 阶段十五（续，2026-08-06）：删除入口只在自己导入的书上出现——书架接口
 // 本身已经按"预置书全体可见/导入的书只对导入者可见"过滤过，能出现在这个
@@ -194,6 +195,29 @@ export default function BookshelfScreen({ navigation }) {
           />
         )}
       />
+
+      {/* 决策层这轮派发：导入过程之前只有头部按钮里一个不起眼的小转圈，
+          用户完全不知道要等多久、能不能退出App。这里不做真实进度条——
+          后端是一次性同步处理，没有分阶段进度可汇报，做百分比意义不大，
+          改成诚实的加载状态说明+明确的"别退出"提示（KnownIssueNotice是
+          阶段十四就有的已知问题场景化提示文案组件，本来就是给这种"没法
+          精确但要说清楚"的场景用的）。这个Modal不可点击关闭，导入没结束
+          之前用户只能等或者按系统返回键强制退出App——那种情况下就是
+          "退出中断"，是下面这句警告文案想事先说清楚、而不是事后再处理
+          的场景。 */}
+      <Modal visible={importing} transparent animationType="fade">
+        <View style={styles.importOverlay}>
+          <View style={[styles.importCard, { backgroundColor: theme.cardBg, borderRadius: theme.radius, borderColor: theme.cardBorder }]}>
+            <ActivityIndicator size="large" color={theme.accent} />
+            <Text style={[styles.importTitle, { color: theme.text }]}>正在导入书籍…</Text>
+            <KnownIssueNotice
+              message="正在解析书籍内容，大文件可能需要1-2分钟"
+              style={styles.importHint}
+            />
+            <Text style={[styles.importWarning, { color: theme.danger }]}>请勿退出App，退出会导致这次导入失败</Text>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -235,4 +259,13 @@ const styles = StyleSheet.create({
   errorText: { fontSize: 14, textAlign: 'center', paddingHorizontal: 24 },
   retryBtn: { marginTop: 16, paddingHorizontal: 20, paddingVertical: 10 },
   retryText: { fontWeight: '600' },
+
+  importOverlay: {
+    flex: 1, alignItems: 'center', justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.4)', padding: 32,
+  },
+  importCard: { borderWidth: 1, padding: 24, alignItems: 'center', width: '100%' },
+  importTitle: { fontSize: 16, fontWeight: '700', marginTop: 14 },
+  importHint: { marginTop: 8 },
+  importWarning: { fontSize: 13, fontWeight: '600', marginTop: 14, textAlign: 'center' },
 });
