@@ -1108,6 +1108,151 @@ def _split_paragraphs_by_heading_level(paragraphs: list[str], level: int) -> lis
         sections.append((title or "前言", current))
     return sections
 
+def _shift_heading_levels(paragraphs: list[str], target_first_level: int) -> list[str]:
+    """把一份段落列表里所有_HEADING_MARKER段落的级别整体平移，第一个标题
+    平移到target_first_level，后面的标题跟着同样的偏移量走，保持这份内容
+    内部原有的相对层级关系不变（只是整体挪深/挪浅，不改变谁是谁的子级）。
+
+    用于_epub_book_to_chapters_via_toc把多个物理文件合并进同一个逻辑"章"
+    的时候：某个文件自己的h1标题（这个文件单独看时是"自己的最高级标题"），
+    合并进更大的章节之后不再是最高级了，需要重新定位成对应深度的小标题，
+    它自己内部原有的更深层标题（比如h3的"小节"）要跟着同步下移，不能只
+    移动第一个标题、丢下后面的标题不管，那样会破坏原有的层级关系。"""
+    first_level = None
+    for p in paragraphs:
+        if p.startswith(_HEADING_MARKER):
+            first_level = int(p[len(_HEADING_MARKER)])
+            break
+    if first_level is None:
+        return paragraphs
+    delta = target_first_level - first_level
+    if delta == 0:
+        return paragraphs
+    result = []
+    for p in paragraphs:
+        if p.startswith(_HEADING_MARKER):
+            payload = p[len(_HEADING_MARKER):]
+            level_str, text = payload.split("\x00", 1)
+            new_level = min(max(int(level_str) + delta, 1), 6)
+            result.append(f"{_HEADING_MARKER}{new_level}\x00{text}")
+        else:
+            result.append(p)
+    return result
+
+def _epub_doc_item_to_paragraphs_or_none(book: "epub.EpubBook", item) -> list[str] | None:
+    """给_epub_book_to_chapters_via_toc用的单文档提取，跟_epub_book_to_chapters
+    主循环里那段几乎一样（标题/表格/图片提取+目录页过滤+纯文本兜底），抽出来
+    避免两处复制粘贴同一段逻辑、以后改一处漏改另一处。提取不到内容、或者
+    识别出这篇文档本身是目录/地标页，返回None，调用方跳过这个模块。"""
+    try:
+        html_content = item.get_content().decode("utf-8", errors="replace")
+    except Exception:
+        return None
+    soup = BeautifulSoup(html_content, "html.parser")
+    for tag in soup(["script", "style"]):
+        tag.decompose()
+    first_heading = soup.find(["h1", "h2", "h3", "h4", "h5", "h6"])
+    if first_heading and _is_toc_heading_text(first_heading.get_text(strip=True)):
+        return None
+    if _is_toc_like_document(soup):
+        return None
+    paragraphs = _epub_doc_to_marker_paragraphs(book, item, soup)
+    if not paragraphs:
+        text = soup.get_text("\n")
+        paragraphs = [line.strip() for line in text.split("\n") if line.strip()]
+    return paragraphs or None
+
+def _epub_book_to_chapters_via_toc(book: "epub.EpubBook", doc_items: list) -> list[tuple[str, list[str]]] | None:
+    """2026-08-09真机反馈：多文件EPUB（"一节一个文件"结构，比如《负动产
+    时代》）里，book.toc自己的嵌套关系（"部/章/节"这种真实层级，比如"第1章"
+    下面挂着"碍事的空屋""用纳税人的钱装了围栏"等好几个"节"，每个"节"各自
+    独立成一个物理文件）之前完全没有被用来分章——旧逻辑是"一个物理文件=
+    一个候选章节"，导致这些真实上隶属于"第1章"的"节"，被当成跟"第1章"
+    并列的独立顶层章节，目录面板收不拢，用户想要的"点开第1章才展开下面
+    的节"这种体验做不到。
+
+    这个函数改成直接按book.toc自己的树形结构分组：顶层的每个条目（无论
+    是有子条目的Section还是没有子条目的Link）对应一个最终的章节；这个
+    条目子树下面涉及到的所有物理文件（DFS顺序、去重——"小节"级的叶子
+    条目通常和它们的"节"级父条目共享同一个物理文件，只是锚点不同，去重
+    之后只会被收录一次，不会重复拉取内容），全部拼进这一个章节的正文里，
+    只有顶层条目自己的文件贡献"章节标题"，其余文件的标题通过
+    _shift_heading_levels整体下移一级，变成行内小标题（配合
+    _build_chapter_toc_entry生成嵌套目录）。
+
+    返回None表示book.toc这条路走不通（没有目录、或者目录条目对应不上
+    任何物理文件），调用方退回旧的"一文件一章+文件内标题拆分"逻辑，不会
+    比以前更差——这个函数只是新增的更优先尝试的路径，不是替换。"""
+    if not book.toc:
+        return None
+    doc_by_name = {item.get_name(): item for item in doc_items}
+
+    def resolve(node):
+        n = node[0] if isinstance(node, tuple) else node
+        href = getattr(n, "file_name", None) or getattr(n, "href", "") or ""
+        title = getattr(n, "title", "") or ""
+        return href.split("#", 1)[0], title
+
+    seen: set[str] = set()
+
+    def collect_modules(node, depth: int, modules: list):
+        fname, _ = resolve(node)
+        if fname in doc_by_name and fname not in seen:
+            seen.add(fname)
+            modules.append((depth, doc_by_name[fname]))
+        if isinstance(node, tuple):
+            for child in node[1]:
+                collect_modules(child, depth + 1, modules)
+
+    chapters: list[tuple[str, list[str]]] = []
+    for top in book.toc:
+        modules: list[tuple[int, object]] = []
+        collect_modules(top, 0, modules)
+        if not modules:
+            continue
+        _, toc_title = resolve(top)
+
+        chapter_title = None
+        body_paragraphs: list[str] = []
+        for depth, item in modules:
+            paragraphs = _epub_doc_item_to_paragraphs_or_none(book, item)
+            if paragraphs is None:
+                continue
+            if depth == 0:
+                own_title, paragraphs = _pop_first_heading(paragraphs)
+                chapter_title = own_title
+                body_paragraphs.extend(paragraphs)
+            else:
+                body_paragraphs.extend(_shift_heading_levels(paragraphs, depth + 1))
+
+        # 注意：这里判断"这个顶层条目要不要跳过"只看有没有拿到真实正文
+        # 内容（chapter_title/merged），不看toc_title——一个顶层条目如果
+        # 唯一的模块被_epub_doc_item_to_paragraphs_or_none判定成目录/地标
+        # 页整篇跳过（比如这个条目自己就是"目录"这种），不能因为book.toc
+        # 里还留着"目录"这个标题文字，就硬造一个内容空空的"目录"章节出来
+        # ——toc_title只用来给"确实有真实内容、只是没有自己的标题标签"这种
+        # 情况兜底命名，不能反过来决定"这个条目该不该存在"。
+        if not body_paragraphs and not chapter_title:
+            continue
+        merged = _merge_short_paragraphs(body_paragraphs)
+        if not merged and not chapter_title:
+            continue
+        # 标题优先级：文档自己的标题标签（最贴近真实内容）> book.toc这个
+        # 节点自己的标题文字（这次是按树形结构精确对应的，不是旧逻辑那种
+        # 容易错位的位置猜测，一样可信）> 通用占位符。
+        chapters.append((chapter_title or toc_title or f"第{len(chapters) + 1}节", merged))
+
+    if not chapters:
+        return None
+    # 注意：这里不调用_subdivide_oversized_chapters。那个按字数硬切的兜底
+    # 是给PDF那种"一大坨没有内部结构的纯文字"设计的（唯一能让超大章节变得
+    # 可导航的办法就是切开）——这里的章节不一样，内部天然带着完整的标题
+    # 层级+嵌套目录+锚点，用户可以直接从目录跳到任意一个"节"，可导航性
+    # 已经靠结构解决了，不需要靠切分字数解决。2026-08-09用户明确要求"第1章"
+    # 收紧成一个整体（哪怕内容量大），如果这里再按字数切成"(1)"~"(5)"，
+    # 会把用户刚要求收紧的结构重新拆散，跟这次改动的目的直接矛盾。
+    return chapters
+
 def _epub_book_to_chapters(book: "epub.EpubBook") -> list[tuple[str, list[str]]]:
     """把用户自己上传的epub提取成章节（跟PDF/TXT导入统一走
     _build_epub_from_sections重建），丢弃原书自带的CSS/复杂标记，但保留
@@ -1133,6 +1278,15 @@ def _epub_book_to_chapters(book: "epub.EpubBook") -> list[tuple[str, list[str]]]
         # 一个"章节"内容其实是目录链接文字，后面章节标题全部错位一个）。
         if item is not None and item.get_type() == ebooklib.ITEM_DOCUMENT and not isinstance(item, epub.EpubNav)
     ]
+
+    # 2026-08-09：优先尝试按book.toc自己的树形结构分组（见
+    # _epub_book_to_chapters_via_toc注释）——这条路径能把"节"正确收拢进
+    # 它真正隶属的"章"里，比下面这套"一文件一章"的旧逻辑更准确。走不通
+    # （没有目录、或者目录条目对不上任何物理文件）才退回旧逻辑，不会比
+    # 以前更差。
+    toc_chapters = _epub_book_to_chapters_via_toc(book, doc_items)
+    if toc_chapters is not None:
+        return toc_chapters
 
     # 真实案例（《负动产时代》）暴露的bug："按位置对应titles[idx]给每篇文档
     # 分配标题"这个假设，只有在book.toc条目数量正好等于正文文档数量时才
