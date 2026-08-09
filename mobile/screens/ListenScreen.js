@@ -994,20 +994,31 @@ export default function ListenScreen({ route, navigation }) {
   // 循环播出来变成刺耳的实时回音——这里只是要拿一个真正建立连接的
   // RTCPeerConnection来读音量统计，不需要真的听到这条音轨内容。
   async function startHandsFreeVad() {
-    const { mediaDevices, RTCPeerConnection } = require('react-native-webrtc');
-    const InCallManager = require('react-native-incall-manager').default;
-    if (Platform.OS === 'android') {
-      const granted = await PermissionsAndroid.request(
-        PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
-        { title: '麦克风权限', message: '免提打断需要持续访问麦克风，用来判断你有没有在说话', buttonPositive: '允许' },
-      );
-      if (granted !== PermissionsAndroid.RESULTS.GRANTED) {
-        setHandsFreeStatus('麦克风权限被拒绝，免提打断无法开启');
-        setHandsFreeEnabled(false);
-        return;
-      }
-    }
+    // 真机反馈过的真实bug：react-native-webrtc/react-native-incall-manager
+    // 这两个原生模块在Expo Go里不存在，require()这一步本身就会同步抛出
+    // "tried to access a native module that doesn't exist"——之前只把
+    // InCallManager.start()往后这段包进了try/catch，require()调用本身
+    // 留在try块外面，点免提按钮直接触发一个没被catch住的异常，在RN里
+    // 表现成红屏"Uncaught Error"。跟WebrtcAecTestScreen.js当初"顶层
+    // 静态import导致整个App崩溃"是同一类问题的变种——这次不是顶层
+    // import（已经用运行时require规避了那次教训），但require()本身
+    // 抛出的异常同样必须包进try/catch，不能假设"用了运行时require就
+    // 天然安全"。改成try包住从require()开始的全部内容，Expo Go环境下
+    // 点这个按钮应该优雅地提示"需要开发版本"，不是让整个屏幕崩掉。
     try {
+      const { mediaDevices, RTCPeerConnection } = require('react-native-webrtc');
+      const InCallManager = require('react-native-incall-manager').default;
+      if (Platform.OS === 'android') {
+        const granted = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+          { title: '麦克风权限', message: '免提打断需要持续访问麦克风，用来判断你有没有在说话', buttonPositive: '允许' },
+        );
+        if (granted !== PermissionsAndroid.RESULTS.GRANTED) {
+          setHandsFreeStatus('麦克风权限被拒绝，免提打断无法开启');
+          setHandsFreeEnabled(false);
+          return;
+        }
+      }
       InCallManager.start({ media: 'audio' });
       InCallManager.setForceSpeakerphoneOn(true);
       vadInCallManagerRef.current = InCallManager;
@@ -1046,7 +1057,15 @@ export default function ListenScreen({ route, navigation }) {
       await pc2.setLocalDescription(answer);
       await pc1.setRemoteDescription(pc2.localDescription);
     } catch (e) {
-      setHandsFreeStatus(`免提打断启动失败：${e.message}`);
+      // "native module that doesn't exist"是Expo Go环境下react-native-webrtc
+      // 原生模块缺失的固定错误文案——识别出这种情况给一句用户能看懂、能
+      // 采取行动的提示，不是把英文报错原样甩给用户看。
+      const isNativeModuleMissing = /native module/i.test(e.message || '');
+      setHandsFreeStatus(
+        isNativeModuleMissing
+          ? '当前运行环境不支持免提打断（需要开发版本，Expo Go里用不了）'
+          : `免提打断启动失败：${e.message}`,
+      );
       setHandsFreeEnabled(false);
     }
   }

@@ -118,20 +118,28 @@ export default function WebrtcAecTestScreen() {
     // 页面（包括阶段十七听书）完全不受影响；真要触发原生WebRTC功能本来就
     // 需要走eas build的开发客户端，Expo Go点这个按钮本来就该失败，只是
     // 不该拖累整个App打不开。
-    const { mediaDevices, RTCPeerConnection } = require('react-native-webrtc');
-    // 同上，运行时require——InCallManager原生模块Expo Go里也不存在。
-    const InCallManager = require('react-native-incall-manager').default;
-    if (Platform.OS === 'android') {
-      const granted = await PermissionsAndroid.request(
-        PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
-        { title: '麦克风权限', message: 'AEC技术验证需要访问麦克风', buttonPositive: '允许' },
-      );
-      if (granted !== PermissionsAndroid.RESULTS.GRANTED) {
-        setStatus('麦克风权限被拒绝');
-        return;
-      }
-    }
+    // 2026-08-10真机反馈：ListenScreen.js的方案B(免提打断)复用了同样的
+    // 运行时require模式，暴露出一个这里也一直存在的真实bug——require()
+    // 本身在Expo Go环境下就会同步抛"tried to access a native module that
+    // doesn't exist"，如果require()调用留在try块外面，这个异常没人接住，
+    // 表现成红屏"Uncaught Error"，不是优雅提示。运行时require确实解决了
+    // "顶层import拖垮整个App"这个更严重的问题，但不代表require()调用
+    // 本身就不会抛，两码事，这次把try块的起点往前挪到require()这一行，
+    // 两个文件一起修，不能只修新发现问题的那一个。
     try {
+      const { mediaDevices, RTCPeerConnection } = require('react-native-webrtc');
+      // 同上，运行时require——InCallManager原生模块Expo Go里也不存在。
+      const InCallManager = require('react-native-incall-manager').default;
+      if (Platform.OS === 'android') {
+        const granted = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+          { title: '麦克风权限', message: 'AEC技术验证需要访问麦克风', buttonPositive: '允许' },
+        );
+        if (granted !== PermissionsAndroid.RESULTS.GRANTED) {
+          setStatus('麦克风权限被拒绝');
+          return;
+        }
+      }
       // 第一版测试用户真机反馈"回声消除没有效果"之后查证到的真实原因：
       // react-native-webrtc不会自动把安卓音频会话切到通话模式，"音频设备
       // 管理留给应用自己做"（react-native-webrtc官方讨论区原话）——不设置
