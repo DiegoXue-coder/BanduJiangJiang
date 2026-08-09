@@ -50,6 +50,56 @@ const FONT_SIZE_STEP = 2;
 // 进度上报节流：翻页很频繁，没必要每次都请求后端
 const PROGRESS_DEBOUNCE_MS = 2000;
 
+// 目录树递归节点：不管epub.js给的toc有几层（章/节/小节，深度不固定），
+// 都能正确展开/收起——上一版写死只渲染一层subitems，这次改成组件自己
+// 递归调自己，depth决定缩进和字号（顶层稍大，往下逐级变淡变小，跟微信
+// 读书那种"越深越次要"的视觉层级一致）。点标题本身跳转+关闭目录，点
+// 箭头只展开/收起，两个操作分开，不会互相干扰（沿用之前就有的设计）。
+function TocNode({ item, depth, pathKey, expandedToc, toggleTocExpanded, onSelect, theme }) {
+  const subitems = item.subitems || [];
+  const expanded = expandedToc.has(pathKey);
+  return (
+    <View>
+      <View style={[
+        styles.tocRow,
+        depth > 0 && { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: theme.cardBorder },
+      ]}>
+        <TouchableOpacity
+          style={[styles.tocRowMain, { paddingLeft: 16 + depth * 16 }]}
+          onPress={() => onSelect(item.href)}
+        >
+          <Text
+            style={[depth === 0 ? styles.tocItemText : styles.tocSubItemText, { color: depth === 0 ? theme.text : theme.textSecondary }]}
+            numberOfLines={2}
+          >
+            {item.label?.trim()}
+          </Text>
+        </TouchableOpacity>
+        {subitems.length > 0 && (
+          <TouchableOpacity style={styles.tocChevronBtn} onPress={() => toggleTocExpanded(pathKey)}>
+            <Text style={[styles.tocChevron, { color: theme.accent }]}>{expanded ? '︿' : '﹀'}</Text>
+          </TouchableOpacity>
+        )}
+      </View>
+      {expanded && subitems.map((sub, subIdx) => {
+        const subKey = `${pathKey}_${sub.id || subIdx}`;
+        return (
+          <TocNode
+            key={subKey}
+            item={sub}
+            depth={depth + 1}
+            pathKey={subKey}
+            expandedToc={expandedToc}
+            toggleTocExpanded={toggleTocExpanded}
+            onSelect={onSelect}
+            theme={theme}
+          />
+        );
+      })}
+    </View>
+  );
+}
+
 function ReaderInner({
   bookId, bookTitle, author, initialLocation, initialAnnotations, navigation,
   jumpToCfi, jumpNonce, epubSrc,
@@ -446,48 +496,30 @@ function ReaderInner({
           </View>
           {/* 老backlog：目录弹层之前是默认的贴边列表+发丝分隔线，没套用
               阶段十定的"暖纸古风"设计系统——这次改成跟全App其它卡片一样
-              的cardBg+cardBorder+4px圆角，条目之间用间距分开而不是分隔线。 */}
+              的cardBg+cardBorder+4px圆角，条目之间用间距分开而不是分隔线。
+
+              2026-08-09用户反馈：章节应该收紧到最宏观的一级（比如"第1章"），
+              点开才展开下面隶属于它的副标题——后端这轮已经改成按book.toc
+              自己的树形结构分组（章/节/小节可能有好几层，不是固定两层），
+              这里配合改成真正递归的TocNode组件，不管数据有几层都能正确
+              展开/收起，不是只写死渲染一层subitems。 */}
           <FlatList
             data={toc}
             keyExtractor={(item, idx) => item.id || String(idx)}
             contentContainerStyle={styles.tocListContent}
-            renderItem={({ item, index }) => {
-              const subitems = item.subitems || [];
-              const key = item.id || String(index);
-              const expanded = expandedToc.has(key);
-              return (
-                <View style={[styles.tocCard, { backgroundColor: uiTheme.cardBg, borderColor: uiTheme.cardBorder, borderRadius: uiTheme.radius }]}>
-                  <View style={styles.tocItemRow}>
-                    <TouchableOpacity
-                      style={styles.tocItemMain}
-                      onPress={() => {
-                        goToTocItem(item.href);
-                        setShowToc(false);
-                      }}
-                    >
-                      <Text style={[styles.tocItemText, { color: uiTheme.text }]}>{item.label?.trim()}</Text>
-                    </TouchableOpacity>
-                    {subitems.length > 0 && (
-                      <TouchableOpacity style={styles.tocChevronBtn} onPress={() => toggleTocExpanded(key)}>
-                        <Text style={[styles.tocChevron, { color: uiTheme.accent }]}>{expanded ? '︿' : '﹀'}</Text>
-                      </TouchableOpacity>
-                    )}
-                  </View>
-                  {expanded && subitems.map((sub, subIdx) => (
-                    <TouchableOpacity
-                      key={sub.id || `${key}_${subIdx}`}
-                      style={[styles.tocSubItem, { borderTopColor: uiTheme.cardBorder }]}
-                      onPress={() => {
-                        goToTocItem(sub.href);
-                        setShowToc(false);
-                      }}
-                    >
-                      <Text style={[styles.tocSubItemText, { color: uiTheme.textSecondary }]}>{sub.label?.trim()}</Text>
-                    </TouchableOpacity>
-                  ))}
-                </View>
-              );
-            }}
+            renderItem={({ item, index }) => (
+              <View style={[styles.tocCard, { backgroundColor: uiTheme.cardBg, borderColor: uiTheme.cardBorder, borderRadius: uiTheme.radius }]}>
+                <TocNode
+                  item={item}
+                  depth={0}
+                  pathKey={item.id || String(index)}
+                  expandedToc={expandedToc}
+                  toggleTocExpanded={toggleTocExpanded}
+                  onSelect={(href) => { goToTocItem(href); setShowToc(false); }}
+                  theme={uiTheme}
+                />
+              </View>
+            )}
           />
         </SafeAreaView>
       </Modal>
@@ -728,14 +760,10 @@ const styles = StyleSheet.create({
   tocCloseBtnText: { fontSize: 14, fontWeight: '600' },
   tocListContent: { padding: 12, gap: 10 },
   tocCard: { borderWidth: 1, overflow: 'hidden' },
-  tocItemRow: { flexDirection: 'row', alignItems: 'center' },
+  tocRow: { flexDirection: 'row', alignItems: 'center' },
+  tocRowMain: { flex: 1, paddingRight: 8, paddingVertical: 14 },
   tocItemText: { fontSize: 15 },
-  tocItemMain: { flex: 1, paddingHorizontal: 16, paddingVertical: 14 },
   tocChevronBtn: { paddingHorizontal: 16, paddingVertical: 14 },
   tocChevron: { fontSize: 13 },
-  tocSubItem: {
-    paddingLeft: 32, paddingRight: 16, paddingVertical: 12,
-    borderTopWidth: StyleSheet.hairlineWidth,
-  },
   tocSubItemText: { fontSize: 14 },
 });
