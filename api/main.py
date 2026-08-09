@@ -870,6 +870,41 @@ def _is_toc_heading_text(text: str) -> bool:
     normalized = re.sub(r"[\s　]+", "", text).lower()
     return normalized in ("目录", "contents", "tableofcontents")
 
+def _is_toc_like_document(soup) -> bool:
+    """2026-08-09：决策层拍板"印刷版目录彻底不当正文导入"之后复查发现，
+    只靠"第一个标题文字精确等于'目录'"这条规则不够稳——真实案例（《负动产
+    时代》）验证过这条规则确实生效，但那本书恰好标题就是干净的"目录"两个
+    字；如果一本书的目录页标题写法不一样（比如没有单独的标题标签、或者
+    标题和"目录"两个字不完全相邻），这条精确匹配会漏判，目录页正文照样会
+    混进阅读器。这里补两条不依赖标题文字本身的结构性信号，作为兜底：
+
+    1. EPUB3语义化的<nav>标签本来就是规范里专门给目录/地标页用的
+       （https://www.w3.org/publishing/epub3/epub-packages.html#sec-nav），
+       真实小说/非虚构类书籍的正文章节几乎不会用<nav>包裹内容——命中就
+       几乎能确定是导航/目录页。
+    2. 没有<nav>标签、也没用规范标题的目录页，退一步看"这篇文档的可见
+       文字里，有多大比例落在指向本书内部（不是外部http链接）的<a>标签
+       里"——目录页本质就是一堆"标题→内部锚点"的链接罗列，链接文字占比
+       会很高；真实正文章节哪怕带一些脚注/交叉引用链接，链接文字占比
+       也远远达不到这个量级。要求至少4个内部链接才考虑这条信号，避免
+       正文里偶尔一两个交叉引用链接被误判。"""
+    if soup.find("nav") is not None:
+        return True
+    body_text = soup.get_text(strip=True)
+    if len(body_text) < 30:
+        return False
+    link_text_len = 0
+    link_count = 0
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        if href.startswith(("http://", "https://", "mailto:")):
+            continue
+        link_count += 1
+        link_text_len += len(a.get_text(strip=True))
+    if link_count < 4:
+        return False
+    return (link_text_len / len(body_text)) >= 0.6
+
 def _html_table_to_rows(table_tag) -> list[list[str]]:
     """把EPUB原书里真实的<table>标签转成文字网格，格式跟pdfplumber
     提取出来的rows一致，复用同一套质量门槛(_is_valid_pdfplumber_table)和
@@ -1115,6 +1150,8 @@ def _epub_book_to_chapters(book: "epub.EpubBook") -> list[tuple[str, list[str]]]
         # 一个标题就是'目录'"做精确匹配识别，命中就跳过整篇不导入。
         first_heading = soup.find(["h1", "h2", "h3", "h4", "h5", "h6"])
         if first_heading and _is_toc_heading_text(first_heading.get_text(strip=True)):
+            continue
+        if _is_toc_like_document(soup):
             continue
 
         # 只优先取<p>/标题/表格/图片这几种标签，不混着选<div>/<li>——这些
