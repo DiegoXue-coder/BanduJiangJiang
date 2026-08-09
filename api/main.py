@@ -985,11 +985,24 @@ def _pick_heading_split_level(paragraphs: list[str]) -> int | None:
 
 def _first_heading_text(paragraphs: list[str]) -> str | None:
     """从段落列表里找第一个标题marker（不管是h几级），取它的文字。找不到
-    返回None。"""
+    返回None。只读不改paragraphs，调用方如果要拿这个文字当独立的章节
+    标题用，记得配合下面的_pop_first_heading去掉正文里的这一条，不然
+    _build_epub_from_sections渲染时会把这个标题显示两遍（自动加的章节
+    标题`<h1>` + 正文里它自己原本的标题标签），真机验收踩过这个坑。"""
     for p in paragraphs:
         if p.startswith(_HEADING_MARKER):
             return p[len(_HEADING_MARKER):].split("\x00", 1)[1]
     return None
+
+def _pop_first_heading(paragraphs: list[str]) -> tuple[str | None, list[str]]:
+    """跟_first_heading_text做的事一样，但会把找到的这一条标题从列表里
+    删掉一起返回——标题文字要单独抽出来当章节标题用的场景必须用这个，
+    不能只读不删，否则同一个标题会在正文里重复出现一遍。"""
+    for i, p in enumerate(paragraphs):
+        if p.startswith(_HEADING_MARKER):
+            text = p[len(_HEADING_MARKER):].split("\x00", 1)[1]
+            return text, paragraphs[:i] + paragraphs[i + 1:]
+    return None, paragraphs
 
 def _split_paragraphs_by_heading_level(paragraphs: list[str], level: int) -> list[tuple[str, list[str]]]:
     """按选中的标题级别切分单文档的段落列表成多章，标题直接取切分点的
@@ -1001,7 +1014,14 @@ def _split_paragraphs_by_heading_level(paragraphs: list[str], level: int) -> lis
     40个文档、每个文档单独调用这个函数）暴露过的bug：这里原来写死用
     "前言"占位，每个文档各自的"剩余内容"都套用同一个词，会在结果里反复
     出现一堆同名的"前言"，看着像标题错位，其实是这个占位符本身设计得
-    太窄。真的连一个标题都没有（比如纯粹的版权页残留文字）才退回"前言"。"""
+    太窄。真的连一个标题都没有（比如纯粹的版权页残留文字）才退回"前言"。
+
+    真机验收踩过的另一个真实bug：切分点本身的标题段落（还有兜底逻辑用
+    _first_heading_text抽出来当标题的那条）之前被留在正文里没删，导致
+    标题在阅读器里显示两遍（自动加的章节标题+正文里它自己原本的标题
+    标签），目录面板扫描正文标题生成导航时还会把这两次显示误判成两个
+    章节——这里统一用_pop_first_heading，抽出来当标题用的段落都要同时
+    从正文里删掉。"""
     sections: list[tuple[str, list[str]]] = []
     current_title = None
     current: list[str] = []
@@ -1009,13 +1029,15 @@ def _split_paragraphs_by_heading_level(paragraphs: list[str], level: int) -> lis
     for p in paragraphs:
         if p.startswith(prefix):
             if current:
-                sections.append((current_title or _first_heading_text(current) or "前言", current))
+                title, current = (current_title, current) if current_title else _pop_first_heading(current)
+                sections.append((title or "前言", current))
             current_title = p[len(prefix):]
-            current = [p]
+            current = []
             continue
         current.append(p)
     if current:
-        sections.append((current_title or _first_heading_text(current) or "前言", current))
+        title, current = (current_title, current) if current_title else _pop_first_heading(current)
+        sections.append((title or "前言", current))
     return sections
 
 def _epub_book_to_chapters(book: "epub.EpubBook") -> list[tuple[str, list[str]]]:
@@ -1096,17 +1118,26 @@ def _epub_book_to_chapters(book: "epub.EpubBook") -> list[tuple[str, list[str]]]
                     chapters.append((sub_title, merged))
             continue
 
-        merged = _merge_short_paragraphs(paragraphs)
         # 标题优先级：这篇文档自己的标题（哪怕只有1个、够不到拆分阈值，
         # 也比位置错位的book.toc猜测靠谱）> book.toc按位置对应（仅在数量
         # 对得上、这个假设成立时才用）> 通用占位符。
-        own_title = _first_heading_text(paragraphs)
+        #
+        # 真机反馈过一个真实bug：取own_title当标题用之后，忘了把这个标题
+        # 段落本身从正文里删掉——_build_epub_from_sections渲染每一章时
+        # 本来就会在最前面自动加一个`<h1>{标题}</h1>`，这个标题段落如果
+        # 还留在paragraphs里，会在正文里作为它自己原本的标题标签又出现
+        # 一次，变成"标题显示两遍"，阅读器扫描正文标题生成目录时也会把
+        # 这两次显示误判成两个章节，看起来像"目录重复"。用完就要从正文
+        # 段落列表里去掉这一条，不能只读不删。
+        own_title, popped_paragraphs = _pop_first_heading(paragraphs)
         if own_title:
             title = own_title
+            paragraphs = popped_paragraphs
         elif titles_reliable and idx < len(titles):
             title = titles[idx]
         else:
             title = f"第{idx + 1}节"
+        merged = _merge_short_paragraphs(paragraphs)
         chapters.append((title, merged))
     return _subdivide_oversized_chapters(chapters)
 
