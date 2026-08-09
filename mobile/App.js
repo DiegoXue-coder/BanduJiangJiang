@@ -114,7 +114,13 @@ function ProfileStackScreen() {
 
 function getTabBarStyle(route, visibleStyle) {
   const focusedRoute = getFocusedRouteNameFromRoute(route) ?? 'BookshelfHome';
-  if (['Reader', 'ReviewBook', 'ReviewDetail', 'BugReport', 'WebrtcAecTest'].includes(focusedRoute)) return { display: 'none' };
+  // 2026-08-10真机反馈：听书页视觉改造成沉浸式全屏设计（暗色调+呼吸光球
+  // 那套"沉光共读"效果）之后，底部书架/复盘/我的这排Tab导航栏还一直
+  // 露在屏幕最下面，跟设计稿的全屏沉浸感完全不符——Listen这个路由名
+  // 之前一直没加进这份隐藏名单，是从阶段十七听书功能刚做出来就一直
+  // 存在的遗漏，不是这次视觉改造引入的新问题，只是这次因为屏幕变成
+  // 沉浸式设计才被真正注意到。
+  if (['Reader', 'ReviewBook', 'ReviewDetail', 'BugReport', 'WebrtcAecTest', 'Listen'].includes(focusedRoute)) return { display: 'none' };
   return visibleStyle;
 }
 
