@@ -10,6 +10,7 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, TextInput,
   ActivityIndicator, ScrollView, Platform, KeyboardAvoidingView, Switch,
+  PermissionsAndroid,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Audio, InterruptionModeIOS, InterruptionModeAndroid } from 'expo-av';
@@ -70,6 +71,20 @@ function isContinueVoiceCommand(text) {
   if (!t || t.length > 8) return false;
   return CONTINUE_VOICE_PATTERNS.some((p) => t.includes(p));
 }
+
+// 方案B：免提打断——朗读时持续开麦监听音量（复用AEC技术验证spike里已经
+// 真机验证过的react-native-webrtc+react-native-incall-manager这套组合），
+// 检测到用户开始说话就自动触发跟手动按"打断"完全一样的流程，不需要碰
+// 屏幕。阈值和轮询间隔直接沿用WebrtcAecTestScreen.js里用户真机实测校准
+// 过的数值（安静~0.0003、说话3000~5000，量级差了一千万倍，不是W3C规范
+// 说的0~1范围，这个库在安卓上就是这么实现的，但完全不影响用相对大小做
+// 判断）——两处常量如果以后要调，记得两个文件一起改。
+const VAD_POLL_INTERVAL_MS = 300;
+const VAD_SPEECH_THRESHOLD = 1.0;
+// 连续多少次轮询都超过阈值才算"真的开始说话"（而不是一声咳嗽/物体碰撞
+// 这种瞬间噪音）——2次×300ms＝大约600ms持续声音才触发，真人开口说话
+// 通常不会只响一瞬间就停，短促噪音大概率撑不到600ms。
+const VAD_SUSTAIN_POLLS = 2;
 
 // 章节标题精确匹配"目录"就跳过不朗读——已有真实案例证明目录会被当成
 // 普通章节混进朗读队列（IMG_1564排版反馈截图），不追求覆盖所有变体，
@@ -173,6 +188,13 @@ export default function ListenScreen({ route, navigation }) {
   const [isRecording, setIsRecording] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [recordingStatus, setRecordingStatus] = useState('');
+  // 方案B：免提打断总开关（默认关闭，用户自己选择开启，不是默认行为）；
+  // 静音只在免提开启时有意义，作用是"临时不响应自动打断"，不拆连接——
+  // 连接本身开着，随时切回来不用重新连一次（重连有InCallManager+
+  // getUserMedia这一整套流程，有肉眼可感的延迟）。
+  const [handsFreeEnabled, setHandsFreeEnabled] = useState(false);
+  const [handsFreeMuted, setHandsFreeMuted] = useState(false);
+  const [handsFreeStatus, setHandsFreeStatus] = useState('');
 
   // playOneParagraph在playFrom的异步循环里调用，如果直接读voice/rate这两个
   // state会有闭包过期的问题（循环开始时闭包捕获的是当时的值，用户中途在
@@ -209,6 +231,21 @@ export default function ListenScreen({ route, navigation }) {
   // 填进输入框（手动场景）还是先检查是不是"继续"这类指令（自动场景）。
   const autoListenRef = useRef(false);
   const autoListenTimerRef = useRef(null);
+
+  // 方案B免提打断用的WebRTC连接状态，命名前缀vad跟AEC测试页的命名保持
+  // 一致，方便对照两处代码。
+  const vadPc1Ref = useRef(null);
+  const vadPc2Ref = useRef(null);
+  const vadStreamRef = useRef(null);
+  const vadInCallManagerRef = useRef(null);
+  const vadPollTimerRef = useRef(null);
+  const vadSustainCountRef = useRef(0); // 连续超过阈值的轮询次数
+  const vadSpeakingRef = useRef(false); // 已经触发过一次打断、还没跌回安静，避免同一段话反复触发
+  // 轮询定时器是startHandsFreeVad调用那一刻创建的，之后每次触发都要调用
+  // "当前这次渲染"的handleAutoInterrupt（读到最新的phase/handsFreeMuted等
+  // 状态）——跟方案A同样的闭包过期问题，同样的解法：用一个每次渲染都更新
+  // 的ref间接调用，不直接把函数引用交给setInterval。
+  const autoInterruptRef = useRef(null);
 
   async function stopSound() {
     if (soundRef.current) {
@@ -485,6 +522,23 @@ export default function ListenScreen({ route, navigation }) {
     setPhase('paused');
   }
 
+  // 方案B：VAD轮询检测到用户开始说话时调用的入口——只在"正在朗读"这个
+  // phase、且没有开静音的时候真正触发。跟handleInterrupt的判断条件看起来
+  // 重复（handleInterrupt自己也会检查phase），但这里必须自己先判断一次：
+  // handsFreeMuted这个开关只应该拦在"要不要触发"这一步，不应该改
+  // handleInterrupt本身的行为（手动按钮打断不受静音影响，静音只管免提
+  // 这一条自动触发的路径）。触发之后紧接着调用方案A已经写好的
+  // startAutoListen——免提打断解决的是"不用碰按钮就能让朗读停下来"，
+  // 用户实际要问的问题，复用方案A那套"停下来之后自动监听几秒"的逻辑
+  // 去捕获，没有另外发明一套新的语音捕获路径。
+  function handleAutoInterrupt() {
+    if (phase !== 'playing') return;
+    if (handsFreeMuted) return;
+    handleInterrupt();
+    startAutoListen();
+  }
+  useEffect(() => { autoInterruptRef.current = handleAutoInterrupt; });
+
   // 决策层这轮派发：连续追问改成"对话式"UI——之前点"继续追问"会跳回
   // 一个空白提问页，之前问过的内容全部看不见，用户反馈"像打断感"。改成
   // 用户提问和AI回答都追加进conversation这个数组，界面上渲染成持续的
@@ -716,6 +770,138 @@ export default function ListenScreen({ route, navigation }) {
     }
   }
 
+  // 方案B：每300ms读一次pc1（发送本地麦克风流那一端）的统计数据，找音量
+  // 字段——跟WebrtcAecTestScreen.js里验证过的做法一致，阈值/轮询间隔也是
+  // 同一套真机校准过的数值。连续VAD_SUSTAIN_POLLS次超过阈值才算真的开始
+  // 说话（防止瞬间噪音误触发），触发后要等音量先跌回阈值以下才会重新
+  // 允许下一次触发，不会同一段话持续说话期间反复触发好几次打断。
+  function startVadPolling(pc) {
+    stopVadPollingOnly();
+    vadSustainCountRef.current = 0;
+    vadSpeakingRef.current = false;
+    vadPollTimerRef.current = setInterval(async () => {
+      try {
+        const stats = await pc.getStats();
+        let level = null;
+        for (const report of stats.values()) {
+          if (typeof report.audioLevel === 'number') { level = report.audioLevel; break; }
+        }
+        if (level === null) return;
+        if (level >= VAD_SPEECH_THRESHOLD) {
+          vadSustainCountRef.current += 1;
+          if (!vadSpeakingRef.current && vadSustainCountRef.current >= VAD_SUSTAIN_POLLS) {
+            vadSpeakingRef.current = true;
+            autoInterruptRef.current?.();
+          }
+        } else {
+          vadSustainCountRef.current = 0;
+          vadSpeakingRef.current = false;
+        }
+      } catch (e) {
+        // 单次读取失败不影响下一轮轮询，不打断听书体验，也不弹提示
+      }
+    }, VAD_POLL_INTERVAL_MS);
+  }
+
+  function stopVadPollingOnly() {
+    if (vadPollTimerRef.current) {
+      clearInterval(vadPollTimerRef.current);
+      vadPollTimerRef.current = null;
+    }
+  }
+
+  // 方案B：开启免提打断——沿用AEC技术验证spike里验证过的连接方式（本机
+  // 内部pc1↔pc2回环，不需要真实信令服务器），跟AEC测试页唯一的关键区别：
+  // pc2收到的远端音轨要静音（track.enabled=false），不然react-native-webrtc
+  // 会自动把这条音轨路由到设备当前音频输出播放出来（AEC测试页就是靠这个
+  // 判断有没有回声），免提打断场景绝对不能让用户自己的说话声/环境声被
+  // 循环播出来变成刺耳的实时回音——这里只是要拿一个真正建立连接的
+  // RTCPeerConnection来读音量统计，不需要真的听到这条音轨内容。
+  async function startHandsFreeVad() {
+    const { mediaDevices, RTCPeerConnection } = require('react-native-webrtc');
+    const InCallManager = require('react-native-incall-manager').default;
+    if (Platform.OS === 'android') {
+      const granted = await PermissionsAndroid.request(
+        PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+        { title: '麦克风权限', message: '免提打断需要持续访问麦克风，用来判断你有没有在说话', buttonPositive: '允许' },
+      );
+      if (granted !== PermissionsAndroid.RESULTS.GRANTED) {
+        setHandsFreeStatus('麦克风权限被拒绝，免提打断无法开启');
+        setHandsFreeEnabled(false);
+        return;
+      }
+    }
+    try {
+      InCallManager.start({ media: 'audio' });
+      InCallManager.setForceSpeakerphoneOn(true);
+      vadInCallManagerRef.current = InCallManager;
+
+      const stream = await mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
+      vadStreamRef.current = stream;
+
+      const pc1 = new RTCPeerConnection({});
+      const pc2 = new RTCPeerConnection({});
+      vadPc1Ref.current = pc1;
+      vadPc2Ref.current = pc2;
+      stream.getTracks().forEach((track) => pc1.addTrack(track, stream));
+
+      pc1.addEventListener('icecandidate', (e) => {
+        if (e.candidate) pc2.addIceCandidate(e.candidate).catch(() => {});
+      });
+      pc2.addEventListener('icecandidate', (e) => {
+        if (e.candidate) pc1.addIceCandidate(e.candidate).catch(() => {});
+      });
+      pc2.addEventListener('track', (e) => {
+        if (e.track) e.track.enabled = false; // 静音远端播放，见上面函数注释
+      });
+      pc2.addEventListener('iceconnectionstatechange', () => {
+        if (pc2.iceConnectionState === 'connected' || pc2.iceConnectionState === 'completed') {
+          setHandsFreeStatus('免提监听中');
+          startVadPolling(pc1);
+        }
+      });
+
+      const offer = await pc1.createOffer({});
+      await pc1.setLocalDescription(offer);
+      await pc2.setRemoteDescription(pc1.localDescription);
+      const answer = await pc2.createAnswer();
+      await pc2.setLocalDescription(answer);
+      await pc1.setRemoteDescription(pc2.localDescription);
+    } catch (e) {
+      setHandsFreeStatus(`免提打断启动失败：${e.message}`);
+      setHandsFreeEnabled(false);
+    }
+  }
+
+  function stopHandsFreeVad() {
+    stopVadPollingOnly();
+    vadStreamRef.current?.getTracks().forEach((t) => t.stop());
+    vadPc1Ref.current?.close();
+    vadPc2Ref.current?.close();
+    vadInCallManagerRef.current?.stop();
+    vadStreamRef.current = null;
+    vadPc1Ref.current = null;
+    vadPc2Ref.current = null;
+    vadInCallManagerRef.current = null;
+    setHandsFreeStatus('');
+  }
+
+  // 免提开关变化时连接/断开——开关本身之外，退出这个屏幕（组件卸载）也
+  // 要确保断开，不能让WebRTC连接和InCallManager的通话音频模式在离开
+  // 听书页之后还占着，会影响App其它地方的正常音频行为。
+  useEffect(() => {
+    if (handsFreeEnabled) {
+      setHandsFreeStatus('连接中…');
+      startHandsFreeVad();
+    } else {
+      stopHandsFreeVad();
+    }
+    return () => { stopHandsFreeVad(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [handsFreeEnabled]);
+
   return (
     <SafeAreaView edges={['bottom', 'left', 'right']} style={[styles.safe, { backgroundColor: theme.bg }]}>
       <View style={[styles.header, { backgroundColor: theme.accent, paddingTop: insets.top + 10 }]}>
@@ -762,6 +948,25 @@ export default function ListenScreen({ route, navigation }) {
               </TouchableOpacity>
             ))}
           </View>
+
+          {/* 方案B：免提打断，技术验证阶段的新功能，默认关闭——用户自己
+              决定要不要开，不是每次听书都默认持续开麦。开启之后需要走一遍
+              麦克风权限+WebRTC连接，有短暂的"连接中"状态。 */}
+          <View style={[styles.handsFreeRow, { marginTop: 14, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: theme.cardBorder, paddingTop: 14 }]}>
+            <View style={styles.handsFreeLabelCol}>
+              <Text style={[styles.settingsLabel, { color: theme.textSecondary }]}>免提打断（技术验证中）</Text>
+              {!!handsFreeStatus && (
+                <Text style={[styles.handsFreeStatusText, { color: theme.textMuted }]}>{handsFreeStatus}</Text>
+              )}
+            </View>
+            <Switch value={handsFreeEnabled} onValueChange={setHandsFreeEnabled} />
+          </View>
+          {handsFreeEnabled && (
+            <View style={styles.handsFreeRow}>
+              <Text style={[styles.settingsLabel, { color: theme.textSecondary }]}>静音（暂停自动打断）</Text>
+              <Switch value={handsFreeMuted} onValueChange={setHandsFreeMuted} />
+            </View>
+          )}
         </View>
       )}
 
@@ -786,6 +991,11 @@ export default function ListenScreen({ route, navigation }) {
                 <>
                   <Text style={[styles.playingHint, { color: theme.text }]}>正在朗读…</Text>
                   <Text style={[styles.progressLabel, { color: theme.textMuted }]}>{progressLabel}</Text>
+                  {handsFreeEnabled && (
+                    <Text style={[styles.handsFreeIndicator, { color: handsFreeMuted ? theme.textMuted : theme.accent }]}>
+                      {handsFreeMuted ? '🔇 免提已静音' : '🎙️ 免提监听中 — 直接说话即可打断'}
+                    </Text>
+                  )}
                 </>
               )}
               <TouchableOpacity
@@ -952,6 +1162,10 @@ const styles = StyleSheet.create({
   chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   chip: { borderWidth: 1, paddingHorizontal: 12, paddingVertical: 6 },
   chipText: { fontSize: 13 },
+  handsFreeRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 10 },
+  handsFreeLabelCol: { flex: 1, marginRight: 12 },
+  handsFreeStatusText: { fontSize: 11, marginTop: 2 },
+  handsFreeIndicator: { fontSize: 12, fontWeight: '600', marginTop: 8 },
   questionRow: { flexDirection: 'row', gap: 8, alignItems: 'flex-start' },
   questionInputFlex: { flex: 1 },
   transcribingBox: { flexDirection: 'row', alignItems: 'center', gap: 8, justifyContent: 'center' },
