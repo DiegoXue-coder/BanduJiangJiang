@@ -127,16 +127,20 @@ export default function ListenScreen({ route, navigation }) {
   const insets = useSafeAreaInsets();
 
   // phase: loading-book(打开界面首次拉章节列表) / loading-chapter(章节文字
-  // 还没拉到) / playing / paused(打断后，等用户提问) / thinking(等AI回答)
-  // / answering(播AI回答语音) / post-answer(回答完，可以追问/继续听书/结束)
-  // / done(全书听完) / error
+  // 还没拉到) / playing / paused(打断后，对话线+输入框都在，等用户提问
+  // 或点继续听书) / thinking(等AI回答) / answering(播AI回答语音，对话线
+  // 上已经能看到文字答案) / done(全书听完) / error
   const [phase, setPhase] = useState('loading-book');
   const [errorMsg, setErrorMsg] = useState('');
   const [chapterTitle, setChapterTitle] = useState('');
   const [progressLabel, setProgressLabel] = useState('');
   const [capturedText, setCapturedText] = useState('');
   const [question, setQuestion] = useState('');
-  const [answerText, setAnswerText] = useState('');
+  // 决策层这轮派发：连续追问改成对话式UI——这一轮打断期间的问答历史，
+  // 既用来渲染屏幕上的对话线，也直接当streamAsk的history参数（跟消息
+  // 数组同一份数据，不用conversationRef另外再维护一份，见上面refs区
+  // 的说明）。
+  const [conversation, setConversation] = useState([]);
   const [showSettings, setShowSettings] = useState(false);
   const [rate, setRate] = useState('+0%');
   // 滑动条拖动过程中的实时显示值——跟rate分开，拖动时只更新这个数字标签
@@ -174,10 +178,11 @@ export default function ListenScreen({ route, navigation }) {
   const preparedRef = useRef(null); // { ci, pi, voice, rate, promise }
   const posRef = useRef({ chapterIdx: 0, paragraphIdx: 0 }); // 当前/暂停时的位置
   const abortAskRef = useRef(null);
-  // 决策层这轮派发：打断提问支持连续追问。这一轮打断期间的问答历史存这里
-  // （不是整本书的历史，每次打断/继续听书都会清空），追问时当成history喂
-  // 给streamAsk，让AI知道"追问"跟前一个问题是同一轮对话，不是从零开始。
-  const conversationRef = useRef([]);
+  // 决策层这轮派发：连续追问的交互改成"对话式"，不是每次都跳回一个空白
+  // 提问页——之前用ref存这一轮的问答历史只是为了喂给streamAsk当上下文，
+  // 不会触发重新渲染，用户看不到。改成state，同时当"喂给AI的历史"和
+  // "屏幕上要展示的对话线"两个用途，只维护一份数据，不重复。每次打断/
+  // 继续听书清空，不是整本书的问答历史。
   const recordingRef = useRef(null);
   const startingRecordingRef = useRef(false);
   const maxDurationTimerRef = useRef(null);
@@ -438,23 +443,23 @@ export default function ListenScreen({ route, navigation }) {
     const paragraphs = paragraphCacheRef.current[chapter?.id] || [];
     setCapturedText(paragraphs[paragraphIdx] || '');
     setQuestion('');
-    setAnswerText('');
-    conversationRef.current = []; // 新一次打断，追问历史清空重新开始
+    setConversation([]); // 新一次打断，对话线清空重新开始
     setPhase('paused');
   }
 
-  // 回答完之后想继续追问——回到提问界面，但保留capturedText（还是同一段
-  // 上下文）和conversationRef（这一轮已经问过的内容，喂给下一次streamAsk
-  // 当history，让AI知道这是连续对话，不是全新的孤立提问）。
-  function handleAskAgain() {
-    setQuestion('');
-    setAnswerText('');
-    setPhase('paused');
-  }
-
+  // 决策层这轮派发：连续追问改成"对话式"UI——之前点"继续追问"会跳回
+  // 一个空白提问页，之前问过的内容全部看不见，用户反馈"像打断感"。改成
+  // 用户提问和AI回答都追加进conversation这个数组，界面上渲染成持续的
+  // 对话线（见render部分），不再有单独的"post-answer二次确认"这个phase——
+  // 回答完直接回到paused（输入框重新可用），"继续追问"就是接着在同一个
+  // 输入框里打字，不需要额外点一次"继续追问"按钮先跳转。
   function handleAsk() {
     const q = question.trim();
     if (!q) return;
+    setQuestion('');
+    // 用户的提问立刻追加进对话线（不等AI回答），这样屏幕上马上能看到
+    // "我刚问的问题"，符合真实聊天的即时反馈感，不用等好几秒才看到内容。
+    setConversation((prev) => [...prev, { role: 'user', content: q }]);
     setPhase('thinking');
     const chapter = chaptersRef.current[posRef.current.chapterIdx];
     let fullAnswer = '';
@@ -467,18 +472,13 @@ export default function ListenScreen({ route, navigation }) {
         },
         question: q,
         style: 'simple',
-        history: conversationRef.current,
+        history: conversation,
       },
       {
         onDelta: (delta) => { fullAnswer += delta; },
         onDone: async (answer) => {
           abortAskRef.current = null;
-          setAnswerText(answer);
-          conversationRef.current = [
-            ...conversationRef.current,
-            { role: 'user', content: q },
-            { role: 'assistant', content: answer },
-          ];
+          setConversation((prev) => [...prev, { role: 'assistant', content: answer }]);
           // 打断瞬间截取的段落，本来无条件当成一次"自动划线"存下来——
           // 用户验收时明确提出想自己决定要不要存，改成只有勾选了"保存为
           // 划线"才写。cfi_location用不了真实CFI（这里没有驱动epub.js，
@@ -505,7 +505,10 @@ export default function ListenScreen({ route, navigation }) {
             soundRef.current.unloadAsync().catch(() => {});
             soundRef.current = null;
           }
-          if (epoch === epochRef.current) setPhase('post-answer');
+          // 回答播完直接回到paused（输入框重新激活），不再经过单独的
+          // "要继续追问还是继续听书"二次确认页——"继续听书"链接在对话线
+          // 下方一直可点，"继续追问"就是接着在输入框里打字。
+          if (epoch === epochRef.current) setPhase('paused');
         },
         onError: (e) => {
           abortAskRef.current = null;
@@ -517,7 +520,9 @@ export default function ListenScreen({ route, navigation }) {
   }
 
   function handleContinue() {
-    conversationRef.current = []; // 回到听书主线，这一轮打断的追问历史结束
+    abortAskRef.current?.(); // 对话线下方随时可点"继续听书"，包括AI还在想的时候，这里先把没结束的提问请求断掉
+    abortAskRef.current = null;
+    setConversation([]); // 回到听书主线，这一轮打断的对话线结束
     const { chapterIdx, paragraphIdx } = posRef.current;
     playFrom(chapterIdx, paragraphIdx, epochRef.current);
   }
@@ -672,97 +677,103 @@ export default function ListenScreen({ route, navigation }) {
             </View>
           )}
 
-          {phase === 'paused' && (
+          {(phase === 'paused' || phase === 'thinking' || phase === 'answering') && (
             <ScrollView contentContainerStyle={styles.pausedContent}>
               <Text style={[styles.capturedLabel, { color: theme.textSecondary }]}>刚才讲到——</Text>
               <View style={[styles.capturedBox, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder, borderRadius: theme.radius }]}>
                 <Text style={[styles.capturedText, { color: theme.text }]}>{capturedText}</Text>
               </View>
-              <View style={styles.questionRow}>
-                {isTranscribing ? (
-                  // 真机反馈：识别中的状态之前只在输入框下面一小行字提示，
-                  // 容易被忽略、以为"卡住了"。改成直接顶替输入框本身的显示
-                  // 内容，转圈+文字放在用户视线正对着的输入区域里，更显眼。
-                  <View style={[styles.questionInput, styles.questionInputFlex, styles.transcribingBox, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder, borderRadius: theme.radius }]}>
-                    <ActivityIndicator size="small" color={theme.accent} />
-                    <Text style={[styles.transcribingText, { color: theme.textSecondary }]}>正在识别语音…</Text>
-                  </View>
-                ) : (
-                  <TextInput
-                    style={[styles.questionInput, styles.questionInputFlex, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder, color: theme.text, borderRadius: theme.radius }]}
-                    placeholder={'想问点什么？（比如"你刚才说的这个是什么意思"）'}
-                    placeholderTextColor={theme.textMuted}
-                    value={question}
-                    onChangeText={setQuestion}
-                    multiline
-                  />
-                )}
-                <TouchableOpacity
+
+              {/* 对话式UI：追问历史留在屏幕上持续展示，不再是问一次跳一次
+                  页面。用户消息靠右、AI回答靠左，跟微信这类聊天界面的
+                  阅读习惯保持一致。 */}
+              {conversation.map((msg, idx) => (
+                <View
+                  key={idx}
                   style={[
-                    styles.micBtn,
-                    { borderColor: theme.cardBorder, borderRadius: theme.radius },
-                    isRecording && { backgroundColor: theme.danger, borderColor: theme.danger },
+                    styles.chatBubble,
+                    { borderRadius: theme.radius },
+                    msg.role === 'user'
+                      ? [styles.chatBubbleUser, { backgroundColor: theme.accent }]
+                      : [styles.chatBubbleAssistant, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder, borderWidth: 1 }],
                   ]}
-                  onPress={toggleRecording}
                 >
-                  <IconMicrophone color={isRecording ? '#fff' : theme.text} size={20} strokeWidth={1.75} />
-                </TouchableOpacity>
-              </View>
-              {/* 识别中已经在上面输入框位置显示了动效，这里不重复显示，
-                  避免两处同时出现"识别中"造成视觉上的冗余。 */}
-              {!!recordingStatus && !isTranscribing && (
-                <Text style={[styles.recordingStatus, { color: theme.textMuted }]}>{recordingStatus}</Text>
+                  <Text style={msg.role === 'user' ? { color: theme.textOnAccent } : { color: theme.text }}>
+                    {msg.content}
+                  </Text>
+                </View>
+              ))}
+
+              {phase === 'thinking' && (
+                <View style={styles.thinkingRow}>
+                  <ActivityIndicator color={theme.accent} size="small" />
+                  <Text style={[styles.thinkingText, { color: theme.textSecondary }]}>AI正在思考…</Text>
+                </View>
               )}
-              <View style={styles.saveHighlightRow}>
-                <Switch value={saveAsHighlight} onValueChange={setSaveAsHighlight} />
-                <Text style={[styles.saveHighlightText, { color: theme.textSecondary }]}>把刚才这段保存为划线</Text>
-              </View>
-              <TouchableOpacity
-                style={[styles.primaryBtn, { backgroundColor: theme.accent, borderRadius: theme.radius }]}
-                onPress={handleAsk}
-                disabled={!question.trim()}
-              >
-                <Text style={[styles.primaryBtnText, { color: theme.textOnAccent }]}>提问</Text>
-              </TouchableOpacity>
+              {phase === 'answering' && (
+                <View style={styles.thinkingRow}>
+                  <ActivityIndicator color={theme.accent} size="small" />
+                  <Text style={[styles.thinkingText, { color: theme.textSecondary }]}>AI正在朗读回答…</Text>
+                </View>
+              )}
+
+              {phase === 'paused' && (
+                <>
+                  <View style={styles.questionRow}>
+                    {isTranscribing ? (
+                      // 真机反馈：识别中的状态之前只在输入框下面一小行字提示，
+                      // 容易被忽略、以为"卡住了"。改成直接顶替输入框本身的显示
+                      // 内容，转圈+文字放在用户视线正对着的输入区域里，更显眼。
+                      <View style={[styles.questionInput, styles.questionInputFlex, styles.transcribingBox, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder, borderRadius: theme.radius }]}>
+                        <ActivityIndicator size="small" color={theme.accent} />
+                        <Text style={[styles.transcribingText, { color: theme.textSecondary }]}>正在识别语音…</Text>
+                      </View>
+                    ) : (
+                      <TextInput
+                        style={[styles.questionInput, styles.questionInputFlex, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder, color: theme.text, borderRadius: theme.radius }]}
+                        placeholder={conversation.length ? '继续追问…' : '想问点什么？（比如"你刚才说的这个是什么意思"）'}
+                        placeholderTextColor={theme.textMuted}
+                        value={question}
+                        onChangeText={setQuestion}
+                        multiline
+                      />
+                    )}
+                    <TouchableOpacity
+                      style={[
+                        styles.micBtn,
+                        { borderColor: theme.cardBorder, borderRadius: theme.radius },
+                        isRecording && { backgroundColor: theme.danger, borderColor: theme.danger },
+                      ]}
+                      onPress={toggleRecording}
+                    >
+                      <IconMicrophone color={isRecording ? '#fff' : theme.text} size={20} strokeWidth={1.75} />
+                    </TouchableOpacity>
+                  </View>
+                  {/* 识别中已经在上面输入框位置显示了动效，这里不重复显示，
+                      避免两处同时出现"识别中"造成视觉上的冗余。 */}
+                  {!!recordingStatus && !isTranscribing && (
+                    <Text style={[styles.recordingStatus, { color: theme.textMuted }]}>{recordingStatus}</Text>
+                  )}
+                  <View style={styles.saveHighlightRow}>
+                    <Switch value={saveAsHighlight} onValueChange={setSaveAsHighlight} />
+                    <Text style={[styles.saveHighlightText, { color: theme.textSecondary }]}>把刚才这段保存为划线</Text>
+                  </View>
+                  <TouchableOpacity
+                    style={[styles.primaryBtn, { backgroundColor: theme.accent, borderRadius: theme.radius }]}
+                    onPress={handleAsk}
+                    disabled={!question.trim()}
+                  >
+                    <Text style={[styles.primaryBtnText, { color: theme.textOnAccent }]}>提问</Text>
+                  </TouchableOpacity>
+                </>
+              )}
+
               <TouchableOpacity style={styles.linkBtn} onPress={handleContinue}>
-                <Text style={[styles.linkBtnText, { color: theme.textSecondary }]}>不问了，接着听</Text>
+                <Text style={[styles.linkBtnText, { color: theme.textSecondary }]}>
+                  {conversation.length ? '不问了，继续听书' : '不问了，接着听'}
+                </Text>
               </TouchableOpacity>
             </ScrollView>
-          )}
-
-          {phase === 'thinking' && (
-            <View style={styles.centerBox}>
-              <ActivityIndicator color={theme.accent} />
-              <Text style={[styles.playingHint, { color: theme.textSecondary, marginTop: 10 }]}>AI正在思考…</Text>
-            </View>
-          )}
-
-          {phase === 'answering' && (
-            <ScrollView contentContainerStyle={styles.pausedContent}>
-              <Text style={[styles.capturedLabel, { color: theme.textSecondary }]}>回答：</Text>
-              <Text style={[styles.capturedText, { color: theme.text }]}>{answerText}</Text>
-            </ScrollView>
-          )}
-
-          {phase === 'post-answer' && (
-            <View style={styles.centerBox}>
-              <Text style={[styles.playingHint, { color: theme.text }]}>还要继续问，还是接着听？</Text>
-              <TouchableOpacity
-                style={[styles.primaryBtn, { backgroundColor: theme.accent, borderRadius: theme.radius }]}
-                onPress={handleAskAgain}
-              >
-                <Text style={[styles.primaryBtnText, { color: theme.textOnAccent }]}>继续追问</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.primaryBtn, { backgroundColor: theme.accentSoft, borderRadius: theme.radius }]}
-                onPress={handleContinue}
-              >
-                <Text style={[styles.primaryBtnText, { color: theme.text }]}>继续听书</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.linkBtn} onPress={handleStopListening}>
-                <Text style={[styles.linkBtnText, { color: theme.textSecondary }]}>先到这里</Text>
-              </TouchableOpacity>
-            </View>
           )}
 
           {phase === 'done' && (
@@ -829,4 +840,9 @@ const styles = StyleSheet.create({
   recordingStatus: { fontSize: 12 },
   saveHighlightRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   saveHighlightText: { fontSize: 13 },
+  chatBubble: { padding: 12, maxWidth: '85%' },
+  chatBubbleUser: { alignSelf: 'flex-end' },
+  chatBubbleAssistant: { alignSelf: 'flex-start' },
+  thinkingRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 4 },
+  thinkingText: { fontSize: 13 },
 });
