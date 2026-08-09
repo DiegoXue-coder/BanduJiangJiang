@@ -1,0 +1,848 @@
+<title>沉光共读 · 听书界面交互方案</title>
+<style>
+  :root {
+    --ink: #241a12;
+    --dusk: #33241a;
+    --dusk-2: #443021;
+    --paper: #f2e6d2;
+    --paper-dim: #cbb896;
+    --ink-soft: #b8a488;
+    --ember: #e2963a;
+    --ember-bright: #f3b563;
+    --ember-dim: #8c5a22;
+    --jade: #6fa088;
+    --jade-dim: #3d5b4c;
+    --font-serif: 'Songti SC', 'STSong', 'Noto Serif SC', 'Georgia', serif;
+    --font-sans: 'PingFang SC', 'Microsoft YaHei', -apple-system, sans-serif;
+    --font-mono: ui-monospace, 'SF Mono', 'Menlo', 'Consolas', monospace;
+  }
+  * { box-sizing: border-box; }
+  .stage {
+    background: radial-gradient(120% 90% at 50% -10%, #2c1f16 0%, var(--ink) 55%, #170f0a 100%);
+    padding: 2.5rem 1rem 3rem;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1.5rem;
+    font-family: var(--font-sans);
+    min-height: 100%;
+  }
+  .intro {
+    max-width: 380px;
+    text-align: center;
+    color: var(--paper-dim);
+  }
+  .intro .eyebrow {
+    font-size: 12px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ember);
+    margin: 0 0 6px;
+  }
+  .intro h1 {
+    font-family: var(--font-serif);
+    font-size: 21px;
+    font-weight: 500;
+    color: var(--paper);
+    margin: 0 0 8px;
+    text-wrap: balance;
+  }
+  .intro p {
+    font-size: 13px;
+    line-height: 1.6;
+    margin: 0;
+    color: var(--paper-dim);
+  }
+  .switcher {
+    display: flex;
+    gap: 4px;
+    background: rgba(0,0,0,0.25);
+    border: 0.5px solid rgba(226,150,58,0.25);
+    border-radius: 999px;
+    padding: 4px;
+  }
+  .switcher button {
+    all: unset;
+    cursor: pointer;
+    font-size: 12.5px;
+    padding: 7px 16px;
+    border-radius: 999px;
+    color: var(--paper-dim);
+    transition: background 0.25s ease, color 0.25s ease;
+  }
+  .switcher button.active {
+    background: var(--ember);
+    color: #2a1a08;
+    font-weight: 500;
+  }
+  .device {
+    width: 320px;
+    max-width: 88vw;
+    aspect-ratio: 320 / 660;
+    background: linear-gradient(180deg, #241a12, #1a120c);
+    border-radius: 42px;
+    padding: 12px;
+    box-shadow:
+      0 0 0 2px rgba(226,150,58,0.18),
+      0 30px 60px -20px rgba(0,0,0,0.7),
+      0 0 80px -20px rgba(226,150,58,0.15);
+    position: relative;
+  }
+  .notch {
+    position: absolute;
+    top: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 90px;
+    height: 22px;
+    background: #120c08;
+    border-radius: 0 0 14px 14px;
+    z-index: 5;
+  }
+  .screen {
+    width: 100%;
+    height: 100%;
+    border-radius: 32px;
+    overflow: hidden;
+    position: relative;
+    background:
+      radial-gradient(140% 70% at 50% 8%, rgba(226,150,58,0.14) 0%, transparent 55%),
+      linear-gradient(180deg, #2c2015 0%, #1c130d 65%, #150e09 100%);
+  }
+  .panel {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    opacity: 0;
+    transform: translateY(8px);
+    pointer-events: none;
+    transition: opacity 0.35s ease, transform 0.35s ease;
+  }
+  .panel.active {
+    opacity: 1;
+    transform: translateY(0);
+    pointer-events: auto;
+  }
+  .bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 32px 18px 4px;
+    color: var(--paper-dim);
+  }
+  .bar .crumb {
+    text-align: center;
+    flex: 1;
+  }
+  .bar .crumb .book {
+    font-family: var(--font-serif);
+    font-size: 13.5px;
+    color: var(--paper);
+    letter-spacing: 0.02em;
+  }
+  .bar .crumb .chap {
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    letter-spacing: 0.03em;
+    color: var(--ink-soft);
+    margin-top: 3px;
+  }
+
+  .quick-settings {
+    display: flex;
+    justify-content: center;
+    gap: 8px;
+    padding: 2px 18px 4px;
+  }
+  .setting-chip {
+    all: unset;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--paper-dim);
+    background: rgba(255,255,255,0.05);
+    border: 0.5px solid var(--ink-soft);
+    border-radius: 999px;
+    padding: 5px 12px;
+  }
+  .setting-chip svg { width: 12px; height: 12px; }
+
+  .main-stage { flex: 1; position: relative; }
+  .narrating-view, .conversation-view {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    opacity: 1;
+    transition: opacity 0.3s ease;
+  }
+  .conversation-view { opacity: 0; pointer-events: none; }
+  #listening.in-conversation .narrating-view { opacity: 0; pointer-events: none; }
+  #listening.in-conversation .conversation-view { opacity: 1; pointer-events: auto; }
+
+  .icon-btn {
+    all: unset;
+    width: 30px;
+    height: 30px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--paper-dim);
+    cursor: pointer;
+  }
+  .icon-btn svg { width: 18px; height: 18px; }
+
+  .orb-zone {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+  }
+  .orbit {
+    position: absolute;
+    width: 168px;
+    height: 168px;
+    border-radius: 50%;
+    border: 0.5px solid rgba(226,150,58,0.28);
+  }
+  .panel.active .orbit { animation: spin 14s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .orbit .mote {
+    position: absolute;
+    top: -2.5px;
+    left: 50%;
+    margin-left: -2.5px;
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--ember-bright);
+    box-shadow: 0 0 8px 2px rgba(243,181,99,0.7);
+  }
+  .mote-field { position: absolute; inset: 0; overflow: hidden; }
+  .mote-field span {
+    position: absolute;
+    width: 2.5px;
+    height: 2.5px;
+    border-radius: 50%;
+    background: var(--ember);
+    opacity: 0.5;
+    animation: drift 9s ease-in-out infinite;
+  }
+  @keyframes drift {
+    0%, 100% { transform: translateY(0); opacity: 0.15; }
+    50% { transform: translateY(-14px); opacity: 0.6; }
+  }
+  .ring {
+    position: absolute;
+    border-radius: 50%;
+    border: 1px solid var(--ember-dim);
+    opacity: 0;
+  }
+  .panel.active .ring {
+    animation: ping 2.6s cubic-bezier(0.2,0.6,0.4,1) infinite;
+  }
+  .ring.r2 { animation-delay: 0.7s !important; }
+  .ring.r3 { animation-delay: 1.4s !important; }
+  @keyframes ping {
+    0% { width: 92px; height: 92px; opacity: 0.55; }
+    100% { width: 220px; height: 220px; opacity: 0; }
+  }
+  .orb {
+    width: 92px;
+    height: 92px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 38% 32%, var(--ember-bright), var(--ember) 55%, var(--ember-dim) 100%);
+    box-shadow: 0 0 50px 6px rgba(226,150,58,0.45);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    animation: breathe 3.4s ease-in-out infinite;
+    z-index: 2;
+  }
+  @keyframes breathe {
+    0%, 100% { transform: scale(1); }
+    50% { transform: scale(1.04); }
+  }
+  .orb svg { width: 32px; height: 32px; }
+
+  .caption-zone {
+    padding: 0 30px 8px;
+    min-height: 70px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+  }
+  .caption-zone p {
+    font-family: var(--font-serif);
+    font-size: 16.5px;
+    line-height: 1.75;
+    text-align: center;
+    color: var(--paper);
+    text-wrap: balance;
+    margin: 0;
+    transition: opacity 0.25s ease;
+  }
+
+  .controls {
+    padding: 8px 22px 26px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  .transport {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 30px;
+  }
+  .transport .icon-btn { width: 40px; height: 40px; color: var(--paper-dim); }
+  .transport .icon-btn.play {
+    width: 52px; height: 52px;
+    background: rgba(226,150,58,0.14);
+    border: 1px solid rgba(226,150,58,0.35);
+    border-radius: 50%;
+    color: var(--ember-bright);
+  }
+  .transport .icon-btn svg { width: 20px; height: 20px; }
+  .transport .icon-btn.play svg { width: 22px; height: 22px; }
+
+  .interrupt-btn {
+    all: unset;
+    align-self: center;
+    cursor: pointer;
+    font-size: 13.5px;
+    color: #2a1a08;
+    background: linear-gradient(180deg, var(--ember-bright), var(--ember));
+    padding: 12px 30px;
+    border-radius: 999px;
+    font-weight: 500;
+    letter-spacing: 0.02em;
+    box-shadow: 0 8px 20px -6px rgba(226,150,58,0.5);
+  }
+
+  .mute-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    color: var(--ink-soft);
+    font-size: 10.5px;
+  }
+  .mute-row svg { width: 12px; height: 12px; opacity: 0.7; }
+  .mute-row .tag {
+    font-family: var(--font-mono);
+    font-size: 8.5px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    border: 0.5px solid var(--ink-soft);
+    letter-spacing: 0.04em;
+  }
+
+  .progress {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    padding: 0 4px;
+  }
+  .progress-track {
+    position: relative;
+    width: 100%;
+    height: 4px;
+    background: rgba(255,255,255,0.1);
+    border-radius: 2px;
+    cursor: pointer;
+  }
+  .progress-fill {
+    position: absolute;
+    top: 0; left: 0; bottom: 0;
+    width: 38%;
+    background: linear-gradient(90deg, var(--ember-dim), var(--ember));
+    border-radius: 2px;
+  }
+  .progress-thumb {
+    position: absolute;
+    top: 50%; left: 38%;
+    width: 12px; height: 12px;
+    background: var(--ember-bright);
+    border: 2px solid var(--ink);
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    box-shadow: 0 0 6px 1px rgba(243,181,99,0.6);
+  }
+  .progress-times {
+    display: flex;
+    justify-content: space-between;
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    color: var(--ink-soft);
+    letter-spacing: 0.02em;
+  }
+
+  .caption-count {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    color: var(--ink-soft);
+    text-align: center;
+    letter-spacing: 0.04em;
+    margin-top: 6px;
+  }
+
+  .ask-zone { display: flex; align-items: center; justify-content: center; min-height: 34px; }
+  .hf-live {
+    display: none;
+    align-items: center;
+    gap: 10px;
+  }
+  .hf-live.show { display: flex; }
+  .listening-tag {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--ember-bright);
+    letter-spacing: 0.03em;
+  }
+  .mute-icon-btn {
+    all: unset;
+    cursor: pointer;
+    width: 30px; height: 30px;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(255,255,255,0.06);
+    color: var(--paper-dim);
+  }
+  .mute-icon-btn svg { width: 13px; height: 13px; }
+
+  .mic-toggle {
+    all: unset;
+    align-self: center;
+    cursor: pointer;
+    width: 44px; height: 44px;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(255,255,255,0.05);
+    border: 1px solid var(--ink-soft);
+    color: var(--ink-soft);
+    position: relative;
+  }
+  .mic-toggle svg { width: 18px; height: 18px; }
+  .mic-toggle svg.slash {
+    position: absolute;
+    color: var(--ink-soft);
+  }
+  .mic-toggle.on svg.slash { display: none; }
+  .mic-toggle.on {
+    background: rgba(226,150,58,0.14);
+    border-color: var(--ember);
+    color: var(--ember-bright);
+  }
+  .mic-toggle.on::before {
+    content: '';
+    position: absolute;
+    inset: -7px;
+    border-radius: 50%;
+    border: 1px solid var(--ember-dim);
+    animation: ping 2s cubic-bezier(0.2,0.6,0.4,1) infinite;
+  }
+  #listening.in-conversation .mic-toggle,
+  #listening.in-conversation .mic-label,
+  #listening.in-conversation .ask-zone { display: none; }
+  #listening.in-conversation .input-bar { display: flex; }
+  .mic-label {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    color: var(--ink-soft);
+    text-align: center;
+    letter-spacing: 0.03em;
+    margin-top: -8px;
+  }
+
+  .os-note {
+    max-width: 320px;
+    text-align: center;
+  }
+  .os-note .lbl {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+    margin: 0 0 10px;
+  }
+  .lockscreen {
+    background: linear-gradient(180deg, #1a120c, #241a12);
+    border: 0.5px solid rgba(226,150,58,0.2);
+    border-radius: 16px;
+    padding: 14px 16px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .lockscreen .cover {
+    width: 44px; height: 44px;
+    border-radius: 8px;
+    background: radial-gradient(circle at 35% 30%, var(--ember-bright), var(--ember-dim));
+    flex-shrink: 0;
+  }
+  .lockscreen .meta { flex: 1; text-align: left; min-width: 0; }
+  .lockscreen .meta .app {
+    font-family: var(--font-mono);
+    font-size: 8.5px;
+    color: var(--ink-soft);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+  .lockscreen .meta .title {
+    font-family: var(--font-serif);
+    font-size: 13px;
+    color: var(--paper);
+    margin-top: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .lockscreen .meta .sub {
+    font-size: 10.5px;
+    color: var(--paper-dim);
+    margin-top: 1px;
+  }
+  .lockscreen .ctl {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    color: var(--paper);
+  }
+  .lockscreen .ctl svg { width: 18px; height: 18px; }
+  .lockscreen .ctl .play svg { width: 24px; height: 24px; }
+  .os-note p {
+    font-size: 11px;
+    line-height: 1.6;
+    color: var(--paper-dim);
+    margin: 10px 0 0;
+    text-align: left;
+  }
+
+  .chat-body {
+    flex: 1;
+    padding: 14px 16px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    overflow-y: auto;
+  }
+  .context-chip {
+    background: rgba(226,150,58,0.08);
+    border-left: 2px solid var(--ember-dim);
+    border-radius: 4px;
+    padding: 8px 12px;
+    font-size: 11.5px;
+    line-height: 1.6;
+    color: var(--paper-dim);
+    font-family: var(--font-serif);
+  }
+  .context-chip .lbl {
+    font-family: var(--font-sans);
+    font-size: 9.5px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ember);
+    display: block;
+    margin-bottom: 4px;
+  }
+  .bubble {
+    max-width: 82%;
+    padding: 10px 13px;
+    border-radius: 16px;
+    font-size: 13px;
+    line-height: 1.65;
+  }
+  .bubble.user {
+    align-self: flex-end;
+    background: var(--ember-dim);
+    color: var(--paper);
+    border-bottom-right-radius: 4px;
+  }
+  .bubble.ai {
+    align-self: flex-start;
+    background: rgba(255,255,255,0.06);
+    color: var(--paper);
+    border: 0.5px solid rgba(255,255,255,0.08);
+    border-bottom-left-radius: 4px;
+  }
+  .resume-row {
+    align-self: flex-start;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 2px;
+  }
+  .resume-btn {
+    all: unset;
+    cursor: pointer;
+    font-size: 12px;
+    color: var(--jade);
+    background: rgba(111,160,136,0.12);
+    border: 0.5px solid rgba(111,160,136,0.4);
+    padding: 7px 14px;
+    border-radius: 999px;
+  }
+  .continue-hint {
+    font-size: 11.5px;
+    color: var(--ink-soft);
+  }
+
+  .input-bar {
+    display: none;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px 22px;
+    border-top: 0.5px solid rgba(255,255,255,0.06);
+  }
+  .input-field {
+    flex: 1;
+    background: rgba(255,255,255,0.06);
+    border-radius: 999px;
+    padding: 9px 14px;
+    font-size: 12.5px;
+    color: var(--ink-soft);
+  }
+  .mic-btn, .send-btn {
+    all: unset;
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+  }
+  .mic-btn { background: rgba(255,255,255,0.06); color: var(--paper-dim); }
+  .send-btn { background: var(--ember); color: #2a1a08; }
+  .mic-btn svg, .send-btn svg { width: 15px; height: 15px; }
+
+  .legend {
+    max-width: 320px;
+    font-size: 11.5px;
+    line-height: 1.7;
+    color: var(--paper-dim);
+    text-align: left;
+    background: rgba(0,0,0,0.2);
+    border: 0.5px solid rgba(226,150,58,0.18);
+    border-radius: 14px;
+    padding: 14px 16px;
+  }
+  .legend b { color: var(--ember-bright); font-weight: 500; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .ring, .orb, .orbit, .mote-field span { animation: none !important; }
+  }
+</style>
+
+<div class="stage">
+  <div class="intro">
+    <p class="eyebrow">合并成一个页面 · 打断不再跳转</p>
+    <h1>听书界面 —— 一个页面，两条路径</h1>
+    <p>点"打断"或者开麦克风，都不离开这个页面——中间的灯/字幕区域直接切换成对话内容，其余部分（进度条、播放控制）原地不动。音色、语速、章节都直接铺在页面上，不再藏进齿轮菜单。</p>
+  </div>
+
+  <div class="device">
+    <div class="notch"></div>
+    <div class="screen">
+
+      <div class="panel active" id="listening">
+        <div class="bar">
+          <button class="icon-btn" id="backBtn" aria-label="返回">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M15 18l-6-6 6-6"/></svg>
+          </button>
+          <div class="crumb">
+            <div class="book">中庸</div>
+            <div class="chap" id="chapCrumb">第一章 · 天命之谓性</div>
+          </div>
+          <div style="width:30px"></div>
+        </div>
+
+        <div class="quick-settings">
+          <button class="setting-chip">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+            第一章
+          </button>
+          <button class="setting-chip">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M11 5L6 9H2v6h4l5 4V5z"/><path d="M15.5 8.5a5 5 0 010 7"/></svg>
+            云健
+          </button>
+          <button class="setting-chip">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+            1.0×
+          </button>
+        </div>
+
+        <div class="main-stage" id="mainStage">
+          <div class="narrating-view" id="narratingView">
+            <div class="orb-zone">
+              <div class="mote-field">
+                <span style="left:22%;top:20%;animation-delay:0s;"></span>
+                <span style="left:78%;top:30%;animation-delay:2s;"></span>
+                <span style="left:15%;top:70%;animation-delay:4s;"></span>
+                <span style="left:85%;top:68%;animation-delay:1.5s;"></span>
+                <span style="left:50%;top:14%;animation-delay:3s;"></span>
+              </div>
+              <div class="orbit"><div class="mote"></div></div>
+              <div class="ring r1"></div>
+              <div class="ring r2"></div>
+              <div class="ring r3"></div>
+              <div class="orb">
+                <svg viewBox="0 0 24 24" fill="#2a1a08"><path d="M12 2c-.3 3.5-3.5 5.6-3.5 9.3a3.5 3.5 0 007 0C15.5 7.6 12.3 5.5 12 2z"/><path d="M9 15.5a3 3 0 006 0" stroke="#2a1a08" stroke-width="1.4" fill="none" stroke-linecap="round"/></svg>
+              </div>
+            </div>
+            <div class="caption-zone">
+              <p id="captionText">天命之谓性，率性之谓道，修道之谓教。</p>
+              <div class="caption-count" id="captionCount">句 1/4</div>
+            </div>
+          </div>
+
+          <div class="conversation-view" id="conversationView">
+            <div class="chat-body">
+              <div class="context-chip">
+                <span class="lbl">你打断时正讲到</span>
+                天命之谓性，率性之谓道，修道之谓教。
+              </div>
+              <div class="bubble user">率性是顺着本性来，是不是想干嘛就干嘛？</div>
+              <div class="bubble ai">如果"率性"是想干嘛就干嘛，那后一句"修道之谓教"又是在教什么呢？两句放在一起看，是不是有点对不上？</div>
+              <div class="resume-row">
+                <button class="resume-btn" id="resumeBtn">继续听下去</button>
+                <span class="continue-hint">或者接着追问</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="controls">
+          <div class="progress">
+            <div class="progress-track">
+              <div class="progress-fill"></div>
+              <div class="progress-thumb"></div>
+            </div>
+            <div class="progress-times"><span>06:12</span><span>-10:24</span></div>
+          </div>
+          <div class="transport">
+              <button class="icon-btn" aria-label="上一章">
+                <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zM20 6L10 12l10 6z"/></svg>
+              </button>
+              <button class="icon-btn play" aria-label="暂停">
+                <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
+              </button>
+              <button class="icon-btn" aria-label="下一章">
+                <svg viewBox="0 0 24 24" fill="currentColor"><path d="M18 6h-2v12h2zM4 6l10 6-10 6z"/></svg>
+              </button>
+          </div>
+
+          <div class="ask-zone" id="askZone">
+            <button class="interrupt-btn" id="interruptBtn">打断，我想问问</button>
+            <div class="hf-live" id="hfLive">
+              <span class="listening-tag">正在聆听 · 随时开口</span>
+              <button class="mute-icon-btn" id="muteBtn" aria-label="静音">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M1 1l22 22M9 9v3a3 3 0 005 2.2M15 9.34V5a3 3 0 00-5.94-.6M5 10v2a7 7 0 0011 5.7M12 19v3"/></svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="input-bar" id="inputBar">
+            <button class="mic-btn" aria-label="语音输入">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2M12 19v3"/></svg>
+            </button>
+            <div class="input-field">再问一句…</div>
+            <button class="send-btn" aria-label="发送">
+              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 11l18-8-8 18-2-8z"/></svg>
+            </button>
+          </div>
+
+          <button class="mic-toggle" id="micToggle" aria-label="开始提问">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2M12 19v3"/></svg>
+            <svg class="slash" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="3" x2="21" y2="21"/></svg>
+          </button>
+          <div class="mic-label" id="micLabel">点击开始提问</div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="legend">
+    <b>点"打断"试试</b>——中间的灯/字幕区域直接切换成对话内容，顶部/底部（进度条、播放控制）原地不动，不会跳到一个新页面；对话里点"继续听下去"或者点左上角返回箭头，都能切回朗读画面；<br>
+    <b>麦克风默认是禁用图标</b>（带斜杠那种，不只靠颜色区分），点一下变成开启状态（发光+脉冲+去掉斜杠），"打断"按钮同时隐藏，换成"正在聆听"提示+"静音"按钮；<br>
+    <b>音色、语速直接铺成两个小标签</b>，在顶部书名下方，不再藏进齿轮菜单，点哪个标签就能直接改；<br>
+    <b>章节列表挪到了音色/语速旁边</b>，做成第三个标签——原来想放进播放控制那排（跟上一章/下一章挤在一起），窄屏放不下四个图标会贴在一起，改放这里空间更宽松；点开是App已有的那个多层目录弹层，不用重新做一套；<br>
+    <b>字幕一次只显示一句</b>，自动往下滚（demo里3.2秒切一句演示，实际由TTS播放进度驱动），不管原文多长都不会溢出。
+  </div>
+
+  <div class="os-note">
+    <p class="lbl">补充说明 · 不是我们设计的界面</p>
+    <div class="lockscreen">
+      <div class="cover"></div>
+      <div class="meta">
+        <div class="app">沉光共读</div>
+        <div class="title">中庸</div>
+        <div class="sub">第一章 · 天命之谓性</div>
+      </div>
+      <div class="ctl">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zM20 6L10 12l10 6z"/></svg>
+        <div class="play"><svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg></div>
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M18 6h-2v12h2zM4 6l10 6-10 6z"/></svg>
+      </div>
+    </div>
+    <p>这是锁屏/通知栏媒体控制卡片的示意——<b>这张卡片本身是iOS/安卓系统画的，不是我们App的界面，我们设计不了它的样式</b>。我们唯一要做的是把书名、章节、封面图这几项信息喂给系统的媒体控制接口，系统会自动套用它自己的原生样式渲染出来（左边通常是App提供的封面图，这里用色块占位）。这张图只是让我们对"系统会呈现出什么"有个共同认知，不是给工程师的实现规格。</p>
+  </div>
+</div>
+
+<script>
+  var listeningPanel = document.getElementById('listening');
+  var micBtn = document.getElementById('micToggle');
+  var interruptBtn = document.getElementById('interruptBtn');
+  var hfLive = document.getElementById('hfLive');
+  var micLabel = document.getElementById('micLabel');
+  var resumeBtn = document.getElementById('resumeBtn');
+  var backBtn = document.getElementById('backBtn');
+
+  micBtn.addEventListener('click', function() {
+    var on = micBtn.classList.toggle('on');
+    interruptBtn.style.display = on ? 'none' : '';
+    hfLive.classList.toggle('show', on);
+    micLabel.textContent = on ? '免提已开启，随时说话' : '点击开始提问';
+  });
+  document.getElementById('muteBtn').addEventListener('click', function(e) {
+    e.stopPropagation();
+    var muted = this.classList.toggle('muted');
+    document.querySelector('.listening-tag').textContent = muted ? '已静音 · 朗读继续' : '正在聆听 · 随时开口';
+  });
+
+  function enterConversation() { listeningPanel.classList.add('in-conversation'); }
+  function exitConversation() { listeningPanel.classList.remove('in-conversation'); }
+  interruptBtn.addEventListener('click', enterConversation);
+  resumeBtn.addEventListener('click', exitConversation);
+  backBtn.addEventListener('click', function() {
+    if (listeningPanel.classList.contains('in-conversation')) exitConversation();
+  });
+
+  var sentences = [
+    '天命之谓性，率性之谓道，修道之谓教。',
+    '道也者，不可须臾离也，可离非道也。',
+    '是故君子戒慎乎其所不睹，恐惧乎其所不闻。',
+    '莫见乎隐，莫显乎微，故君子慎其独也。'
+  ];
+  var si = 0;
+  var captionText = document.getElementById('captionText');
+  var captionCount = document.getElementById('captionCount');
+  setInterval(function() {
+    si = (si + 1) % sentences.length;
+    captionText.style.opacity = 0;
+    setTimeout(function() {
+      captionText.textContent = sentences[si];
+      captionCount.textContent = '句 ' + (si + 1) + '/' + sentences.length;
+      captionText.style.opacity = 1;
+    }, 250);
+  }, 3200);
+</script>
