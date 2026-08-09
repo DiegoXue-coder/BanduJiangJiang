@@ -111,6 +111,23 @@ function ReaderInner({
   // 右滑关闭手势（没用 react-native-gesture-handler/reanimated 那套，
   // 单纯检测一下拖拽距离用不着那么重，PanResponder是RN核心自带的，
   // 少一层跟原生模块版本对不上的风险）。
+  // 2026-08-09真机反馈：目录条目全部是平铺的一层（章+章内小节混在一起），
+  // 用户点开一本"一章一个文件、章内还有多个小节标题"的书（比如《负动产
+  // 时代》）会看到几十条同级标题，分不清哪些是"章"哪些是隶属于某一章的
+  // "节"。后端已经改成不再把章内小节拆成并列章节，改成epub.js原生支持的
+  // 嵌套toc（章节条目的`subitems`数组装着它自己的小节）——这里配合改成
+  // 可展开/收起的两层列表，默认收起（避免几十章×若干小节一次性铺开太长），
+  // 点章节标题本身仍然是老行为：直接跳转+关闭目录；点右侧箭头只展开/收起，
+  // 不跳转，两个操作分开，不会互相干扰。
+  const [expandedToc, setExpandedToc] = useState(() => new Set());
+  const toggleTocExpanded = useCallback((key) => {
+    setExpandedToc((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  }, []);
+
   const tocPanResponder = useMemo(() => PanResponder.create({
     onMoveShouldSetPanResponder: (_, gesture) =>
       Math.abs(gesture.dx) > 15 && Math.abs(gesture.dx) > Math.abs(gesture.dy) * 2,
@@ -427,17 +444,43 @@ function ReaderInner({
           <FlatList
             data={toc}
             keyExtractor={(item, idx) => item.id || String(idx)}
-            renderItem={({ item }) => (
-              <TouchableOpacity
-                style={[styles.tocItem, { borderBottomColor: uiTheme.cardBorder }]}
-                onPress={() => {
-                  goToTocItem(item.href);
-                  setShowToc(false);
-                }}
-              >
-                <Text style={[styles.tocItemText, { color: uiTheme.text }]}>{item.label?.trim()}</Text>
-              </TouchableOpacity>
-            )}
+            renderItem={({ item, index }) => {
+              const subitems = item.subitems || [];
+              const key = item.id || String(index);
+              const expanded = expandedToc.has(key);
+              return (
+                <View>
+                  <View style={[styles.tocItem, styles.tocItemRow, { borderBottomColor: uiTheme.cardBorder }]}>
+                    <TouchableOpacity
+                      style={styles.tocItemMain}
+                      onPress={() => {
+                        goToTocItem(item.href);
+                        setShowToc(false);
+                      }}
+                    >
+                      <Text style={[styles.tocItemText, { color: uiTheme.text }]}>{item.label?.trim()}</Text>
+                    </TouchableOpacity>
+                    {subitems.length > 0 && (
+                      <TouchableOpacity style={styles.tocChevronBtn} onPress={() => toggleTocExpanded(key)}>
+                        <Text style={[styles.tocChevron, { color: uiTheme.accent }]}>{expanded ? '︿' : '﹀'}</Text>
+                      </TouchableOpacity>
+                    )}
+                  </View>
+                  {expanded && subitems.map((sub, subIdx) => (
+                    <TouchableOpacity
+                      key={sub.id || `${key}_${subIdx}`}
+                      style={[styles.tocSubItem, { borderBottomColor: uiTheme.cardBorder }]}
+                      onPress={() => {
+                        goToTocItem(sub.href);
+                        setShowToc(false);
+                      }}
+                    >
+                      <Text style={[styles.tocSubItemText, { color: uiTheme.text }]}>{sub.label?.trim()}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              );
+            }}
           />
         </SafeAreaView>
       </Modal>
@@ -681,4 +724,13 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
   tocItemText: { fontSize: 15 },
+  tocItemRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 0, paddingHorizontal: 0 },
+  tocItemMain: { flex: 1, paddingHorizontal: 16, paddingVertical: 14 },
+  tocChevronBtn: { paddingHorizontal: 16, paddingVertical: 14 },
+  tocChevron: { fontSize: 13 },
+  tocSubItem: {
+    paddingLeft: 32, paddingRight: 16, paddingVertical: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  tocSubItemText: { fontSize: 14, opacity: 0.75 },
 });
