@@ -53,6 +53,24 @@ const VOICE_OPTIONS = [
 ];
 const MAX_RECORDING_MS = 55000; // 跟BookChatScreen同一个上限，腾讯云ASR单次连接60秒硬顶
 
+// 2026-08-09决策层派发"方案A"：AI回答完之后的等待期，除了手动点"继续
+// 听书"按钮，同时临时开一次麦克风监听——说"继续"这类词就自动接回朗读，
+// 不用点按钮。这个跟免提打断（方案B，持续收音+VAD）完全不同：这里只在
+// 明确的等待窗口临时录一小段（复用下面已有的一次性录音+云端识别逻辑，
+// 不需要持续收音、也不需要VAD做本地语音检测），窗口结束就自动停止，
+// 不是全程开麦。
+const AUTO_LISTEN_WINDOW_MS = 4000;
+// 宽松包含匹配，不要求精确匹配整句——真实语音识别经常带标点/语气词
+// （比如"继续吧。"、"没事了"）。限制文字长度是为了避免长问题里偶然
+// 包含"算了"这类词被误判成"继续"指令（比如"算了这段的账目是什么意思"
+// 这种问题不应该被拦截）。
+const CONTINUE_VOICE_PATTERNS = ['继续', '没事', '不问了', '算了', '好了', '行了', '够了', '不用了'];
+function isContinueVoiceCommand(text) {
+  const t = (text || '').trim();
+  if (!t || t.length > 8) return false;
+  return CONTINUE_VOICE_PATTERNS.some((p) => t.includes(p));
+}
+
 // 章节标题精确匹配"目录"就跳过不朗读——已有真实案例证明目录会被当成
 // 普通章节混进朗读队列（IMG_1564排版反馈截图），不追求覆盖所有变体，
 // 简单规则，识别不到的边界情况留给以后真出现真实案例再处理。
@@ -186,6 +204,11 @@ export default function ListenScreen({ route, navigation }) {
   const recordingRef = useRef(null);
   const startingRecordingRef = useRef(false);
   const maxDurationTimerRef = useRef(null);
+  // true表示当前这段录音是"方案A"自动触发的监听窗口，不是用户手动点麦克风
+  // 按钮开始的——finishRecording需要知道这个区别，来决定识别出的文字是
+  // 填进输入框（手动场景）还是先检查是不是"继续"这类指令（自动场景）。
+  const autoListenRef = useRef(false);
+  const autoListenTimerRef = useRef(null);
 
   async function stopSound() {
     if (soundRef.current) {
@@ -441,6 +464,10 @@ export default function ListenScreen({ route, navigation }) {
       stopSound();
       abortAskRef.current?.();
       if (maxDurationTimerRef.current) clearTimeout(maxDurationTimerRef.current);
+      if (autoListenTimerRef.current) clearTimeout(autoListenTimerRef.current);
+      if (autoListenRef.current && recordingRef.current) {
+        recordingRef.current.stopAndUnloadAsync().catch(() => {});
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bookId]);
@@ -519,7 +546,15 @@ export default function ListenScreen({ route, navigation }) {
           // 回答播完直接回到paused（输入框重新激活），不再经过单独的
           // "要继续追问还是继续听书"二次确认页——"继续听书"链接在对话线
           // 下方一直可点，"继续追问"就是接着在输入框里打字。
-          if (epoch === epochRef.current) setPhase('paused');
+          if (epoch === epochRef.current) {
+            setPhase('paused');
+            // 方案A：这一刻是"AI刚回答完、等用户下一步"的等待窗口，静默
+            // 开一次麦克风监听几秒——用户说"继续"这类词就自动接回朗读，
+            // 不用点按钮。只在这个"回答完"路径触发，不包括handleInterrupt
+            // 那个"刚打断、还没问过任何问题"的paused（那个阶段用户预期
+            // 是要主动问点什么，不是"继续"）。
+            startAutoListen();
+          }
         },
         onError: (e) => {
           abortAskRef.current = null;
@@ -533,6 +568,25 @@ export default function ListenScreen({ route, navigation }) {
   function handleContinue() {
     abortAskRef.current?.(); // 对话线下方随时可点"继续听书"，包括AI还在想的时候，这里先把没结束的提问请求断掉
     abortAskRef.current = null;
+    // 方案A的自动监听如果还在录音窗口内（比如用户手动点了"继续听书"，
+    // 没等自动监听那几秒跑完），这里主动停掉丢弃——不需要它的识别结果了，
+    // 用户已经用手动方式表达了"继续"这个意图，避免几秒后识别结果才回来、
+    // 对着已经在播放的状态又误触发一次重复的handleContinue。
+    if (autoListenRef.current) {
+      autoListenRef.current = false;
+      if (autoListenTimerRef.current) {
+        clearTimeout(autoListenTimerRef.current);
+        autoListenTimerRef.current = null;
+      }
+      const rec = recordingRef.current;
+      recordingRef.current = null;
+      setIsRecording(false);
+      setRecordingStatus('');
+      if (rec) {
+        rec.stopAndUnloadAsync().catch(() => {});
+        Audio.setAudioModeAsync({ allowsRecordingIOS: false, playsInSilentModeIOS: true }).catch(() => {});
+      }
+    }
     setConversation([]); // 回到听书主线，这一轮打断的对话线结束
     const { chapterIdx, paragraphIdx } = posRef.current;
     playFrom(chapterIdx, paragraphIdx, epochRef.current);
@@ -553,9 +607,16 @@ export default function ListenScreen({ route, navigation }) {
       clearTimeout(maxDurationTimerRef.current);
       maxDurationTimerRef.current = null;
     }
+    if (autoListenTimerRef.current) {
+      clearTimeout(autoListenTimerRef.current);
+      autoListenTimerRef.current = null;
+    }
+    const wasAutoListen = autoListenRef.current;
+    autoListenRef.current = false;
+    const epochAtStart = epochRef.current;
     setIsRecording(false);
-    setIsTranscribing(true);
-    setRecordingStatus('识别中…');
+    setIsTranscribing(!wasAutoListen); // 自动监听窗口不显示"识别中"这个强打扰的状态，手动录音保留原样
+    if (!wasAutoListen) setRecordingStatus('识别中…');
     try {
       const rec = recordingRef.current;
       await rec.stopAndUnloadAsync();
@@ -563,6 +624,27 @@ export default function ListenScreen({ route, navigation }) {
       recordingRef.current = null;
       await Audio.setAudioModeAsync({ allowsRecordingIOS: false, playsInSilentModeIOS: true });
       const text = await transcribeAudio(uri, FileSystem.uploadAsync, FileSystem.FileSystemUploadType);
+      // epoch变了（比如识别这几秒里用户又打断了别的地方）说明这轮监听已经
+      // 过期，识别结果不再适用，直接丢弃不生效。注意这里不检查phase状态——
+      // finishRecording是异步setTimeout回调里调用的，函数本身在闭包创建
+      // 那一刻就把phase锁定了，用户手动点"继续听书"之后phase早就变了，
+      // 这个闭包却读不到最新值（React经典的闭包过期问题），检查了也没用、
+      // 反而会误判。真正防止"手动点了继续听书、几秒后自动监听结果又重复
+      // 触发一次"这种情况的，是handleContinue自己主动取消掉还在进行中的
+      // 自动监听（见下面），不是靠这里读phase判断。
+      if (epochAtStart !== epochRef.current) return;
+      if (wasAutoListen) {
+        if (isContinueVoiceCommand(text)) {
+          handleContinue();
+        } else if (text?.trim() && !question.trim()) {
+          // 不是"继续"指令，但确实识别出内容了——大概率是用户没点麦克风
+          // 按钮就直接开口问了问题，顺手填进输入框（跟手动识别体验一致），
+          // 不静默丢弃；如果用户这几秒里已经自己在输入框打了字，不要用
+          // 识别结果覆盖手打的内容。
+          setQuestion(text.trim());
+        }
+        return;
+      }
       if (text?.trim()) {
         setQuestion(text.trim());
         setRecordingStatus('识别完成 — 确认后点提问');
@@ -570,7 +652,7 @@ export default function ListenScreen({ route, navigation }) {
         setRecordingStatus('未识别到内容，请重试');
       }
     } catch (e) {
-      setRecordingStatus(`识别失败：${e.message}`);
+      if (!wasAutoListen) setRecordingStatus(`识别失败：${e.message}`);
     } finally {
       setIsTranscribing(false);
     }
@@ -601,6 +683,34 @@ export default function ListenScreen({ route, navigation }) {
       maxDurationTimerRef.current = setTimeout(() => { finishRecording(); }, MAX_RECORDING_MS);
     } catch (e) {
       setRecordingStatus(`无法启动录音：${e.message}`);
+    } finally {
+      startingRecordingRef.current = false;
+    }
+  }
+
+  // 方案A：AI回答播完、回到paused等对话式输入这一刻自动调用——静默尝试
+  // 开一次麦克风监听几秒，用户不用做任何操作。任何一步失败（没有权限、
+  // 已经在录音中）都直接放弃，不弹错误提示——这本来就是一个"锦上添花"
+  // 的静默功能，不是用户主动发起的操作，不能因为它失败去打扰用户，manual
+  // 的按钮路径完全不受影响，用户随时可以手动点麦克风/打字。
+  async function startAutoListen() {
+    if (isRecording || startingRecordingRef.current) return;
+    startingRecordingRef.current = true;
+    try {
+      const { status: perm } = await Audio.getPermissionsAsync();
+      if (perm !== 'granted') return; // 静默放弃，不主动弹权限请求打断听书体验
+      await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
+      const recording = new Audio.Recording();
+      await recording.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
+      await recording.startAsync();
+      recordingRef.current = recording;
+      autoListenRef.current = true;
+      setIsRecording(true);
+      setRecordingStatus('（可以直接说"继续"接回朗读，或者直接问问题）');
+      autoListenTimerRef.current = setTimeout(() => { finishRecording(); }, AUTO_LISTEN_WINDOW_MS);
+    } catch (e) {
+      autoListenRef.current = false;
+      // 静默失败，不设置recordingStatus——手动路径不受影响
     } finally {
       startingRecordingRef.current = false;
     }
