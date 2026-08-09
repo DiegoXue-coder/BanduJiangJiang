@@ -552,6 +552,11 @@ class HighlightOut(BaseModel):
 class ProgressIn(BaseModel):
     cfi_location: str
 
+class BookExportOut(BaseModel):
+    book_id: int
+    title: str
+    markdown: str
+
 class QaTurnOut(BaseModel):
     id: int
     created_at: datetime.datetime
@@ -2950,6 +2955,103 @@ async def app_delete_highlight(book_id: int, highlight_id: int, user_id: int = C
     if not deleted:
         raise HTTPException(status_code=404, detail="划线不存在")
     return {"ok": True}
+
+def _build_export_markdown(book_title: str, book_author: str, chapters, highlights, qa_rows) -> str:
+    """沉淀文档导出v1的纯格式化逻辑，跟数据库查询拆开——方便离线单测，
+    不用起数据库连接。chapters/highlights/qa_rows都是普通dict的列表
+    （调用方从asyncpg的Record转一下），不依赖具体的DB驱动类型。
+
+    highlights和qa_history之间目前没有直接的外键关联（qa_history只存了
+    selection这段引用原文的文字副本，不是highlight_id），没法可靠地把
+    "这条划线引出了那几条问答"这种关系找出来——这里不做没有数据支撑的
+    强行归并，划线和问答分别独立成时间轴上的条目，按"章节顺序→章节内
+    时间顺序"排列，不猜测两者之间的关联。"""
+    chapter_order_by_id = {c["id"]: c["order_index"] for c in chapters}
+    chapter_order_by_title = {c["title"]: c["order_index"] for c in chapters}
+    chapter_title_by_order = {c["order_index"]: c["title"] for c in chapters}
+    # 划线的chapter_id、问答的chapter_title，两边都可能对不上当前的chapters表
+    # （比如书后来重新导入过、chapter_id/标题变了），对不上统一归到末尾一组，
+    # 不当错误处理，也不丢弃这条记录。
+    UNMATCHED_ORDER = 10**9
+
+    entries = []
+    for h in highlights:
+        order = chapter_order_by_id.get(h["chapter_id"], UNMATCHED_ORDER)
+        title = chapter_title_by_order.get(order, "其它")
+        entries.append((order, h["created_at"], title, "highlight", h))
+    for q in qa_rows:
+        order = chapter_order_by_title.get(q["chapter_title"], UNMATCHED_ORDER)
+        title = q["chapter_title"] or "其它"
+        entries.append((order, q["created_at"], title, "qa", q))
+    entries.sort(key=lambda e: (e[0], e[1]))
+
+    lines = [f"# {book_title}", ""]
+    if book_author:
+        lines.append(f"作者：{book_author}")
+    lines.append(f"导出时间：{datetime.datetime.now(datetime.UTC).strftime('%Y-%m-%d %H:%M')}")
+    lines.append("")
+
+    current_title = None
+    for order, _created_at, title, kind, row in entries:
+        if title != current_title:
+            lines.append(f"## {title}")
+            lines.append("")
+            current_title = title
+        ts = row["created_at"].strftime("%Y-%m-%d %H:%M")
+        if kind == "highlight":
+            lines.append(f"### 📌 划线 · {ts}")
+            lines.append(f"> {row['highlighted_text']}")
+            if row["note"]:
+                lines.append("")
+                lines.append(f"备注：{row['note']}")
+        else:
+            mode_label = "苏格拉底" if row["style"] == "socratic" else "讲解"
+            lines.append(f"### 💬 问答（{mode_label}模式）· {ts}")
+            if row["selection"]:
+                lines.append(f"**原文：** {row['selection']}")
+            lines.append(f"**问：** {row['question']}")
+            lines.append(f"**答：** {row['answer']}")
+        lines.append("")
+
+    if not entries:
+        lines.append("（这本书还没有划线或问答记录）")
+
+    return "\n".join(lines)
+
+@app.get("/app/books/{book_id}/export", response_model=BookExportOut)
+async def app_export_book_notes(book_id: int, user_id: int = CurrentUser):
+    """沉淀文档导出v1（决策层2026-08-09续二派发任务2）：把用户在这本书上
+    积累的划线+问答，按章节顺序整理成一份Markdown格式的结构化文档。这次
+    只做最基础的"复用现有数据、格式化导出"，不做"AI筛选高价值内容"这层
+    （那层还没讨论细化完，不在这次范围）。服务两个目的：用户自己保存/
+    分享（Markdown本身是纯文本，人读起来没有障碍）；以及以后可以直接把
+    这份文档丢给别的AI工具当上下文（结构化、不用额外解析），两个用途
+    共用同一份产出，不用维护两套格式。格式化逻辑本身见_build_export_
+    markdown（跟数据库查询拆开方便单测）。"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        book = await conn.fetchrow("SELECT title, author FROM books WHERE id = $1", book_id)
+        if not book:
+            raise HTTPException(status_code=404, detail="书本不存在")
+
+        chapters = await conn.fetch(
+            "SELECT id, order_index, title FROM chapters WHERE book_id = $1 ORDER BY order_index",
+            book_id,
+        )
+        highlights = await conn.fetch("""
+            SELECT chapter_id, highlighted_text, note, created_at
+            FROM highlights WHERE book_id = $1 AND user_id = $2
+        """, book_id, user_id)
+        qa_rows = await conn.fetch("""
+            SELECT chapter_title, question, answer, selection, style, created_at
+            FROM qa_history WHERE book_id = $1 AND user_id = $2
+        """, str(book_id), user_id)
+
+    markdown = _build_export_markdown(
+        book["title"], book["author"],
+        [dict(c) for c in chapters], [dict(h) for h in highlights], [dict(q) for q in qa_rows],
+    )
+    return BookExportOut(book_id=book_id, title=book["title"], markdown=markdown)
 
 @app.post("/app/books/{book_id}/progress")
 async def app_update_progress(book_id: int, body: ProgressIn, user_id: int = CurrentUser):

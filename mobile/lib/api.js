@@ -237,6 +237,13 @@ export async function deleteHighlight(bookId, highlightId) {
   return appFetch(`/app/books/${bookId}/highlights/${highlightId}`, { method: 'DELETE' });
 }
 
+// 沉淀文档导出v1（决策层2026-08-09派发）：某本书的划线+问答整理成Markdown，
+// 返回{book_id, title, markdown}，调用方(ReviewBookScreen)负责写临时文件+
+// 调用系统分享，这里只管拿数据，不掺渲染/文件系统相关的逻辑。
+export async function exportBookNotes(bookId) {
+  return appFetch(`/app/books/${bookId}/export`);
+}
+
 export async function updateProgress(bookId, cfiLocation) {
   return appFetch(`/app/books/${bookId}/progress`, {
     method: 'POST',
