@@ -76,14 +76,30 @@ export default function ReviewDetailScreen({ route, navigation }) {
 
         <Text style={[styles.quoteText, { color: theme.text }]}>“{item.text}”</Text>
 
-        {isQa && (item.turns || []).map((turn, idx) => (
-          <View key={turn.id} style={idx > 0 ? [styles.turnDivider, { borderTopColor: theme.cardBorder }] : null}>
-            <Text style={[styles.sectionLabel, { color: theme.textSecondary }]}>第{idx + 1}轮 · 提问</Text>
-            <Text style={[styles.bodyText, { color: theme.text }]}>{turn.question}</Text>
-            <Text style={[styles.sectionLabel, { color: theme.textSecondary }]}>回答</Text>
-            <Text style={[styles.bodyText, { color: theme.text }]}>{turn.answer}</Text>
-          </View>
-        ))}
+        {isQa && (item.turns || []).map((turn, idx) => {
+          const isSocratic = turn.style === 'socratic';
+          return (
+            <View key={turn.id} style={idx > 0 ? [styles.turnDivider, { borderTopColor: theme.cardBorder }] : null}>
+              <View style={styles.turnHeaderRow}>
+                <Text style={[styles.sectionLabel, { color: theme.textSecondary }]}>第{idx + 1}轮 · 提问</Text>
+                {/* 1号任务：同一段划线的问答记录，区分讲解/苏格拉底模式——
+                    讲解复用"问答"标签的强调色，苏格拉底复用"划线"标签的
+                    金色调，两种既有配色天然区分开，不用再引入新颜色。 */}
+                <View style={[
+                  styles.styleTag,
+                  { borderRadius: theme.radius, backgroundColor: isSocratic ? theme.tagSoft : theme.accentSoft },
+                ]}>
+                  <Text style={[styles.styleTagText, { color: isSocratic ? theme.tag : theme.accent }]}>
+                    {isSocratic ? '苏格拉底' : '讲解'}
+                  </Text>
+                </View>
+              </View>
+              <Text style={[styles.bodyText, { color: theme.text }]}>{turn.question}</Text>
+              <Text style={[styles.sectionLabel, { color: theme.textSecondary }]}>回答</Text>
+              <Text style={[styles.bodyText, { color: theme.text }]}>{turn.answer}</Text>
+            </View>
+          );
+        })}
 
         {!!item.related_text && (
           <View style={[styles.relatedBox, { borderRadius: theme.radius, backgroundColor: theme.accentSoft }]}>
@@ -142,6 +158,9 @@ const styles = StyleSheet.create({
 
   sectionLabel: { fontSize: 12, fontWeight: '700', marginBottom: 6, marginTop: 12 },
   turnDivider: { marginTop: 16, paddingTop: 16, borderTopWidth: 0.5 },
+  turnHeaderRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  styleTag: { paddingHorizontal: 7, paddingVertical: 2 },
+  styleTagText: { fontSize: 11, fontWeight: '700' },
   bodyText: { fontSize: 15, lineHeight: 24 },
 
   relatedBox: { marginTop: 20, padding: 12 },

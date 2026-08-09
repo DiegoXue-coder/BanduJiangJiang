@@ -81,6 +81,13 @@ async def init_db():
         await conn.execute(
             "ALTER TABLE qa_history ADD COLUMN IF NOT EXISTS cfi_location TEXT NOT NULL DEFAULT ''"
         )
+        # 1号任务：复盘页问答卡片要能区分讲解/苏格拉底模式，之前这个信息
+        # 只活在Ask请求的style参数里，问完就丢了，qa_history没留底。老数据
+        # 统一按'simple'处理——老数据本来就是讲解模式上线之后才有苏格拉底
+        # 模式选项的，默认值符合事实，不是瞎猜的兜底。
+        await conn.execute(
+            "ALTER TABLE qa_history ADD COLUMN IF NOT EXISTS style TEXT NOT NULL DEFAULT 'simple'"
+        )
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS daily_usage (
                 ip    TEXT    NOT NULL,
@@ -504,6 +511,7 @@ class HistorySaveRequest(BaseModel):
     answer: str
     selection: str = ""
     cfi_location: str = ""
+    style: str = "simple"
 
 # ── 手机端 App 请求/响应模型（WBS 阶段一骨架）──────────────────────
 
@@ -549,6 +557,7 @@ class QaTurnOut(BaseModel):
     created_at: datetime.datetime
     question: str
     answer: str
+    style: str = "simple"
 
 class ReviewItemOut(BaseModel):
     type: str
@@ -562,6 +571,7 @@ class ReviewItemOut(BaseModel):
     cfi_location: str = ""
     related_book_title: str = ""
     related_text: str = ""
+    style: str = ""
     turns: list[QaTurnOut] = []
 
 # ── 系统 Prompt ────────────────────────────────────────────────────
@@ -1975,17 +1985,17 @@ async def save_history(req: HistorySaveRequest, request: Request, _=ExtAuth, use
         if emb_str:
             await conn.execute("""
                 INSERT INTO qa_history
-                    (user_id, book_id, book_title, chapter_title, question, answer, selection, cfi_location, embedding)
-                VALUES (COALESCE($1, 1),$2,$3,$4,$5,$6,$7,$8,$9::vector)
+                    (user_id, book_id, book_title, chapter_title, question, answer, selection, cfi_location, style, embedding)
+                VALUES (COALESCE($1, 1),$2,$3,$4,$5,$6,$7,$8,$9,$10::vector)
             """, user_id, req.book_id, req.book_title, req.chapter_title,
-                req.question, req.answer, req.selection, req.cfi_location, emb_str)
+                req.question, req.answer, req.selection, req.cfi_location, req.style, emb_str)
         else:
             await conn.execute("""
                 INSERT INTO qa_history
-                    (user_id, book_id, book_title, chapter_title, question, answer, selection, cfi_location)
-                VALUES (COALESCE($1, 1),$2,$3,$4,$5,$6,$7,$8)
+                    (user_id, book_id, book_title, chapter_title, question, answer, selection, cfi_location, style)
+                VALUES (COALESCE($1, 1),$2,$3,$4,$5,$6,$7,$8,$9)
             """, user_id, req.book_id, req.book_title, req.chapter_title,
-                req.question, req.answer, req.selection, req.cfi_location)
+                req.question, req.answer, req.selection, req.cfi_location, req.style)
     return {"ok": True}
 
 @app.post("/history/backfill-embeddings")
@@ -2972,7 +2982,7 @@ async def app_get_review(user_id: int = CurrentUser):
             SELECT 'highlight' AS type, h.id, h.created_at,
                    b.id AS book_id, b.title AS book_title,
                    h.highlighted_text AS text, '' AS question, '' AS answer,
-                   h.cfi_location AS cfi_location
+                   h.cfi_location AS cfi_location, '' AS style
             FROM highlights h
             JOIN books b ON b.id = h.book_id
             WHERE h.user_id = $1
@@ -2982,7 +2992,7 @@ async def app_get_review(user_id: int = CurrentUser):
             SELECT 'qa' AS type, q.id, q.created_at,
                    b.id AS book_id, b.title AS book_title,
                    q.selection AS text, q.question, q.answer,
-                   q.cfi_location AS cfi_location
+                   q.cfi_location AS cfi_location, q.style AS style
             FROM qa_history q
             JOIN books b ON b.id::text = q.book_id
             WHERE q.user_id = $1
@@ -3058,10 +3068,11 @@ async def app_get_review(user_id: int = CurrentUser):
                 "question": latest["question"],
                 "answer": latest["answer"],
                 "cfi_location": latest["cfi_location"],
+                "style": latest["style"],
                 # 详情页要按对话正常阅读顺序（先问的在前），组内是 DESC，反转一下
                 "turns": [
                     {"id": t["id"], "created_at": t["created_at"],
-                     "question": t["question"], "answer": t["answer"]}
+                     "question": t["question"], "answer": t["answer"], "style": t["style"]}
                     for t in reversed(turns)
                 ],
             }

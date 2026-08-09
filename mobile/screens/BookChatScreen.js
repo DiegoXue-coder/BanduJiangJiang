@@ -429,7 +429,7 @@ export default function BookChatScreen({
           setThinking(false);
           setStreamingId(null);
           abortStreamRef.current = null;
-          saveQaHistory({ bookId, bookTitle, chapterTitle, question: q, answer, selection, cfiRange }).catch(() => {});
+          saveQaHistory({ bookId, bookTitle, chapterTitle, question: q, answer, selection, cfiRange, style }).catch(() => {});
         },
         onError: (e) => {
           setStatus(`提问失败：${e.message}`);

@@ -437,20 +437,27 @@ function ReaderInner({
         <SafeAreaView edges={['bottom', 'left', 'right']} style={[styles.tocSafe, { backgroundColor: uiTheme.bg }]} {...tocPanResponder.panHandlers}>
           <View style={[styles.tocHeader, { borderBottomColor: uiTheme.cardBorder, paddingTop: insets.top + 14 }]}>
             <Text style={[styles.tocHeaderTitle, { color: uiTheme.text }]}>目录</Text>
-            <TouchableOpacity onPress={() => setShowToc(false)} style={styles.tocCloseBtn}>
+            <TouchableOpacity
+              onPress={() => setShowToc(false)}
+              style={[styles.tocCloseBtn, { backgroundColor: uiTheme.accentSoft, borderRadius: uiTheme.radius }]}
+            >
               <Text style={[styles.tocCloseBtnText, { color: uiTheme.accent }]}>完成</Text>
             </TouchableOpacity>
           </View>
+          {/* 老backlog：目录弹层之前是默认的贴边列表+发丝分隔线，没套用
+              阶段十定的"暖纸古风"设计系统——这次改成跟全App其它卡片一样
+              的cardBg+cardBorder+4px圆角，条目之间用间距分开而不是分隔线。 */}
           <FlatList
             data={toc}
             keyExtractor={(item, idx) => item.id || String(idx)}
+            contentContainerStyle={styles.tocListContent}
             renderItem={({ item, index }) => {
               const subitems = item.subitems || [];
               const key = item.id || String(index);
               const expanded = expandedToc.has(key);
               return (
-                <View>
-                  <View style={[styles.tocItem, styles.tocItemRow, { borderBottomColor: uiTheme.cardBorder }]}>
+                <View style={[styles.tocCard, { backgroundColor: uiTheme.cardBg, borderColor: uiTheme.cardBorder, borderRadius: uiTheme.radius }]}>
+                  <View style={styles.tocItemRow}>
                     <TouchableOpacity
                       style={styles.tocItemMain}
                       onPress={() => {
@@ -469,13 +476,13 @@ function ReaderInner({
                   {expanded && subitems.map((sub, subIdx) => (
                     <TouchableOpacity
                       key={sub.id || `${key}_${subIdx}`}
-                      style={[styles.tocSubItem, { borderBottomColor: uiTheme.cardBorder }]}
+                      style={[styles.tocSubItem, { borderTopColor: uiTheme.cardBorder }]}
                       onPress={() => {
                         goToTocItem(sub.href);
                         setShowToc(false);
                       }}
                     >
-                      <Text style={[styles.tocSubItemText, { color: uiTheme.text }]}>{sub.label?.trim()}</Text>
+                      <Text style={[styles.tocSubItemText, { color: uiTheme.textSecondary }]}>{sub.label?.trim()}</Text>
                     </TouchableOpacity>
                   ))}
                 </View>
@@ -717,20 +724,18 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
   tocHeaderTitle: { fontSize: 17, fontWeight: '700' },
-  tocCloseBtn: { padding: 4 },
-  tocCloseBtnText: { fontSize: 15, fontWeight: '600' },
-  tocItem: {
-    paddingHorizontal: 16, paddingVertical: 14,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-  },
+  tocCloseBtn: { paddingHorizontal: 12, paddingVertical: 6 },
+  tocCloseBtnText: { fontSize: 14, fontWeight: '600' },
+  tocListContent: { padding: 12, gap: 10 },
+  tocCard: { borderWidth: 1, overflow: 'hidden' },
+  tocItemRow: { flexDirection: 'row', alignItems: 'center' },
   tocItemText: { fontSize: 15 },
-  tocItemRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 0, paddingHorizontal: 0 },
   tocItemMain: { flex: 1, paddingHorizontal: 16, paddingVertical: 14 },
   tocChevronBtn: { paddingHorizontal: 16, paddingVertical: 14 },
   tocChevron: { fontSize: 13 },
   tocSubItem: {
     paddingLeft: 32, paddingRight: 16, paddingVertical: 12,
-    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderTopWidth: StyleSheet.hairlineWidth,
   },
-  tocSubItemText: { fontSize: 14, opacity: 0.75 },
+  tocSubItemText: { fontSize: 14 },
 });
