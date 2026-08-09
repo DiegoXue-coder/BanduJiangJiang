@@ -1,4 +1,4 @@
-import React, { useRef, useState, useCallback } from 'react';
+import React, { useRef, useState, useCallback, useEffect } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, ScrollView, PermissionsAndroid, Platform } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Audio } from 'expo-av';
@@ -23,20 +23,81 @@ import { getTtsPlayUrl } from '../lib/api';
 // 留给应用自己做"（官方讨论区原话），必须用react-native-incall-manager
 // 显式调用MODE_IN_COMMUNICATION，这是社区确认过的真实解法，见startLoopback
 // 里的详细注释。
+// 2026-08-09：决策层方案B（免提打断+静音开关）的第一步验证——免提打断要求
+// App在朗读全程持续开麦监听，但不能把"检测到任何声音"都当成"要打断"（会被
+// 环境噪音/电视声这类误触发），需要VAD（语音活动检测）这层过滤。这里先用
+// 最简单的方案验证："检测有没有声音"退化成"检测音量够不够大"（能量阈值），
+// 不引入额外的VAD算法库依赖——用户明确同意先验证这条最基础的路径，做不
+// 准确再考虑升级成真正分析声音频率特征的VAD。
+//
+// 技术依据：react-native-webrtc的RTCPeerConnection.getStats()是对原生
+// libwebrtc统计接口的直通封装（不是这个库自己模拟的），标准WebRTC统计里
+// "media-source"类型的音频统计对象自带audioLevel字段（0.0~1.0，值越大
+// 声音越响），这是W3C标准定义的字段，不是猜的写法——但react-native-webrtc
+// 这个具体版本在安卓上是否完整实现了这个字段、数值是否准确反映真实说话
+// 声音，没有查到这个库自己的测试用例或文档明确保证，需要真机验证才能
+// 确认，这也是这次要验证的核心问题。
+const VAD_POLL_INTERVAL_MS = 300;
+const VAD_SPEECH_THRESHOLD = 0.02; // 先给个保守的初始值，真机测出实际人声/噪音的数值区间后再调
+
 export default function WebrtcAecTestScreen() {
   const theme = useTheme();
   const [status, setStatus] = useState('未开始');
   const [connected, setConnected] = useState(false);
   const [logs, setLogs] = useState([]);
+  const [audioLevel, setAudioLevel] = useState(null); // null=还没拿到过数据；数字=最近一次读到的audioLevel
+  const [speaking, setSpeaking] = useState(false);
   const pc1Ref = useRef(null);
   const pc2Ref = useRef(null);
   const localStreamRef = useRef(null);
   const inCallManagerRef = useRef(null);
+  const vadTimerRef = useRef(null);
 
   const log = useCallback((msg) => {
     console.log('[AEC测试]', msg);
     setLogs((prev) => [...prev.slice(-19), msg]);
   }, []);
+
+  // 每300ms读一次pc1的统计数据，找音频相关的统计条目里的audioLevel字段。
+  // 不同webrtc版本/统计条目类型可能叫法不完全一致，这里放宽成"只要这条
+  // 统计里有audioLevel这个数字字段就用"，不写死只认某一种type，减少因为
+  // 类型名对不上导致读不到数据的风险。
+  function startVadPolling(pc) {
+    stopVadPolling();
+    vadTimerRef.current = setInterval(async () => {
+      try {
+        const stats = await pc.getStats();
+        let level = null;
+        for (const report of stats.values()) {
+          if (typeof report.audioLevel === 'number') {
+            level = report.audioLevel;
+            break;
+          }
+        }
+        if (level !== null) {
+          setAudioLevel(level);
+          setSpeaking(level >= VAD_SPEECH_THRESHOLD);
+        }
+      } catch (e) {
+        log(`读取音量统计失败: ${e.message}`);
+      }
+    }, VAD_POLL_INTERVAL_MS);
+  }
+
+  function stopVadPolling() {
+    if (vadTimerRef.current) {
+      clearInterval(vadTimerRef.current);
+      vadTimerRef.current = null;
+    }
+    setAudioLevel(null);
+    setSpeaking(false);
+  }
+
+  // 页面被导航离开（比如直接返回上一页，没点"停止回环"）时清掉计时器，
+  // 不然会一直在后台空转读stats——WebRTC连接本身没有做卸载清理（这是
+  // 这个测试页原有的已知gap，不是这次新引入的，这次只补计时器这一项，
+  // 不扩大这次改动的范围去顺带修连接清理）。
+  useEffect(() => () => stopVadPolling(), []);
 
   async function startLoopback() {
     // react-native-webrtc必须用运行时require、不能在文件顶层静态import——
@@ -104,6 +165,7 @@ export default function WebrtcAecTestScreen() {
         if (pc2.iceConnectionState === 'connected' || pc2.iceConnectionState === 'completed') {
           setConnected(true);
           setStatus('回环已建立，可以说话+播放TTS测试了');
+          startVadPolling(pc1); // 读pc1（发送本地麦克风流的那一端）的统计，不是pc2
         }
       });
 
@@ -122,6 +184,7 @@ export default function WebrtcAecTestScreen() {
   }
 
   function stopLoopback() {
+    stopVadPolling();
     localStreamRef.current?.getTracks().forEach((t) => t.stop());
     pc1Ref.current?.close();
     pc2Ref.current?.close();
@@ -172,6 +235,22 @@ export default function WebrtcAecTestScreen() {
         >
           <Text style={[styles.btnText, { color: theme.text }]}>{connected ? '停止回环' : '开始回环'}</Text>
         </TouchableOpacity>
+        {connected && (
+          <View style={[styles.vadBox, { borderColor: theme.cardBorder, borderRadius: theme.radius }]}>
+            <Text style={[styles.vadTitle, { color: theme.text }]}>
+              免提打断第一步验证：音量检测（VAD最简版）
+            </Text>
+            <Text style={[styles.hint, { color: theme.textSecondary }]}>
+              保持安静几秒，再正常说话几句，观察下面这个数字和状态会不会跟着变化——安静时应该是一个很小的数、开口说话应该明显跳高变成"检测到说话"。如果安静和说话时数字几乎没区别（一直是0或者一直很大），说明这条最基础的路径在这台设备上不work，需要换别的方案，不要往下继续做。
+            </Text>
+            <Text style={[styles.vadLevel, { color: speaking ? theme.accent : theme.textSecondary }]}>
+              音量: {audioLevel === null ? '（还没数据）' : audioLevel.toFixed(4)}
+            </Text>
+            <Text style={[styles.vadStatus, { color: speaking ? theme.accent : theme.textSecondary }]}>
+              {audioLevel === null ? '等待数据…' : speaking ? '● 检测到说话' : '○ 安静'}
+            </Text>
+          </View>
+        )}
         <TouchableOpacity
           style={[
             styles.btn,
@@ -204,4 +283,8 @@ const styles = StyleSheet.create({
   btnText: { fontSize: 15, fontWeight: '600' },
   logBox: { marginTop: 16, gap: 2 },
   logLine: { fontSize: 11, fontFamily: 'monospace' },
+  vadBox: { borderWidth: 1, padding: 14, marginTop: 8, gap: 8 },
+  vadTitle: { fontSize: 14, fontWeight: '700' },
+  vadLevel: { fontSize: 22, fontWeight: '700', fontFamily: 'monospace', marginTop: 4 },
+  vadStatus: { fontSize: 16, fontWeight: '600' },
 });
