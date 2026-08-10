@@ -106,8 +106,19 @@ function isContinueVoiceCommand(text) {
 // 过的数值（安静~0.0003、说话3000~5000，量级差了一千万倍，不是W3C规范
 // 说的0~1范围，这个库在安卓上就是这么实现的，但完全不影响用相对大小做
 // 判断）——两处常量如果以后要调，记得两个文件一起改。
+//
+// 2026-08-10安卓模拟器本地测试实测发现：同样是audioLevel这个字段，在
+// 模拟器+host-audio-passthrough这条链路上读到的量级完全不一样——说话时
+// 峰值只有0.03~0.19，安静时~0.001，落在W3C规范定义的标准0~1范围内，
+// 跟2号真机上测到的"数千"量级差了四五个数量级。真机和模拟器返回的量级
+// 不统一，说明这个阈值写死成一个绝对数字本身不是稳的方案（长期该怎么改
+// 成相对噪声基线自适应，是2号负责的免提架构范围，这里不擅自重新设计），
+// 这次先按注释形式明确标注两套数值，用哪套取决于跑在真机还是模拟器上，
+// 只是为了让本地模拟器环境能先把整条链路测通，不是最终方案。
 const VAD_POLL_INTERVAL_MS = 300;
-const VAD_SPEECH_THRESHOLD = 1.0;
+// 真机校准值是1.0；这里临时改成模拟器实测的量级（0.03一档，留了几倍
+// 安全边际），仅用于本地模拟器测试环境，回真机测试记得改回1.0。
+const VAD_SPEECH_THRESHOLD = 0.03;
 // 连续多少次轮询都超过阈值才算"真的开始说话"（而不是一声咳嗽/物体碰撞
 // 这种瞬间噪音）——2次×300ms＝大约600ms持续声音才触发，真人开口说话
 // 通常不会只响一瞬间就停，短促噪音大概率撑不到600ms。
@@ -298,6 +309,10 @@ export default function ListenScreen({ route, navigation }) {
   // 拿来算进度条位置和"句 X/Y"这个计数，复用同一份数据不重复维护。
   const [currentCaption, setCurrentCaption] = useState('');
   const [currentSegCount, setCurrentSegCount] = useState({ idx: 0, total: 0 });
+  // 播放/暂停按钮的"暂停"是纯音频暂停，不进对话视图（见handleInterrupt
+  // 旁边togglePlayPause的注释）——每次真正有新的一段开始播放都要重置回
+  // false，不然上一段暂停过的状态会误跟着下一段。
+  const [isManuallyPaused, setIsManuallyPaused] = useState(false);
   const [capturedText, setCapturedText] = useState('');
   const [question, setQuestion] = useState('');
   // 决策层这轮派发：连续追问改成对话式UI——这一轮打断期间的问答历史，
@@ -474,6 +489,7 @@ export default function ListenScreen({ route, navigation }) {
         }
         setChapterTitle(chapter.title);
         setProgressLabel(`第${pi + 1}/${paragraphs.length}段（加载中…）`);
+        setIsManuallyPaused(false);
         setPhase('playing');
 
         // 这一段是编号列表的开头（"一、""（1）"这类），额外停顿一下再念，
@@ -666,6 +682,23 @@ export default function ListenScreen({ route, navigation }) {
     setPhase('paused');
   }
 
+  // 真机反馈：播放控制那排的播放/暂停按钮之前直接复用了handleInterrupt/
+  // handleContinue，点一下暂停就整个进了打断提问的对话视图——用户明确
+  // 要求这两个是两码事：暂停应该只是单纯停住/接着播这段音频，原地不动，
+  // 不进提问模式；只有专门的"打断，我想问问"按钮才应该进对话视图。改成
+  // 直接操作soundRef.current这个正在播放的Sound实例（pauseAsync/playAsync
+  // 是expo-av对已加载音频的原生操作，不需要重新合成语音），不碰phase。
+  function togglePlayPause() {
+    if (!soundRef.current) return;
+    if (isManuallyPaused) {
+      soundRef.current.playAsync().catch(() => {});
+      setIsManuallyPaused(false);
+    } else {
+      soundRef.current.pauseAsync().catch(() => {});
+      setIsManuallyPaused(true);
+    }
+  }
+
   // 接替1号任务2（可拖动进度条）：设计稿画的是"06:12/-10:24"这种真实播放
   // 时长的进度条，但目前听书这条播放链路（逐段现场调用edge-tts合成，见
   // playOneParagraph）没有提前知道整章/整本书总时长这件事——要做到design
@@ -707,6 +740,7 @@ export default function ListenScreen({ route, navigation }) {
   // 用户实际要问的问题，复用方案A那套"停下来之后自动监听几秒"的逻辑
   // 去捕获，没有另外发明一套新的语音捕获路径。
   function handleAutoInterrupt() {
+    console.log(`[听书诊断] handleAutoInterrupt被调用 phase=${phase} handsFreeMuted=${handsFreeMuted}`);
     if (phase !== 'playing') return;
     if (handsFreeMuted) return;
     handleInterrupt();
@@ -939,6 +973,7 @@ export default function ListenScreen({ route, navigation }) {
       autoListenTimerRef.current = setTimeout(() => { finishRecording(); }, AUTO_LISTEN_WINDOW_MS);
     } catch (e) {
       autoListenRef.current = false;
+      console.log(`[听书诊断] startAutoListen静默失败，真实原因：${e.message}`);
       // 静默失败，不设置recordingStatus——手动路径不受影响
     } finally {
       startingRecordingRef.current = false;
@@ -961,11 +996,14 @@ export default function ListenScreen({ route, navigation }) {
         for (const report of stats.values()) {
           if (typeof report.audioLevel === 'number') { level = report.audioLevel; break; }
         }
+        console.log(`[听书诊断] VAD level=${level}`);
         if (level === null) return;
         if (level >= VAD_SPEECH_THRESHOLD) {
           vadSustainCountRef.current += 1;
+          console.log(`[听书诊断] VAD超阈值 level=${level} sustainCount=${vadSustainCountRef.current} vadSpeaking=${vadSpeakingRef.current} hasAutoInterruptFn=${!!autoInterruptRef.current}`);
           if (!vadSpeakingRef.current && vadSustainCountRef.current >= VAD_SUSTAIN_POLLS) {
             vadSpeakingRef.current = true;
+            console.log('[听书诊断] VAD判定为真的在说话，调用autoInterruptRef');
             autoInterruptRef.current?.();
           }
         } else {
@@ -973,6 +1011,7 @@ export default function ListenScreen({ route, navigation }) {
           vadSpeakingRef.current = false;
         }
       } catch (e) {
+        console.log(`[听书诊断] VAD轮询单次异常：${e.message}`);
         // 单次读取失败不影响下一轮轮询，不打断听书体验，也不弹提示
       }
     }, VAD_POLL_INTERVAL_MS);
@@ -1252,12 +1291,12 @@ export default function ListenScreen({ route, navigation }) {
                   </TouchableOpacity>
                   <TouchableOpacity
                     style={styles.transportPlayBtn}
-                    onPress={inNarrating ? handleInterrupt : handleContinue}
-                    disabled={phase === 'loading-chapter' || phase === 'thinking' || phase === 'answering'}
+                    onPress={togglePlayPause}
+                    disabled={phase !== 'playing'}
                   >
-                    {inNarrating
-                      ? <IconPlayerPauseFilled color={EMBER.emberBright} size={22} />
-                      : <IconPlayerPlayFilled color={EMBER.emberBright} size={22} />}
+                    {isManuallyPaused
+                      ? <IconPlayerPlayFilled color={EMBER.emberBright} size={22} />
+                      : <IconPlayerPauseFilled color={EMBER.emberBright} size={22} />}
                   </TouchableOpacity>
                   <TouchableOpacity
                     style={styles.transportIconBtn}
