@@ -380,7 +380,6 @@ export default function ListenScreen({ route, navigation }) {
   const vadPc1Ref = useRef(null);
   const vadPc2Ref = useRef(null);
   const vadStreamRef = useRef(null);
-  const vadInCallManagerRef = useRef(null);
   const vadPollTimerRef = useRef(null);
   const vadSustainCountRef = useRef(0); // 连续超过阈值的轮询次数
   const vadSpeakingRef = useRef(false); // 已经触发过一次打断、还没跌回安静，避免同一段话反复触发
@@ -993,6 +992,21 @@ export default function ListenScreen({ route, navigation }) {
   // 判断有没有回声），免提打断场景绝对不能让用户自己的说话声/环境声被
   // 循环播出来变成刺耳的实时回音——这里只是要拿一个真正建立连接的
   // RTCPeerConnection来读音量统计，不需要真的听到这条音轨内容。
+  //
+  // 2026-08-10真机反馈坐实了续十二里2号自己标注过的核心未验证风险：
+  // 一开免提，朗读直接没声音、只顾着一直录音。根因是InCallManager.start()
+  // 会把安卓整个AudioManager切到MODE_IN_COMMUNICATION（打电话那种通话
+  // 音频路由），这个模式和expo-av播放TTS用的正常媒体流（STREAM_MUSIC）
+  // 互斥，系统会把媒体流路由让给"通话"——这不是"两边偶尔打架"，是这个
+  // API本身的设计就是"进这个模式=这台设备现在在打电话"，音乐/媒体播放
+  // 天然要让路。AEC测试页当初引入InCallManager是为了测试场景本身需要
+  // （外放播报+录自己的回声，强制走通话路由能拿到更强的AEC效果），但
+  // 这里的真实场景是"边听书边监听说话"，不是模拟通话，根本不需要切换
+  // 系统音频模式——getUserMedia的audio constraints已经单独请求了
+  // echoCancellation/noiseSuppression/autoGainControl，这三个是WebRTC
+  // 采集这一路自己的回声消除/降噪处理，不依赖InCallManager的通话模式
+  // 才能生效。去掉InCallManager这两行，只留WebRTC原生的音频约束，朗读
+  // 音频和麦克风监听就不会再互相抢音频会话。
   async function startHandsFreeVad() {
     // 真机反馈过的真实bug：react-native-webrtc/react-native-incall-manager
     // 这两个原生模块在Expo Go里不存在，require()这一步本身就会同步抛出
@@ -1007,7 +1021,6 @@ export default function ListenScreen({ route, navigation }) {
     // 点这个按钮应该优雅地提示"需要开发版本"，不是让整个屏幕崩掉。
     try {
       const { mediaDevices, RTCPeerConnection } = require('react-native-webrtc');
-      const InCallManager = require('react-native-incall-manager').default;
       if (Platform.OS === 'android') {
         const granted = await PermissionsAndroid.request(
           PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
@@ -1019,9 +1032,6 @@ export default function ListenScreen({ route, navigation }) {
           return;
         }
       }
-      InCallManager.start({ media: 'audio' });
-      InCallManager.setForceSpeakerphoneOn(true);
-      vadInCallManagerRef.current = InCallManager;
 
       const stream = await mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
@@ -1075,17 +1085,14 @@ export default function ListenScreen({ route, navigation }) {
     vadStreamRef.current?.getTracks().forEach((t) => t.stop());
     vadPc1Ref.current?.close();
     vadPc2Ref.current?.close();
-    vadInCallManagerRef.current?.stop();
     vadStreamRef.current = null;
     vadPc1Ref.current = null;
     vadPc2Ref.current = null;
-    vadInCallManagerRef.current = null;
     setHandsFreeStatus('');
   }
 
   // 免提开关变化时连接/断开——开关本身之外，退出这个屏幕（组件卸载）也
-  // 要确保断开，不能让WebRTC连接和InCallManager的通话音频模式在离开
-  // 听书页之后还占着，会影响App其它地方的正常音频行为。
+  // 要确保断开，不能让WebRTC连接在离开听书页之后还占着麦克风。
   useEffect(() => {
     if (handsFreeEnabled) {
       setHandsFreeStatus('连接中…');
