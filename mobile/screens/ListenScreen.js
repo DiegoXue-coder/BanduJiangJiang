@@ -214,7 +214,12 @@ function mergeParagraphsForNarration(paragraphs) {
 // @keyframes），这里用RN内置的Animated复刻，不引入额外动画库。三层脉冲
 // 环用不同的delay错开启动，效果是连续不断有环从中心扩散出去，不是三个
 // 环同步跳动。
-function ListenOrb() {
+// 2026-08-10：免提这一轮进行中，字幕区不是唯一的状态提示——光晕本身也要
+// 跟着换颜色/换节奏，用户确认过的预览稿（handsfree_flow_preview.html）
+// 里这个球是"正在聆听"变亮加快脉动、"AI正在回答"变成翠色的关键视觉线索
+// 之一，不只是装饰。stage不传或传''就是原来朗读中的默认样子，不影响
+// 手动打断那条流程（那边根本不传这个prop）。
+function ListenOrb({ stage }) {
   const breatheAnim = useRef(new Animated.Value(0)).current;
   const spinAnim = useRef(new Animated.Value(0)).current;
   const ring1 = useRef(new Animated.Value(0)).current;
@@ -222,10 +227,11 @@ function ListenOrb() {
   const ring3 = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
+    const breatheDuration = stage === 'listening' ? 550 : 1700; // "正在聆听"时脉动明显加快，跟预览稿的pulseFast节奏对齐
     const breathe = Animated.loop(
       Animated.sequence([
-        Animated.timing(breatheAnim, { toValue: 1, duration: 1700, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
-        Animated.timing(breatheAnim, { toValue: 0, duration: 1700, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
+        Animated.timing(breatheAnim, { toValue: 1, duration: breatheDuration, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
+        Animated.timing(breatheAnim, { toValue: 0, duration: breatheDuration, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
       ]),
     );
     const spin = Animated.loop(
@@ -256,10 +262,20 @@ function ListenOrb() {
       r2.stop();
       r3.stop();
     };
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stage]); // stage变了要用新的breatheDuration重新起一次循环，不然还是旧节奏
 
-  const orbScale = breatheAnim.interpolate({ inputRange: [0, 1], outputRange: [1, 1.04] });
+  // "正在聆听"时脉动幅度也跟着放大（1→1.22，比默认的1.04明显得多），
+  // 光是变快还不够醒目——这个数值跟预览稿pulseFast关键帧的1.22对齐。
+  const orbScale = breatheAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: stage === 'listening' ? [1, 1.22] : [1, 1.04],
+  });
   const orbitRotate = spinAnim.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] });
+  // 默认朗读中是ember橙；"AI正在回答"这一刻换成jade绿，跟字幕区回答文字
+  // 的颜色对上，"聆听"阶段沿用ember但配合上面更快更大的脉动已经够醒目，
+  // 不需要再单独换色，颜色变化太多反而分散注意力。
+  const orbColor = stage === 'replying' ? EMBER.jade : EMBER.ember;
 
   function renderPingRing(anim) {
     const ringScale = anim.interpolate({ inputRange: [0, 1], outputRange: [92 / 220, 1] });
@@ -275,7 +291,7 @@ function ListenOrb() {
       <Animated.View style={[orbStyles.orbit, { transform: [{ rotate: orbitRotate }] }]}>
         <View style={orbStyles.mote} />
       </Animated.View>
-      <Animated.View style={[orbStyles.orb, { transform: [{ scale: orbScale }] }]}>
+      <Animated.View style={[orbStyles.orb, { backgroundColor: orbColor, shadowColor: orbColor }, { transform: [{ scale: orbScale }] }]}>
         <IconDropletFilled color={EMBER.ink} size={30} />
       </Animated.View>
     </View>
@@ -1421,19 +1437,23 @@ export default function ListenScreen({ route, navigation }) {
               <View style={styles.mainStage}>
                 {inNarrating ? (
                   <>
-                    <ListenOrb />
+                    <ListenOrb stage={hfStage} />
                     <View style={styles.captionZone}>
                       {phase === 'loading-chapter' ? (
                         <ActivityIndicator color={EMBER.emberBright} />
                       ) : hfStage ? (
                         // 免提这一轮进行中——字幕区不显示原来在念的正文，改成
                         // 免提自己的状态展示，全程留在这个视图里，不跳转页面。
+                        // 用户在确认稿（handsfree_flow_preview.html）里明确
+                        // 认可的是"识别出的问题用橙色字、AI的回答用绿色字"这
+                        // 个颜色区分，不是两段文字用同一个颜色摆在一起——
+                        // 这是"感觉像对话"这句反馈里真正落地的那部分，照抄。
                         <>
                           <Text style={styles.hfStageLabel}>
-                            {hfStage === 'listening' ? '正在聆听…' : hfStage === 'thinking' ? 'AI正在思考…' : 'AI回答'}
+                            {hfStage === 'listening' ? '正在聆听…' : hfStage === 'thinking' ? 'AI正在思考…' : 'AI正在回答'}
                           </Text>
                           {hfStage !== 'listening' && !!hfText && (
-                            <Text style={styles.captionTextEl}>{hfText}</Text>
+                            <Text style={hfStage === 'replying' ? styles.hfAiText : styles.hfUserText}>{hfText}</Text>
                           )}
                           {hfStage === 'thinking' && (
                             <ActivityIndicator color={EMBER.emberBright} style={styles.hfThinkingSpin} />
@@ -1731,6 +1751,8 @@ const styles = StyleSheet.create({
   captionCountText: { fontSize: 10.5, color: EMBER.inkSoft, marginTop: 8, letterSpacing: 0.5 },
   hfStageLabel: { fontSize: 12.5, color: EMBER.emberBright, letterSpacing: 0.3, marginBottom: 10 },
   hfThinkingSpin: { marginTop: 12 },
+  hfUserText: { fontSize: 17, lineHeight: 27, textAlign: 'center', color: EMBER.emberBright, fontWeight: '600' },
+  hfAiText: { fontSize: 17, lineHeight: 27, textAlign: 'center', color: EMBER.jade },
 
   chatBody: { flexGrow: 1, padding: 16, gap: 14 },
   contextChip: {
