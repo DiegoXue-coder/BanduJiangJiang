@@ -499,6 +499,14 @@ class AskRequest(BaseModel):
 class AskResponse(BaseModel):
     answer: str
 
+class ClassifyIntentRequest(BaseModel):
+    text: str
+    bookTitle: str = ""
+    chapterTitle: str = ""
+
+class ClassifyIntentResponse(BaseModel):
+    isQuestion: bool
+
 class TTSRequest(BaseModel):
     text: str
     voice: str = "zh-CN-XiaoxiaoNeural"
@@ -2556,6 +2564,62 @@ async def ask_stream(req: AskRequest, request: Request, _=ExtAuth):
             "Connection": "keep-alive",
         },
     )
+
+@app.post("/ask/classify-intent", response_model=ClassifyIntentResponse)
+async def classify_intent(req: ClassifyIntentRequest, request: Request, _=ExtAuth):
+    """2026-08-10新增，手机端听书免提功能专用：VAD/端点检测判断"有人在说话"
+    之后，语音识别转写出一段文字，但这段文字未必是真的在向AI提问——可能是
+    咳嗽声/环境噪音被识别出的乱码、电视里的声音、旁边人的对话被麦克风一起
+    收了进去。用户明确要求"不相关就继续读，相关才停下来"，靠固定阈值的
+    音量检测做不到这一层语义判断，这里用一次极小的DeepSeek调用专门做"这句
+    话是不是在向AI提问/评论书本内容"的二分类，跟正式的/ask、/ask/stream
+    完全独立，不影响那两个接口已有行为（"只加不改"）。max_tokens给到很小
+    （5），只要模型吐"是"/"否"一个字，控制这一步额外增加的延迟和token成本，
+    不做流式（不需要）。
+    """
+    if not req.text.strip():
+        return ClassifyIntentResponse(isQuestion=False)
+
+    ip = _get_client_ip(request)
+    if not _check_rate_limit(ip):
+        raise HTTPException(status_code=429, detail="请求太频繁，请稍后再试")
+
+    user_ds_key = request.headers.get("x-deepseek-key", "").strip()
+    if user_ds_key:
+        ds = _make_ds(user_ds_key)
+    else:
+        allowed, _ = await _check_and_increment_free(ip)
+        if not allowed:
+            raise HTTPException(status_code=429, detail="今日免费次数已用完")
+        ds = _make_ds(os.environ.get("DEEPSEEK_API_KEY", ""))
+    if not ds:
+        raise HTTPException(status_code=401, detail="缺少 DeepSeek API Key")
+
+    book_part = f"《{req.bookTitle}》" if req.bookTitle else "这本书"
+    prompt = (
+        f"用户正在用听书App听{book_part}的朗读，麦克风语音识别捕捉到一句话："
+        f"「{req.text}」。请判断这句话是不是用户在向AI提问、或者在对书本内容"
+        f"发表评论/请求解释——而不是环境噪音、电视声音、旁人说话被误识别、"
+        f"或者跟听书这件事完全无关的内容。只回答一个字：是 或 否，不要任何"
+        f"其它文字。"
+    )
+    try:
+        resp = await asyncio.to_thread(
+            lambda: ds.chat.completions.create(
+                model="deepseek-v4-flash",
+                max_tokens=5,
+                temperature=0,
+                messages=[{"role": "user", "content": prompt}],
+                extra_body={"thinking": {"type": "disabled"}},
+            )
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        return ClassifyIntentResponse(isQuestion=raw.startswith("是"))
+    except Exception:
+        # 判断这一步本身失败（网络抖动/DeepSeek侧问题），保守当成"是在提问"，
+        # 交给下一步真正的问答逻辑处理——这个接口是体验优化，不能因为它出错
+        # 反而把用户真实的问题拦掉。
+        return ClassifyIntentResponse(isQuestion=True)
 
 @app.post("/tts")
 async def tts(req: TTSRequest, _=ExtAuth):

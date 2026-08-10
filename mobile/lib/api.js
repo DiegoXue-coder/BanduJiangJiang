@@ -301,6 +301,25 @@ export function streamAsk({ context, question, style = 'simple', history = [] },
   return () => xhr.abort();
 }
 
+// 2026-08-10新增：听书免提功能专用——语音识别转写出一段文字后，先问一下
+// 这段话是不是真的在向AI提问，不是的话（环境噪音/电视声/别人说话被误识别）
+// 就不打扰朗读。网络失败/接口异常时保守当成"是提问"返回true，交给正式的
+// 问答流程处理，不能因为这一步失败就把用户真实的问题拦掉。
+export async function classifyIntent(text, bookTitle, chapterTitle) {
+  try {
+    const res = await fetch(`${API_BASE}/ask/classify-intent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-extension-token': getExtToken() },
+      body: JSON.stringify({ text, bookTitle, chapterTitle }),
+    });
+    if (!res.ok) return true;
+    const data = await res.json();
+    return !!data.isQuestion;
+  } catch (e) {
+    return true;
+  }
+}
+
 // /tts/play 这个接口本身不带鉴权（跟 /app/books/{id}/file.epub 同理，是要
 // 直接当音频播放地址用的，expo-av 不会带自定义请求头）。
 export function getTtsPlayUrl(text, voice = 'zh-CN-XiaoxiaoNeural', rate = '+0%') {

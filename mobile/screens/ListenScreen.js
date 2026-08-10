@@ -10,7 +10,7 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, TextInput,
   ActivityIndicator, ScrollView, Platform, KeyboardAvoidingView, Switch,
-  PermissionsAndroid, Animated, Easing, Modal,
+  Animated, Easing, Modal,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Audio, InterruptionModeIOS, InterruptionModeAndroid } from 'expo-av';
@@ -24,7 +24,7 @@ import {
 } from '@tabler/icons-react-native';
 import {
   getBookContext, getChapterText, getTtsPlayUrl, transcribeAudio,
-  streamAsk, saveHighlight, saveQaHistory,
+  streamAsk, saveHighlight, saveQaHistory, classifyIntent,
 } from '../lib/api';
 
 // 接替1号任务1：听书界面视觉改造，精确规格来自决策层定稿的设计稿
@@ -99,47 +99,55 @@ function isContinueVoiceCommand(text) {
   return CONTINUE_VOICE_PATTERNS.some((p) => t.includes(p));
 }
 
-// 方案B：免提打断——朗读时持续开麦监听音量（复用AEC技术验证spike里已经
-// 真机验证过的react-native-webrtc+react-native-incall-manager这套组合），
-// 检测到用户开始说话就自动触发跟手动按"打断"完全一样的流程，不需要碰
-// 屏幕。阈值和轮询间隔直接沿用WebrtcAecTestScreen.js里用户真机实测校准
-// 过的数值（安静~0.0003、说话3000~5000，量级差了一千万倍，不是W3C规范
-// 说的0~1范围，这个库在安卓上就是这么实现的，但完全不影响用相对大小做
-// 判断）——两处常量如果以后要调，记得两个文件一起改。
+// 2026-08-10方案B第三版重写：前两版（react-native-webrtc读audioLevel）
+// 暴露出两个根子问题，用户明确要求这次从架构上解决，不是再打补丁：
+// ①react-native-webrtc的audioLevel在不同设备上量级完全不统一（真机1.0
+// 量级、模拟器0.03量级，差了四五个数量级），说明这条路径本身不可靠；
+// ②固定音量阈值分不清"人在说话"和"任何响动"（咳嗽/电视/别人说话），
+// 而且WebRTC那路流一直占着麦克风，跟expo-av的Audio.Recording抢占硬件，
+// 这是之前"录音启动失败"真实bug的根因，上一版靠"用之前先断开"绕开了，
+// 治标不治本。
 //
-// 2026-08-10安卓模拟器本地测试实测发现：同样是audioLevel这个字段，在
-// 模拟器+host-audio-passthrough这条链路上读到的量级完全不一样——说话时
-// 峰值只有0.03~0.19，安静时~0.001，落在W3C规范定义的标准0~1范围内，
-// 跟2号真机上测到的"数千"量级差了四五个数量级。真机和模拟器返回的量级
-// 不统一，说明这个阈值写死成一个绝对数字本身不是稳的方案（长期该怎么改
-// 成相对噪声基线自适应，是2号负责的免提架构范围，这里不擅自重新设计），
-// 这次先按注释形式明确标注两套数值，用哪套取决于跑在真机还是模拟器上，
-// 只是为了让本地模拟器环境能先把整条链路测通，不是最终方案。
-const VAD_POLL_INTERVAL_MS = 300;
-// 1号注释里留的话："仅用于本地模拟器测试环境，回真机测试记得改回1.0"——
-// 这次改动就是要把免提这条线正式修好、准备再推一次真机（用户朋友的安卓
-// 实体机），改回真机校准值。0.03这个模拟器量级留在上面的注释里当参考，
-// 不再是代码里生效的值——下次要在模拟器上继续测，从注释里翻出来改回去
-// 就行，不用重新测一遍。
-const VAD_SPEECH_THRESHOLD = 1.0;
-// 连续多少次轮询都超过阈值才算"真的开始说话"（而不是一声咳嗽/物体碰撞
-// 这种瞬间噪音）——2次×300ms＝大约600ms持续声音才触发，真人开口说话
-// 通常不会只响一瞬间就停，短促噪音大概率撑不到600ms。
-const VAD_SUSTAIN_POLLS = 2;
+// 这版换成完全不用react-native-webrtc/react-native-incall-manager这条
+// 依赖——环境监听和实际提问录音统统改用expo-av的Audio.Recording自带的
+// metering（isMeteringEnabled+setOnRecordingStatusUpdate，字段范围是
+// 标准的-160~0 dBFS，expo-av官方文档定义的固定量纲，不是某个库自己的
+// 非标准实现，不会再出现"不同设备/不同库量级不统一"这类问题）。整个
+// 免提功能自始至终只有expo-av这一个麦克风消费者，从设计上就不可能再有
+// "两路同时抢麦克风"这类问题，不需要靠"用之前手动断开"这种时序技巧来
+// 保证。副作用是也不再需要"require react-native-webrtc失败要try/catch"
+// 这类兼容代码——expo-av是标准Expo SDK的一部分，Expo Go里也能跑。
+const HF_METER_INTERVAL_MS = 120; // metering回调间隔，够快能及时发现说话开始/结束，又不会太密集耗电
+// dBFS量纲下这个阈值需要真机校准（跟之前的1.0是完全不同的量纲，不能
+// 类比），先给一个业内VAD教程常见的经验起点，真机验证后如果偏松/偏紧
+// 再调整——这一步没有真机数据支撑，如实标注是估计值不是校准值。
+const HF_SPEECH_DB = -35;
+// 连续多久超过阈值才算"真的开始说话"（不是一声咳嗽），跟上一版
+// VAD_SUSTAIN_POLLS×VAD_POLL_INTERVAL_MS(~600ms)是同一个用途，这版
+// 调快到300ms——因为触发之后紧接着是"动态录到用户说完为止"，不再是
+// 固定长窗口，稍微灵敏一点换来的是响应更快，代价（误触发）比以前小，
+// 因为下面新加的"是不是真的在提问"这道语义过滤会兜住多数误触发。
+const HF_SPEECH_SUSTAIN_MS = 300;
+// 说话开始后，连续多久没检测到声音就认为"这句说完了"——不再是用户明确
+// 反对的"固定6秒"，改成真的等用户说完。1.1秒是常见语音助手产品的经验
+// 区间（太短容易在自然停顿处提前切断，太长等待感明显）。
+const HF_SILENCE_END_MS = 1100;
+// 触发之后这么久都没检测到真正超过阈值的声音，判定是这次触发本身就是
+// 误判（比如一声响动够格触发但后面没人接着说话），直接放弃这一轮，不用
+// 傻等到最大时长上限。
+const HF_NO_SPEECH_TIMEOUT_MS = 4000;
+// 安全上限：防止识别一直不停（比如背景持续有人在说话），录到这个时长
+// 强制截止，不会无限录下去。
+const HF_MAX_UTTERANCE_MS = 25000;
 
-// 2026-08-10真机反馈：免提点了之后直接跳转对话页、说的话没被转写、随后
-// 手动点麦克风还报"录音启动失败"——排查代码确认根因是handleAutoInterrupt
-// 复用了手动打断那套逻辑（跳转phase='paused'+方案A的startAutoListen），
-// 而免提自己的WebRTC getUserMedia流全程占着麦克风不释放（只有关掉免提
-// 开关或退出页面才stopHandsFreeVad），安卓上expo-av的Audio.Recording
-// 没法在WebRTC还占着麦克风的时候再开一路，两边抢同一份硬件资源。
-// 用户同时明确要求：免提这条交互线必须完全独立于手动"打断"那套聊天气泡
-// 流程，不共用handleInterrupt/startAutoListen/conversation这些状态，
-// 也不能跳出朗读字幕这个视图。下面这套hf*函数和状态是专门为免提新写的，
-// 跟方案A/手动打断的代码除了都调用同一个transcribeAudio/streamAsk这些
-// 底层API之外，没有其它共享状态。
-const HF_LISTEN_WINDOW_MS = 6000; // 免提是主动发问，给比方案A"继续"确认窗口(4秒)更长的时间说完整问题
-const HF_FOLLOWUP_WINDOW_MS = 4000; // AI回答完之后的追问/继续窗口，跟方案A的等待窗口时长保持一致
+// 免提这条交互线始终完全独立于手动"打断"那套聊天气泡流程，不共用
+// handleInterrupt/startAutoListen/conversation这些状态，也不跳出朗读
+// 字幕这个视图。下面这套hf*函数和状态是专门为免提写的，跟方案A/手动
+// 打断的代码除了都调用同一个transcribeAudio/streamAsk这些底层API之外，
+// 没有其它共享状态。触发之后"听问题"和AI回答完之后"听追问/继续"用的
+// 是同一套动态录音逻辑（hfRecordUntilSilence），不再像早期版本那样为
+// 两个场景分别配一个固定时长——现在录音本身就是动态结束的，没必要再
+// 区分"第一次给几秒、追问给几秒"。
 
 // 章节标题精确匹配"目录"就跳过不朗读——已有真实案例证明目录会被当成
 // 普通章节混进朗读队列（IMG_1564排版反馈截图），不追求覆盖所有变体，
@@ -431,27 +439,27 @@ export default function ListenScreen({ route, navigation }) {
   const autoListenRef = useRef(false);
   const autoListenTimerRef = useRef(null);
 
-  // 方案B免提打断用的WebRTC连接状态，命名前缀vad跟AEC测试页的命名保持
-  // 一致，方便对照两处代码。
-  const vadPc1Ref = useRef(null);
-  const vadPc2Ref = useRef(null);
-  const vadStreamRef = useRef(null);
-  const vadPollTimerRef = useRef(null);
-  const vadSustainCountRef = useRef(0); // 连续超过阈值的轮询次数
-  const vadSpeakingRef = useRef(false); // 已经触发过一次打断、还没跌回安静，避免同一段话反复触发
-  // 轮询定时器是startHandsFreeVad调用那一刻创建的，之后每次触发都要调用
-  // "当前这次渲染"的startHandsFreeTurn（读到最新的phase/handsFreeMuted等
-  // 状态）——跟方案A同样的闭包过期问题，同样的解法：用一个每次渲染都更新
-  // 的ref间接调用，不直接把函数引用交给setInterval。
+  // 免提"环境监听"这一路的expo-av录音——不产出任何要用的音频内容，只是
+  // 借Audio.Recording的metering回调持续读音量，判断"有没有人开始说话"。
+  // 触发之后会整个停掉（见startHandsFreeTurn），换一路全新的录音专门
+  // 录这句话的内容，两路录音不会同时存在，从设计上排除了"两个消费者抢
+  // 同一个麦克风"的可能，不需要再靠时序技巧保证。
+  const hfAmbientRecordingRef = useRef(null);
+  const hfAmbientSustainCountRef = useRef(0); // 连续超过阈值的metering回调次数
+  const hfAmbientSpeakingRef = useRef(false); // 已经触发过一次、还没跌回安静，避免同一段话反复触发
+  // 环境监听的metering回调是startHandsFreeAmbient调用那一刻创建的，之后
+  // 每次判定"开始说话"都要调用"当前这次渲染"的startHandsFreeTurn（读到
+  // 最新的phase/handsFreeMuted等状态）——跟方案A同样的闭包过期问题，同样
+  // 的解法：用一个每次渲染都更新的ref间接调用，不直接把函数引用交给回调。
   const autoInterruptRef = useRef(null);
 
   // 免提独立状态机自己的一套ref，不复用recordingRef/autoListenRef等手动
   // 打断/方案A的引用——hfActiveRef是这一轮的"总开关"，任何一步异步操作
   // 回来发现它变成false都要立刻放弃（说明用户中途关了免提或离开了页面）。
   const hfActiveRef = useRef(false);
-  const hfRecordingRef = useRef(null);
-  const hfListenTimerRef = useRef(null);
-  const hfListenResolveRef = useRef(null); // 让cancelHandsFreeTurn能立刻唤醒hfRecordOnce里还在等待的Promise，不用干等到windowMs超时才发现被取消了
+  const hfRecordingRef = useRef(null); // 正式录这一句话内容的录音（区别于上面的环境监听录音）
+  const hfListenTimerRef = useRef(null); // 兜底的硬性超时，防止metering回调异常时无限录下去
+  const hfListenResolveRef = useRef(null); // 让cancelHandsFreeTurn能立刻唤醒hfRecordUntilSilence里还在等待的Promise，不用干等到超时才发现被取消了
   const hfAbortRef = useRef(null);
 
   async function stopSound() {
@@ -724,6 +732,11 @@ export default function ListenScreen({ route, navigation }) {
     if (phase !== 'playing' && phase !== 'loading-chapter') return;
     epochRef.current += 1;
     stopSound();
+    // 免提总开关开着的话，环境监听那路expo-av录音一直在跑——用户改用手动
+    // "打断"按钮进对话视图，接下来手动点麦克风（toggleRecording）也是
+    // 开一路expo-av录音，两路会抢同一份麦克风，跟免提自己触发那条路径
+    // 是同一类问题，这里对称处理：手动打断也要先放开环境监听的麦克风。
+    if (handsFreeEnabled) stopHandsFreeAmbient();
     const { chapterIdx, paragraphIdx } = posRef.current;
     const chapter = chaptersRef.current[chapterIdx];
     const paragraphs = paragraphCacheRef.current[chapter?.id] || [];
@@ -781,24 +794,10 @@ export default function ListenScreen({ route, navigation }) {
     })();
   }
 
-  // 2026-08-10重写：VAD轮询检测到用户开始说话时调用的入口。老版本这里
-  // 直接复用handleInterrupt（跳转到聊天气泡对话页）+startAutoListen
-  // （方案A那套expo-av录音），真机反馈两个问题：(1)体验上不符合用户
-  // 要求——免提应该停留在朗读字幕视图，不该跳转；(2)技术上有真实bug——
-  // handleInterrupt跳转之后，免提自己的WebRTC连接（vadPc1/vadPc2 +
-  // getUserMedia流）并没有被关掉，只有关闭免提总开关或退出页面才会
-  // stopHandsFreeVad，于是WebRTC和接下来expo-av的Audio.Recording同时
-  // 抢占安卓的麦克风硬件，表现成"这次没转写成功"+"手动再点麦克风报录音
-  // 启动失败"。跟1号同一天在模拟器上排查出的InCallManager会切通话音频
-  // 模式那个bug是两个独立根因，两个都要解决免提才能真正可用——那个已经
-  // 由1号修掉（去掉了InCallManager.start），这里补上剩下这半个。
-  //
-  // 新逻辑：不再touch handleInterrupt/startAutoListen/conversation/
-  // phase这些手动打断链路的任何状态，改成下面这套完全独立的hf*状态机——
-  // 触发时先stopHandsFreeVad()彻底放开麦克风，再用expo-av录一段，识别、
-  // 问AI、播放回答全程只更新hfStage/hfText，字幕区域（inNarrating分支）
-  // 根据hfStage切换显示内容，phase本身始终停在'playing'不变。整轮结束后
-  // 才重新playFrom恢复朗读、重新startHandsFreeVad恢复环境监听。
+  // 环境监听时metering回调判定"开始说话"之后调用的入口——停掉环境监听那路
+  // 录音（内容不要，只是刚才拿来测音量），马上开一路全新的录音正式捕捉
+  // 这句话，全程留在朗读字幕视图（phase不变，不跳转），跟手动"打断"那套
+  // 聊天气泡流程完全独立。
   function startHandsFreeTurn() {
     if (phase !== 'playing') return;
     if (handsFreeMuted) return;
@@ -807,41 +806,66 @@ export default function ListenScreen({ route, navigation }) {
     epochRef.current += 1;
     (async () => {
       await stopSound();
-      stopHandsFreeVad(); // 让出麦克风给下面expo-av的Audio.Recording用
+      await stopHandsFreeAmbient(); // 等它真的放开麦克风，再开正式录音那一路，两路录音先后而不是同时存在
       setHfStage('listening');
       setHfText('');
-      const text = await hfRecordOnce(HF_LISTEN_WINDOW_MS);
-      if (!hfActiveRef.current) return;
-      if (!text || isContinueVoiceCommand(text)) {
-        finishHandsFreeTurn();
-        return;
-      }
-      setHfText(text);
-      setHfStage('thinking');
-      await askHandsFree(text);
+      await hfListenTurnLoop();
     })();
   }
   useEffect(() => { autoInterruptRef.current = startHandsFreeTurn; });
 
-  // 录一段固定窗口时长的音频并识别成文字——免提"听问题"和"回答完等继续/
-  // 追问"这两处都要用同一套逻辑，抽出来共用。没有用真正的语音端点检测来
-  // 判断用户说完了没有（现有STT是一次性上传识别的接口，不是流式的，做不到
-  // 真正的实时逐字转写），是固定窗口这个简化——跟方案A的AUTO_LISTEN_WINDOW_MS
-  // 是同一类已经如实记录过的简化，不是没考虑过。
-  async function hfRecordOnce(windowMs) {
+  // 动态端点检测录音：不再是固定时长——开始录之后持续读metering，一旦
+  // 检测到真的有声音过、之后又连续安静够久（HF_SILENCE_END_MS），就认为
+  // "这句说完了"，停止并送去识别；如果从头到尾都没检测到真正的声音（说明
+  // 触发本身就是误判），HF_NO_SPEECH_TIMEOUT_MS之后直接放弃，不用户等到
+  // 天长地久；HF_MAX_UTTERANCE_MS是防止一直有声音（比如背景持续有人在
+  // 说话）导致录音停不下来的安全上限。全程没检测到过真正的声音的话，
+  // 直接跳过transcribeAudio这次调用（没必要为了纯噪音/静音去请求一次
+  // 语音识别）。
+  async function hfRecordUntilSilence() {
     try {
       const { status: perm } = await Audio.getPermissionsAsync();
       if (perm !== 'granted') return null;
       await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
       const recording = new Audio.Recording();
-      await recording.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
+      let speechEverDetected = false;
+      let silenceMs = 0;
+      let elapsedMs = 0;
+      let settled = false;
+      const donePromise = new Promise((resolve) => {
+        hfListenResolveRef.current = () => {
+          if (settled) return;
+          settled = true;
+          resolve();
+        };
+      });
+      recording.setProgressUpdateInterval(HF_METER_INTERVAL_MS);
+      recording.setOnRecordingStatusUpdate((status) => {
+        if (!status.isRecording) return;
+        elapsedMs += HF_METER_INTERVAL_MS;
+        const db = typeof status.metering === 'number' ? status.metering : -160;
+        if (db >= HF_SPEECH_DB) {
+          speechEverDetected = true;
+          silenceMs = 0;
+        } else {
+          silenceMs += HF_METER_INTERVAL_MS;
+        }
+        const shouldStop = (speechEverDetected && silenceMs >= HF_SILENCE_END_MS)
+          || (!speechEverDetected && elapsedMs >= HF_NO_SPEECH_TIMEOUT_MS)
+          || elapsedMs >= HF_MAX_UTTERANCE_MS;
+        if (shouldStop) hfListenResolveRef.current?.();
+      });
+      await recording.prepareToRecordAsync({ ...Audio.RecordingOptionsPresets.HIGH_QUALITY, isMeteringEnabled: true });
       await recording.startAsync();
       hfRecordingRef.current = recording;
-      await new Promise((resolve) => {
-        hfListenResolveRef.current = resolve;
-        hfListenTimerRef.current = setTimeout(resolve, windowMs);
-      });
-      hfListenTimerRef.current = null;
+      // 双保险：万一某些机型metering回调不触发/触发不及时，硬性上限兜底，
+      // 不会无限录下去。
+      hfListenTimerRef.current = setTimeout(() => { hfListenResolveRef.current?.(); }, HF_MAX_UTTERANCE_MS + 1500);
+      await donePromise;
+      if (hfListenTimerRef.current) {
+        clearTimeout(hfListenTimerRef.current);
+        hfListenTimerRef.current = null;
+      }
       hfListenResolveRef.current = null;
       if (!hfActiveRef.current) return null; // 等待期间被取消（关免提/离开页面），录音已经在cancelHandsFreeTurn里处理，这里直接放弃
       const rec = hfRecordingRef.current;
@@ -850,6 +874,7 @@ export default function ListenScreen({ route, navigation }) {
       await rec.stopAndUnloadAsync();
       const uri = rec.getURI();
       await Audio.setAudioModeAsync({ allowsRecordingIOS: false, playsInSilentModeIOS: true });
+      if (!speechEverDetected) return null; // 全程没有真的检测到声音，不浪费一次识别请求
       const text = await transcribeAudio(uri, FileSystem.uploadAsync, FileSystem.FileSystemUploadType);
       return (text || '').trim();
     } catch (e) {
@@ -857,10 +882,41 @@ export default function ListenScreen({ route, navigation }) {
     }
   }
 
-  // 问AI+念回答；回答念完不是直接结束这一轮，而是跟方案A一样开一个短暂
-  // 的追问/继续窗口——用户明确要求"用户觉得没问题、说可以继续了，AI才
-  // 继续讲"，这里用"安静或说继续类的词"当作"没问题了"，识别到别的内容
-  // 就当成追问、递归再问一轮，不会把用户晾在这里出不来。
+  // 录一次+决定接下来怎么办：免提触发之后"听问题"、和AI回答完之后"听
+  // 追问/继续"，都是同一套判断逻辑，抽出来共用，不用再为两个场景分别写
+  // 一遍。识别到"继续"类指令或者压根没识别出内容——恢复朗读；识别出内容
+  // 但AI判断这不是真的在向它提问（多半是环境噪音/电视声/别人说话被误
+  // 识别）——用户明确要求"不相关就继续读"，同样恢复朗读，不弹出回答去
+  // 打扰；只有真的是在提问，才进入askHandsFree真正去问AI。
+  async function hfListenTurnLoop() {
+    const text = await hfRecordUntilSilence();
+    if (!hfActiveRef.current) return;
+    if (!text || isContinueVoiceCommand(text)) {
+      finishHandsFreeTurn();
+      return;
+    }
+    setHfText(text);
+    setHfStage('thinking');
+    const chapter = chaptersRef.current[posRef.current.chapterIdx];
+    let relevant = true;
+    try {
+      relevant = await classifyIntent(text, bookTitle, chapter?.title || '');
+    } catch (e) {
+      relevant = true; // 判断这一步本身失败，保守当成是提问，交给下面真正的问答逻辑处理
+    }
+    if (!hfActiveRef.current) return;
+    if (!relevant) {
+      finishHandsFreeTurn();
+      return;
+    }
+    await askHandsFree(text);
+  }
+
+  // 问AI+念回答；回答念完不是直接结束这一轮，而是跟方案A一样开一个追问/
+  // 继续窗口（复用hfListenTurnLoop同一套判断）——用户明确要求"用户觉得
+  // 没问题、说可以继续了，AI才继续讲"，这里用"安静或说继续类的词"当作
+  // "没问题了"，识别到别的相关内容就当成追问、递归再问一轮，不会把用户
+  // 晾在这里出不来。
   async function askHandsFree(question) {
     if (!hfActiveRef.current) return;
     const chapter = chaptersRef.current[posRef.current.chapterIdx];
@@ -910,20 +966,12 @@ export default function ListenScreen({ route, navigation }) {
     if (!hfActiveRef.current) return;
     setHfStage('listening');
     setHfText('');
-    const followup = await hfRecordOnce(HF_FOLLOWUP_WINDOW_MS);
-    if (!hfActiveRef.current) return;
-    if (followup && !isContinueVoiceCommand(followup)) {
-      setHfText(followup);
-      setHfStage('thinking');
-      await askHandsFree(followup);
-      return;
-    }
-    finishHandsFreeTurn();
+    await hfListenTurnLoop();
   }
 
-  // 免提这一轮结束（不管是没听到问题、用户说继续、还是问答播完的追问窗口
-  // 安静下来）——恢复朗读，并且如果免提总开关还开着、没被静音，重新建一次
-  // WebRTC连接接回环境监听。
+  // 免提这一轮结束（不管是没听到问题、判断不相关、用户说继续、还是问答
+  // 播完的追问窗口安静下来）——恢复朗读，并且如果免提总开关还开着、没被
+  // 静音，重新开一路环境监听录音接回。
   function finishHandsFreeTurn() {
     hfActiveRef.current = false;
     setHfStage('');
@@ -932,13 +980,13 @@ export default function ListenScreen({ route, navigation }) {
     epochRef.current += 1;
     playFrom(chapterIdx, paragraphIdx, epochRef.current);
     if (handsFreeEnabled && !handsFreeMuted) {
-      setHandsFreeStatus('连接中…');
-      startHandsFreeVad();
+      setHandsFreeStatus('免提监听中');
+      startHandsFreeAmbient();
     }
   }
 
   // 中途取消这一轮免提对话（用户关掉免提总开关、或者离开听书页）——跟
-  // finishHandsFreeTurn的区别是不需要恢复朗读/重连WebRTC，调用方
+  // finishHandsFreeTurn的区别是不需要恢复朗读/重连环境监听，调用方
   // （handsFreeEnabled变化的effect、组件卸载清理）自己会处理后续。
   function cancelHandsFreeTurn() {
     if (!hfActiveRef.current) return;
@@ -948,7 +996,7 @@ export default function ListenScreen({ route, navigation }) {
       hfListenTimerRef.current = null;
     }
     if (hfListenResolveRef.current) {
-      hfListenResolveRef.current(); // 唤醒hfRecordOnce里还在await的Promise，不然它要等到windowMs自然超时才会检查到hfActiveRef已经变false
+      hfListenResolveRef.current(); // 唤醒hfRecordUntilSilence里还在await的Promise，不然它要等到超时才会检查到hfActiveRef已经变false
       hfListenResolveRef.current = null;
     }
     hfAbortRef.current?.();
@@ -1068,6 +1116,15 @@ export default function ListenScreen({ route, navigation }) {
     setConversation([]); // 回到听书主线，这一轮打断的对话线结束
     const { chapterIdx, paragraphIdx } = posRef.current;
     playFrom(chapterIdx, paragraphIdx, epochRef.current);
+    // 对应handleInterrupt里为了让出麦克风暂停的环境监听，回到朗读时如果
+    // 免提总开关还开着（没被静音）就接回去——不加!hfAmbientRecordingRef.current
+    // 这层判断的话，理论上不会有正在运行的环境监听（只有handleInterrupt
+    // 会停它，进这里之前必然经过那一步），但多一层判断防止万一重复触发
+    // 造成两路环境监听同时存在。
+    if (handsFreeEnabled && !handsFreeMuted && !hfAmbientRecordingRef.current) {
+      setHandsFreeStatus('免提监听中');
+      startHandsFreeAmbient();
+    }
   }
 
   function handleStopListening() {
@@ -1195,162 +1252,69 @@ export default function ListenScreen({ route, navigation }) {
     }
   }
 
-  // 方案B：每300ms读一次pc1（发送本地麦克风流那一端）的统计数据，找音量
-  // 字段——跟WebrtcAecTestScreen.js里验证过的做法一致，阈值/轮询间隔也是
-  // 同一套真机校准过的数值。连续VAD_SUSTAIN_POLLS次超过阈值才算真的开始
-  // 说话（防止瞬间噪音误触发），触发后要等音量先跌回阈值以下才会重新
-  // 允许下一次触发，不会同一段话持续说话期间反复触发好几次打断。
-  function startVadPolling(pc) {
-    stopVadPollingOnly();
-    vadSustainCountRef.current = 0;
-    vadSpeakingRef.current = false;
-    vadPollTimerRef.current = setInterval(async () => {
-      try {
-        const stats = await pc.getStats();
-        let level = null;
-        for (const report of stats.values()) {
-          if (typeof report.audioLevel === 'number') { level = report.audioLevel; break; }
-        }
-        console.log(`[听书诊断] VAD level=${level}`);
-        if (level === null) return;
-        if (level >= VAD_SPEECH_THRESHOLD) {
-          vadSustainCountRef.current += 1;
-          console.log(`[听书诊断] VAD超阈值 level=${level} sustainCount=${vadSustainCountRef.current} vadSpeaking=${vadSpeakingRef.current} hasAutoInterruptFn=${!!autoInterruptRef.current}`);
-          if (!vadSpeakingRef.current && vadSustainCountRef.current >= VAD_SUSTAIN_POLLS) {
-            vadSpeakingRef.current = true;
-            console.log('[听书诊断] VAD判定为真的在说话，调用autoInterruptRef');
-            autoInterruptRef.current?.();
-          }
-        } else {
-          vadSustainCountRef.current = 0;
-          vadSpeakingRef.current = false;
-        }
-      } catch (e) {
-        console.log(`[听书诊断] VAD轮询单次异常：${e.message}`);
-        // 单次读取失败不影响下一轮轮询，不打断听书体验，也不弹提示
+  // 环境监听：一路持续跑的expo-av录音，只借它的metering回调读音量，
+  // 内容本身不要（说话真的被检测到时，这路录音会被整个停掉丢弃，见
+  // startHandsFreeTurn）。连续HF_SPEECH_SUSTAIN_MS这么久都超过阈值才算
+  // "真的开始说话"（防止瞬间噪音误触发），触发后要等音量先跌回阈值以下
+  // 才会重新允许下一次触发。
+  function handleAmbientMeterUpdate(status) {
+    if (!status.isRecording || typeof status.metering !== 'number') return;
+    if (status.metering >= HF_SPEECH_DB) {
+      hfAmbientSustainCountRef.current += 1;
+      if (!hfAmbientSpeakingRef.current
+          && hfAmbientSustainCountRef.current * HF_METER_INTERVAL_MS >= HF_SPEECH_SUSTAIN_MS) {
+        hfAmbientSpeakingRef.current = true;
+        autoInterruptRef.current?.();
       }
-    }, VAD_POLL_INTERVAL_MS);
-  }
-
-  function stopVadPollingOnly() {
-    if (vadPollTimerRef.current) {
-      clearInterval(vadPollTimerRef.current);
-      vadPollTimerRef.current = null;
+    } else {
+      hfAmbientSustainCountRef.current = 0;
+      hfAmbientSpeakingRef.current = false;
     }
   }
 
-  // 方案B：开启免提打断——沿用AEC技术验证spike里验证过的连接方式（本机
-  // 内部pc1↔pc2回环，不需要真实信令服务器），跟AEC测试页唯一的关键区别：
-  // pc2收到的远端音轨要静音（track.enabled=false），不然react-native-webrtc
-  // 会自动把这条音轨路由到设备当前音频输出播放出来（AEC测试页就是靠这个
-  // 判断有没有回声），免提打断场景绝对不能让用户自己的说话声/环境声被
-  // 循环播出来变成刺耳的实时回音——这里只是要拿一个真正建立连接的
-  // RTCPeerConnection来读音量统计，不需要真的听到这条音轨内容。
-  //
-  // 2026-08-10真机反馈坐实了续十二里2号自己标注过的核心未验证风险：
-  // 一开免提，朗读直接没声音、只顾着一直录音。根因是InCallManager.start()
-  // 会把安卓整个AudioManager切到MODE_IN_COMMUNICATION（打电话那种通话
-  // 音频路由），这个模式和expo-av播放TTS用的正常媒体流（STREAM_MUSIC）
-  // 互斥，系统会把媒体流路由让给"通话"——这不是"两边偶尔打架"，是这个
-  // API本身的设计就是"进这个模式=这台设备现在在打电话"，音乐/媒体播放
-  // 天然要让路。AEC测试页当初引入InCallManager是为了测试场景本身需要
-  // （外放播报+录自己的回声，强制走通话路由能拿到更强的AEC效果），但
-  // 这里的真实场景是"边听书边监听说话"，不是模拟通话，根本不需要切换
-  // 系统音频模式——getUserMedia的audio constraints已经单独请求了
-  // echoCancellation/noiseSuppression/autoGainControl，这三个是WebRTC
-  // 采集这一路自己的回声消除/降噪处理，不依赖InCallManager的通话模式
-  // 才能生效。去掉InCallManager这两行，只留WebRTC原生的音频约束，朗读
-  // 音频和麦克风监听就不会再互相抢音频会话。
-  async function startHandsFreeVad() {
-    // 真机反馈过的真实bug：react-native-webrtc/react-native-incall-manager
-    // 这两个原生模块在Expo Go里不存在，require()这一步本身就会同步抛出
-    // "tried to access a native module that doesn't exist"——之前只把
-    // InCallManager.start()往后这段包进了try/catch，require()调用本身
-    // 留在try块外面，点免提按钮直接触发一个没被catch住的异常，在RN里
-    // 表现成红屏"Uncaught Error"。跟WebrtcAecTestScreen.js当初"顶层
-    // 静态import导致整个App崩溃"是同一类问题的变种——这次不是顶层
-    // import（已经用运行时require规避了那次教训），但require()本身
-    // 抛出的异常同样必须包进try/catch，不能假设"用了运行时require就
-    // 天然安全"。改成try包住从require()开始的全部内容，Expo Go环境下
-    // 点这个按钮应该优雅地提示"需要开发版本"，不是让整个屏幕崩掉。
+  // 开启免提总开关——起一路expo-av录音专门用来测环境音量（内容不要）。
+  // 不再依赖react-native-webrtc/react-native-incall-manager，expo-av是
+  // 标准Expo SDK的一部分，不需要开发版本/dev client就能跑，Expo Go里
+  // 也应该能用（跟手动打断那条录音路径用的是同一个底层能力）。
+  async function startHandsFreeAmbient() {
     try {
-      const { mediaDevices, RTCPeerConnection } = require('react-native-webrtc');
-      if (Platform.OS === 'android') {
-        const granted = await PermissionsAndroid.request(
-          PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
-          { title: '麦克风权限', message: '免提打断需要持续访问麦克风，用来判断你有没有在说话', buttonPositive: '允许' },
-        );
-        if (granted !== PermissionsAndroid.RESULTS.GRANTED) {
-          setHandsFreeStatus('麦克风权限被拒绝，免提打断无法开启');
-          setHandsFreeEnabled(false);
-          return;
-        }
+      const { status: perm } = await Audio.requestPermissionsAsync();
+      if (perm !== 'granted') {
+        setHandsFreeStatus('麦克风权限被拒绝，免提打断无法开启');
+        setHandsFreeEnabled(false);
+        return;
       }
-
-      const stream = await mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-      });
-      vadStreamRef.current = stream;
-
-      const pc1 = new RTCPeerConnection({});
-      const pc2 = new RTCPeerConnection({});
-      vadPc1Ref.current = pc1;
-      vadPc2Ref.current = pc2;
-      stream.getTracks().forEach((track) => pc1.addTrack(track, stream));
-
-      pc1.addEventListener('icecandidate', (e) => {
-        if (e.candidate) pc2.addIceCandidate(e.candidate).catch(() => {});
-      });
-      pc2.addEventListener('icecandidate', (e) => {
-        if (e.candidate) pc1.addIceCandidate(e.candidate).catch(() => {});
-      });
-      pc2.addEventListener('track', (e) => {
-        if (e.track) e.track.enabled = false; // 静音远端播放，见上面函数注释
-      });
-      pc2.addEventListener('iceconnectionstatechange', () => {
-        if (pc2.iceConnectionState === 'connected' || pc2.iceConnectionState === 'completed') {
-          setHandsFreeStatus('免提监听中');
-          startVadPolling(pc1);
-        }
-      });
-
-      const offer = await pc1.createOffer({});
-      await pc1.setLocalDescription(offer);
-      await pc2.setRemoteDescription(pc1.localDescription);
-      const answer = await pc2.createAnswer();
-      await pc2.setLocalDescription(answer);
-      await pc1.setRemoteDescription(pc2.localDescription);
+      await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
+      const recording = new Audio.Recording();
+      hfAmbientSustainCountRef.current = 0;
+      hfAmbientSpeakingRef.current = false;
+      recording.setProgressUpdateInterval(HF_METER_INTERVAL_MS);
+      recording.setOnRecordingStatusUpdate(handleAmbientMeterUpdate);
+      await recording.prepareToRecordAsync({ ...Audio.RecordingOptionsPresets.HIGH_QUALITY, isMeteringEnabled: true });
+      await recording.startAsync();
+      hfAmbientRecordingRef.current = recording;
+      setHandsFreeStatus('免提监听中');
     } catch (e) {
-      // "native module that doesn't exist"是Expo Go环境下react-native-webrtc
-      // 原生模块缺失的固定错误文案——识别出这种情况给一句用户能看懂、能
-      // 采取行动的提示，不是把英文报错原样甩给用户看。
-      const isNativeModuleMissing = /native module/i.test(e.message || '');
-      setHandsFreeStatus(
-        isNativeModuleMissing
-          ? '当前运行环境不支持免提打断（需要开发版本，Expo Go里用不了）'
-          : `免提打断启动失败：${e.message}`,
-      );
+      setHandsFreeStatus(`免提打断启动失败：${e.message}`);
       setHandsFreeEnabled(false);
     }
   }
 
-  function stopHandsFreeVad() {
-    stopVadPollingOnly();
-    vadStreamRef.current?.getTracks().forEach((t) => t.stop());
-    vadPc1Ref.current?.close();
-    vadPc2Ref.current?.close();
-    vadStreamRef.current = null;
-    vadPc1Ref.current = null;
-    vadPc2Ref.current = null;
+  async function stopHandsFreeAmbient() {
+    const rec = hfAmbientRecordingRef.current;
+    hfAmbientRecordingRef.current = null;
+    if (rec) {
+      await rec.stopAndUnloadAsync().catch(() => {});
+    }
     setHandsFreeStatus('');
   }
 
   // 免提开关变化时连接/断开——开关本身之外，退出这个屏幕（组件卸载）也
-  // 要确保断开，不能让WebRTC连接在离开听书页之后还占着麦克风。
+  // 要确保断开，不能让这路环境监听录音在离开听书页之后还占着麦克风。
   useEffect(() => {
     if (handsFreeEnabled) {
       setHandsFreeStatus('连接中…');
-      startHandsFreeVad();
+      startHandsFreeAmbient();
     }
     // 所有收尾逻辑都放进cleanup，不要在效果体的else分支里重复一遍——React
     // 在依赖变化时会先跑上一次effect的cleanup，再跑这一次的效果体，如果
@@ -1361,7 +1325,7 @@ export default function ListenScreen({ route, navigation }) {
     return () => {
       const wasActive = hfActiveRef.current;
       cancelHandsFreeTurn();
-      stopHandsFreeVad();
+      stopHandsFreeAmbient();
       // 关掉总开关时如果正好卡在免提的听/答某一步，朗读已经因为这一轮被
       // 停掉了，取消之后要自己接手续上，不然屏幕会停在"看起来正常、但
       // 其实没在播"的状态。真正离开页面（组件卸载）这一刻理论上也会走
@@ -1637,7 +1601,7 @@ export default function ListenScreen({ route, navigation }) {
                         : <IconMicrophoneOff color={EMBER.inkSoft} size={18} strokeWidth={2} />}
                     </TouchableOpacity>
                     {/* handsFreeStatus独立于handsFreeEnabled展示——启动失败时
-                        startHandsFreeVad会把handsFreeEnabled设回false，如果
+                        startHandsFreeAmbient会把handsFreeEnabled设回false，如果
                         这里的文案也跟着handsFreeEnabled切换，失败原因会在
                         用户还没看清楚之前就被"点击开始提问"这句默认文案盖掉，
                         看不出到底出了什么问题。 */}
