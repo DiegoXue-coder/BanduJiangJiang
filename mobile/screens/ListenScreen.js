@@ -10,18 +10,40 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, TextInput,
   ActivityIndicator, ScrollView, Platform, KeyboardAvoidingView, Switch,
-  PermissionsAndroid,
+  PermissionsAndroid, Animated, Easing, Modal, FlatList,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Audio, InterruptionModeIOS, InterruptionModeAndroid } from 'expo-av';
 import * as FileSystem from 'expo-file-system/legacy';
 import Slider from '@react-native-community/slider';
-import { IconPlayerStop, IconSettings, IconMicrophone } from '@tabler/icons-react-native';
+import {
+  IconMicrophone, IconChevronLeft, IconList, IconVolume, IconBolt,
+  IconPlayerPlay, IconPlayerPause, IconPlayerTrackPrev, IconPlayerTrackNext,
+  IconMicrophoneOff, IconVolumeOff, IconSend2,
+} from '@tabler/icons-react-native';
 import {
   getBookContext, getChapterText, getTtsPlayUrl, transcribeAudio,
   streamAsk, saveHighlight, saveQaHistory,
 } from '../lib/api';
-import { useTheme } from '../theme';
+
+// 决策层这轮派发：听书界面套用定稿设计稿的视觉语言（docs/设计稿/听书界面-
+// 设计稿.html，2026-08-10定稿）。这套"沉光"配色是这个页面专属的暗色调
+// （灯芯/余烬/纸色），故意不用theme.js里全App统一的"暖纸古风"亮色系——
+// 设计稿本身就是新起一套独立视觉身份，不是复用App其它页面的配色。数值
+// 直接抄设计稿CSS里的--ink/--ember这些变量，没有另外发挥。
+const LISTEN_THEME = {
+  ink: '#241a12',
+  dusk: '#33241a',
+  dusk2: '#443021',
+  paper: '#f2e6d2',
+  paperDim: '#cbb896',
+  inkSoft: '#b8a488',
+  ember: '#e2963a',
+  emberBright: '#f3b563',
+  emberDim: '#8c5a22',
+  jade: '#6fa088',
+  jadeDim: '#3d5b4c',
+};
 
 // 决策层这轮派发的任务之一：语速/声音可调。不做完整的14个声音选择器，
 // 参照用户真机反馈（中庸默认语速"灾难级别"、想要更沉稳的男声）给一组
@@ -131,6 +153,24 @@ const NARRATION_MIN_CHUNK_LEN = 60;
 // 比如"2019，"），是刻意收窄的范围，不追求覆盖所有列表写法。
 const LIST_MARKER_RE = /^([一二三四五六七八九十百]{1,3}[、，]|[（(][一二三四五六七八九十0-9]{1,3}[）)]|[0-9]{1,3}、)/;
 
+// 字幕分句：跟NARRATION_SENTENCE_END用同一套标点边界，只是这里不做"攒够
+// 长度才切"那一层（字幕要的是"念到哪一句了"，不是"攒够多长发一次请求"），
+// 单纯按标点切开，标点本身保留在句尾（比如"天命之谓性，"，不是"天命之谓性"）。
+function splitIntoSentences(text) {
+  const parts = (text || '').split(NARRATION_SENTENCE_END);
+  const sentences = [];
+  let buf = '';
+  for (const part of parts) {
+    buf += part;
+    if (NARRATION_SENTENCE_END.test(part)) {
+      sentences.push(buf);
+      buf = '';
+    }
+  }
+  if (buf) sentences.push(buf);
+  return sentences.length ? sentences : [text || ''];
+}
+
 function mergeParagraphsForNarration(paragraphs) {
   let buffer = paragraphs.join('');
   const merged = [];
@@ -156,7 +196,6 @@ function mergeParagraphsForNarration(paragraphs) {
 
 export default function ListenScreen({ route, navigation }) {
   const { bookId, bookTitle, author, initialChapterTitle, startFraction } = route.params;
-  const theme = useTheme();
   const insets = useSafeAreaInsets();
 
   // phase: loading-book(打开界面首次拉章节列表) / loading-chapter(章节文字
@@ -174,7 +213,6 @@ export default function ListenScreen({ route, navigation }) {
   // 数组同一份数据，不用conversationRef另外再维护一份，见上面refs区
   // 的说明）。
   const [conversation, setConversation] = useState([]);
-  const [showSettings, setShowSettings] = useState(false);
   const [rate, setRate] = useState('+0%');
   // 滑动条拖动过程中的实时显示值——跟rate分开，拖动时只更新这个数字标签
   // （流畅、不触发任何副作用），松手那一刻才调setRate真正提交（触发下面
@@ -195,6 +233,30 @@ export default function ListenScreen({ route, navigation }) {
   const [handsFreeEnabled, setHandsFreeEnabled] = useState(false);
   const [handsFreeMuted, setHandsFreeMuted] = useState(false);
   const [handsFreeStatus, setHandsFreeStatus] = useState('');
+
+  // 任务1（听书界面视觉改造）新增的纯渲染层状态——不碰上面2号负责的phase/
+  // 免提/录音状态定义，只是给新视觉多加了几个"要显示什么"的数据源。
+  // 章节选择弹层（设计稿："点开是App已有的多层目录弹层，不用重新做一套"——
+  // 但ListenScreen手上只有chaptersRef这份扁平章节列表，没有ReaderScreen
+  // 那边epub.js渲染出来的嵌套toc数据，两边数据源不是一回事，做不到真的
+  // 复用同一个组件实例。这里做了一个平级列表版本的选择弹层，视觉上贴这次
+  // 的暗色设计语言，如实记这是跟设计稿字面要求的一个偏差，等反馈环节跟
+  // 决策层说清楚，不是自己悄悄简化了不说。
+  const [showChapterPicker, setShowChapterPicker] = useState(false);
+  const [showRatePicker, setShowRatePicker] = useState(false);
+  // 字幕：设计稿要求"一次只显示一句，随TTS播放进度自动滚动"。当前TTS是
+  // 按合并后的整段（可能好几句）一次性合成，没有逐字/逐句的时间戳可用——
+  // 用sound播放状态回调里真实的positionMillis/durationMillis比例，反推
+  // 大概播到这一段里的第几句，是个近似值，不是精确对齐每个字，如实说明。
+  const [captionSentences, setCaptionSentences] = useState([]);
+  const [captionIdx, setCaptionIdx] = useState(0);
+  // 进度条（任务2）：这套架构没有"整本书的总时长"概念——每段TTS都是现场
+  // 按需合成的，没有预先量好全书时长，做不到设计稿demo那种mm:ss跨全书
+  // 进度。退而求其次做"当前章节内，第几段/共几段"这个已有的颗粒度，拖动
+  // 进度条＝跳到这一章的某个段落，不是跳到某个精确时间点——如实说明这是
+  // 跟设计稿字面（06:12/-10:24这种时间格式）的一个偏差，反馈环节会说明。
+  const [paragraphProgress, setParagraphProgress] = useState({ idx: 0, total: 0 });
+  const [isManuallyPaused, setIsManuallyPaused] = useState(false);
 
   // playOneParagraph在playFrom的异步循环里调用，如果直接读voice/rate这两个
   // state会有闭包过期的问题（循环开始时闭包捕获的是当时的值，用户中途在
@@ -286,8 +348,18 @@ export default function ListenScreen({ route, navigation }) {
     }
     soundRef.current = sound;
     onAudioStart?.(); // 真正要出声了才回调——见调用处注释，打断截取的位置要跟这个对齐
+    // 字幕：这一段真正开始出声，先把它切成句子、从第0句开始显示；播放
+    // 状态回调里再用position/duration的比例反推大概念到第几句了。
+    const sentences = splitIntoSentences(text);
+    setCaptionSentences(sentences);
+    setCaptionIdx(0);
     await new Promise((resolve) => {
       sound.setOnPlaybackStatusUpdate((s) => {
+        if (s.isLoaded && s.durationMillis > 0 && sentences.length > 1) {
+          const fraction = s.positionMillis / s.durationMillis;
+          const idx = Math.max(0, Math.min(sentences.length - 1, Math.floor(fraction * sentences.length)));
+          setCaptionIdx((prev) => (prev === idx ? prev : idx));
+        }
         if (s.didJustFinish) resolve();
       });
       sound.playAsync().catch(() => resolve()); // 播放本身失败也别卡住整个循环，跳过这段
@@ -332,6 +404,8 @@ export default function ListenScreen({ route, navigation }) {
         }
         setChapterTitle(chapter.title);
         setProgressLabel(`第${pi + 1}/${paragraphs.length}段（加载中…）`);
+        setParagraphProgress({ idx: pi, total: paragraphs.length });
+        setIsManuallyPaused(false);
         setPhase('playing');
 
         // 这一段是编号列表的开头（"一、""（1）"这类），额外停顿一下再念，
@@ -367,6 +441,7 @@ export default function ListenScreen({ route, navigation }) {
             // 出声这一刻才更新posRef，跟用户耳朵听到的内容对齐。
             posRef.current = { chapterIdx: ci, paragraphIdx: pi };
             setProgressLabel(`第${pi + 1}/${paragraphs.length}段`);
+            setParagraphProgress({ idx: pi, total: paragraphs.length });
             console.log(`[听书诊断] 开始出声 章节="${chapter.title}" 第${pi + 1}/${paragraphs.length}段`);
             // 这段刚出声，立刻在后台把下一段的TTS请求发出去（不等待），
             // 让加载时间跟当前段的播放时间重叠，减少段与段之间的停顿。
@@ -652,6 +727,53 @@ export default function ListenScreen({ route, navigation }) {
     navigation.goBack();
   }
 
+  // 任务1新增：设计稿的播放/暂停按钮是"轻量暂停"，跟"打断"（进提问模式）
+  // 是两个不同的动作——暂停只是把当前已经加载好的音频停住，不清空
+  // capturedText、不清空对话线、不改变phase，恢复时接着播这同一段，不用
+  // 重新合成语音。直接操作soundRef.current这个已有的Sound实例
+  // （pauseAsync/playAsync是expo-av自带的、对已加载音频安全的操作），
+  // 不新增phase值，不碰2号负责的录音/VAD状态。
+  function togglePlayPause() {
+    if (!soundRef.current) return;
+    if (isManuallyPaused) {
+      soundRef.current.playAsync().catch(() => {});
+      setIsManuallyPaused(false);
+    } else {
+      soundRef.current.pauseAsync().catch(() => {});
+      setIsManuallyPaused(true);
+    }
+  }
+
+  // 上一章/下一章：直接复用已有的playFrom从新章节第0段开始，不是新逻辑，
+  // 只是提供了一个从章节任意位置跳转的UI入口（之前只能从头到尾顺序播）。
+  function goToAdjacentChapter(delta) {
+    const chapters = chaptersRef.current;
+    const targetIdx = posRef.current.chapterIdx + delta;
+    if (targetIdx < 0 || targetIdx >= chapters.length) return;
+    epochRef.current += 1;
+    stopSound();
+    setIsManuallyPaused(false);
+    playFrom(targetIdx, 0, epochRef.current);
+  }
+
+  function jumpToChapter(idx) {
+    setShowChapterPicker(false);
+    if (idx === posRef.current.chapterIdx) return;
+    epochRef.current += 1;
+    stopSound();
+    setIsManuallyPaused(false);
+    playFrom(idx, 0, epochRef.current);
+  }
+
+  // 音色：设计稿"点哪个标签就能直接改"——单点直接切到列表里下一个候选，
+  // 不用先打开一个选择面板才能选，跟章节/语速（数值范围不适合单点直接改）
+  // 特意做成不同的交互，语速改成点开小面板里放已有的连续滑动条。
+  function cycleVoice() {
+    const idx = VOICE_OPTIONS.findIndex((o) => o.value === voice);
+    const next = VOICE_OPTIONS[(idx + 1) % VOICE_OPTIONS.length];
+    setVoice(next.value);
+  }
+
   // 决策层这轮派发：打断提问改成语音输入。逻辑照抄BookChatScreen已经在
   // 真机上验证过的录音实现（prepareToRecordAsync+startAsync两步走绕开
   // iOS麦克风预热延迟、55秒自动停止避免撞腾讯云ASR60秒硬顶）——同一套
@@ -902,282 +1024,528 @@ export default function ListenScreen({ route, navigation }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [handsFreeEnabled]);
 
+  // 任务1：设计稿里灯芯轨迹环/光尘/呼吸光晕这套装饰动画，只在"朗读中"
+  // （narrating视图可见）跑，打断进对话视图或者非playing阶段就停掉，
+  // 省电也避免看不见的地方还在白跑动画。用RN核心自带的Animated，不引入
+  // 新依赖——呼吸缩放、轨迹环旋转、三层脉冲光环（错峰启动）都是循环动画，
+  // reduce-motion这类系统级无障碍设置RN的Animated模块目前没有直接对应的
+  // 检测API，这次没有做适配，如实记录这个缺口。
+  const breatheAnim = useRef(new Animated.Value(0)).current;
+  const orbitAnim = useRef(new Animated.Value(0)).current;
+  const ringAnims = useRef([0, 1, 2].map(() => new Animated.Value(0))).current;
+  const isNarratingVisible = phase === 'playing' || phase === 'loading-chapter';
+  const isOrbAnimating = isNarratingVisible && !isManuallyPaused;
+  useEffect(() => {
+    if (!isOrbAnimating) return undefined;
+    const breatheLoop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(breatheAnim, { toValue: 1, duration: 1700, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
+        Animated.timing(breatheAnim, { toValue: 0, duration: 1700, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
+      ]),
+    );
+    const orbitLoop = Animated.loop(
+      Animated.timing(orbitAnim, { toValue: 1, duration: 14000, easing: Easing.linear, useNativeDriver: true }),
+    );
+    breatheLoop.start();
+    orbitLoop.start();
+    const ringLoops = ringAnims.map((anim, i) => {
+      anim.setValue(0);
+      const loop = Animated.loop(
+        Animated.sequence([
+          Animated.delay(i * 700),
+          Animated.timing(anim, { toValue: 1, duration: 2600, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
+        ]),
+      );
+      loop.start();
+      return loop;
+    });
+    return () => {
+      breatheLoop.stop();
+      orbitLoop.stop();
+      ringLoops.forEach((l) => l.stop());
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOrbAnimating]);
+
+  const chapter = chaptersRef.current[posRef.current.chapterIdx] || {};
+  const inConversation = phase === 'paused' || phase === 'thinking' || phase === 'answering';
+  const currentCaption = captionSentences[captionIdx] || '';
+
+  const voiceLabel = (VOICE_OPTIONS.find((o) => o.value === voice)?.label || voice).replace(/（.*）/, '');
+  const showLoadingIndicator = phase === 'loading-book';
+
   return (
-    <SafeAreaView edges={['bottom', 'left', 'right']} style={[styles.safe, { backgroundColor: theme.bg }]}>
-      <View style={[styles.header, { backgroundColor: theme.accent, paddingTop: insets.top + 10 }]}>
-        <TouchableOpacity onPress={handleStopListening} style={styles.headerBtn}>
-          <Text style={[styles.headerBtnText, { color: theme.textOnAccent }]}>‹ 返回</Text>
-        </TouchableOpacity>
-        <Text style={[styles.headerTitle, { color: theme.textOnAccent }]} numberOfLines={1}>{bookTitle}</Text>
-        <TouchableOpacity onPress={() => setShowSettings((v) => !v)} style={styles.headerBtn}>
-          <IconSettings color={theme.textOnAccent} size={20} strokeWidth={1.75} />
-        </TouchableOpacity>
-      </View>
+    <View style={[styles.stage, { paddingTop: insets.top, paddingBottom: insets.bottom }]}>
+      {showLoadingIndicator && (
+        <View style={styles.centerBox}><ActivityIndicator color={LISTEN_THEME.ember} /></View>
+      )}
 
-      {showSettings && (
-        <View style={[styles.settingsPanel, { backgroundColor: theme.cardBg, borderBottomColor: theme.cardBorder }]}>
-          <View style={styles.rateLabelRow}>
-            <Text style={[styles.settingsLabel, { color: theme.textSecondary }]}>语速</Text>
-            <Text style={[styles.rateValueText, { color: theme.text }]}>{rateDisplay.toFixed(2)}×</Text>
-          </View>
-          <Slider
-            style={styles.rateSlider}
-            minimumValue={RATE_MIN}
-            maximumValue={RATE_MAX}
-            step={RATE_STEP}
-            value={rateStrToMultiplier(rate)}
-            minimumTrackTintColor={theme.accent}
-            maximumTrackTintColor={theme.cardBorder}
-            thumbTintColor={theme.accent}
-            onValueChange={setRateDisplay}
-            onSlidingComplete={(v) => setRate(rateMultiplierToStr(v))}
-          />
-          <Text style={[styles.settingsLabel, { color: theme.textSecondary, marginTop: 10 }]}>声音</Text>
-          <View style={styles.chipRow}>
-            {VOICE_OPTIONS.map((opt) => (
-              <TouchableOpacity
-                key={opt.value}
-                style={[
-                  styles.chip,
-                  { borderColor: theme.cardBorder, borderRadius: theme.radius },
-                  voice === opt.value && { backgroundColor: theme.accent, borderColor: theme.accent },
-                ]}
-                onPress={() => setVoice(opt.value)}
-              >
-                <Text style={[styles.chipText, { color: voice === opt.value ? theme.textOnAccent : theme.text }]}>{opt.label}</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-
-          {/* 方案B：免提打断，技术验证阶段的新功能，默认关闭——用户自己
-              决定要不要开，不是每次听书都默认持续开麦。开启之后需要走一遍
-              麦克风权限+WebRTC连接，有短暂的"连接中"状态。 */}
-          <View style={[styles.handsFreeRow, { marginTop: 14, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: theme.cardBorder, paddingTop: 14 }]}>
-            <View style={styles.handsFreeLabelCol}>
-              <Text style={[styles.settingsLabel, { color: theme.textSecondary }]}>免提打断（技术验证中）</Text>
-              {!!handsFreeStatus && (
-                <Text style={[styles.handsFreeStatusText, { color: theme.textMuted }]}>{handsFreeStatus}</Text>
-              )}
-            </View>
-            <Switch value={handsFreeEnabled} onValueChange={setHandsFreeEnabled} />
-          </View>
-          {handsFreeEnabled && (
-            <View style={styles.handsFreeRow}>
-              <Text style={[styles.settingsLabel, { color: theme.textSecondary }]}>静音（暂停自动打断）</Text>
-              <Switch value={handsFreeMuted} onValueChange={setHandsFreeMuted} />
-            </View>
-          )}
+      {phase === 'error' && (
+        <View style={styles.centerBox}>
+          <Text style={styles.errorText}>{errorMsg}</Text>
+          <TouchableOpacity style={styles.primaryPill} onPress={handleStopListening}>
+            <Text style={styles.primaryPillText}>返回</Text>
+          </TouchableOpacity>
         </View>
       )}
 
-      <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-        <View style={styles.body}>
-          {(phase === 'loading-book') && (
-            <View style={styles.centerBox}><ActivityIndicator color={theme.accent} /></View>
-          )}
+      {phase === 'done' && (
+        <View style={styles.centerBox}>
+          <Text style={styles.doneText}>这本书听完了</Text>
+          <TouchableOpacity style={styles.primaryPill} onPress={handleStopListening}>
+            <Text style={styles.primaryPillText}>返回</Text>
+          </TouchableOpacity>
+        </View>
+      )}
 
-          {phase === 'error' && (
-            <View style={styles.centerBox}>
-              <Text style={[styles.errorText, { color: theme.danger }]}>{errorMsg}</Text>
+      {!showLoadingIndicator && phase !== 'error' && phase !== 'done' && (
+        <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+          <View style={styles.bar}>
+            <TouchableOpacity
+              onPress={inConversation ? handleContinue : handleStopListening}
+              style={styles.iconBtn}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            >
+              <IconChevronLeft color={LISTEN_THEME.paperDim} size={20} strokeWidth={2} />
+            </TouchableOpacity>
+            <View style={styles.crumb}>
+              <Text style={styles.crumbBook} numberOfLines={1}>{bookTitle}</Text>
+              <Text style={styles.crumbChap} numberOfLines={1}>{chapterTitle || chapter.title || ''}</Text>
             </View>
-          )}
+            <View style={{ width: 30 }} />
+          </View>
 
-          {(phase === 'playing' || phase === 'loading-chapter') && (
-            <View style={styles.centerBox}>
-              <Text style={[styles.chapterLabel, { color: theme.textSecondary }]}>{chapterTitle}</Text>
-              {phase === 'loading-chapter' ? (
-                <ActivityIndicator color={theme.accent} style={{ marginTop: 12 }} />
-              ) : (
-                <>
-                  <Text style={[styles.playingHint, { color: theme.text }]}>正在朗读…</Text>
-                  <Text style={[styles.progressLabel, { color: theme.textMuted }]}>{progressLabel}</Text>
-                  {handsFreeEnabled && (
-                    <Text style={[styles.handsFreeIndicator, { color: handsFreeMuted ? theme.textMuted : theme.accent }]}>
-                      {handsFreeMuted ? '🔇 免提已静音' : '🎙️ 免提监听中 — 直接说话即可打断'}
-                    </Text>
+          {/* 设计稿：音色/语速/章节从齿轮菜单挪到常驻的三个chip，点哪个
+              标签就直接改，不用先打开菜单。这一行在朗读/对话两种视图下
+              都常驻显示（设计稿原文里这一行不受.in-conversation影响）。 */}
+          <View style={styles.quickSettings}>
+            <TouchableOpacity style={styles.settingChip} onPress={() => setShowChapterPicker(true)}>
+              <IconList color={LISTEN_THEME.paperDim} size={13} strokeWidth={2} />
+              <Text style={styles.settingChipText} numberOfLines={1}>{chapterTitle || chapter.title || '章节'}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.settingChip} onPress={cycleVoice}>
+              <IconVolume color={LISTEN_THEME.paperDim} size={13} strokeWidth={2} />
+              <Text style={styles.settingChipText}>{voiceLabel}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.settingChip} onPress={() => setShowRatePicker(true)}>
+              <IconBolt color={LISTEN_THEME.paperDim} size={13} strokeWidth={2} />
+              <Text style={styles.settingChipText}>{rateStrToMultiplier(rate).toFixed(2)}×</Text>
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.mainStage}>
+            {!inConversation ? (
+              <View style={styles.narratingView}>
+                <View style={styles.orbZone}>
+                  {/* 光尘：设计稿是9秒循环的漂浮小点，这版简化成静态半透明
+                      光点（没做drift动画），呼吸光晕/轨迹环/脉冲光环三个
+                      主要动效已经用RN Animated做了，光尘这个次要装饰先
+                      简化，如实标注不是漏做。 */}
+                  {MOTE_POSITIONS.map((m, i) => (
+                    <View key={i} style={[styles.mote, { left: m.left, top: m.top }]} />
+                  ))}
+                  <Animated.View
+                    style={[
+                      styles.orbit,
+                      { transform: [{ rotate: orbitAnim.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] }) }] },
+                    ]}
+                  >
+                    <View style={styles.orbitMote} />
+                  </Animated.View>
+                  {ringAnims.map((anim, i) => (
+                    <Animated.View
+                      key={i}
+                      style={[
+                        styles.ring,
+                        {
+                          width: anim.interpolate({ inputRange: [0, 1], outputRange: [92, 220] }),
+                          height: anim.interpolate({ inputRange: [0, 1], outputRange: [92, 220] }),
+                          borderRadius: anim.interpolate({ inputRange: [0, 1], outputRange: [46, 110] }),
+                          opacity: anim.interpolate({ inputRange: [0, 0.05, 1], outputRange: [0, 0.55, 0] }),
+                        },
+                      ]}
+                    />
+                  ))}
+                  <Animated.View
+                    style={[
+                      styles.orb,
+                      { transform: [{ scale: breatheAnim.interpolate({ inputRange: [0, 1], outputRange: [1, 1.04] }) }] },
+                    ]}
+                  >
+                    {phase === 'loading-chapter' ? (
+                      <ActivityIndicator color="#2a1a08" />
+                    ) : (
+                      <TouchableOpacity
+                        onPress={togglePlayPause}
+                        hitSlop={{ top: 20, bottom: 20, left: 20, right: 20 }}
+                      >
+                        {isManuallyPaused && <IconPlayerPlay color="#2a1a08" size={30} />}
+                      </TouchableOpacity>
+                    )}
+                  </Animated.View>
+                </View>
+                <View style={styles.captionZone}>
+                  <Text style={styles.captionText}>
+                    {phase === 'loading-chapter' ? '正在加载章节…' : (currentCaption || '…')}
+                  </Text>
+                  {captionSentences.length > 1 && phase === 'playing' && (
+                    <Text style={styles.captionCount}>句 {captionIdx + 1}/{captionSentences.length}</Text>
                   )}
-                </>
-              )}
+                </View>
+              </View>
+            ) : (
+              <ScrollView style={styles.conversationView} contentContainerStyle={styles.chatBody}>
+                <View style={styles.contextChip}>
+                  <Text style={styles.contextChipLabel}>你打断时正讲到</Text>
+                  <Text style={styles.contextChipText}>{capturedText}</Text>
+                </View>
+
+                <View style={styles.saveHighlightRow}>
+                  <Switch value={saveAsHighlight} onValueChange={setSaveAsHighlight} />
+                  <Text style={styles.saveHighlightText}>把这段保存为划线</Text>
+                </View>
+
+                {conversation.map((msg, idx) => (
+                  <View key={idx} style={[styles.bubble, msg.role === 'user' ? styles.bubbleUser : styles.bubbleAi]}>
+                    <Text style={msg.role === 'user' ? styles.bubbleUserText : styles.bubbleAiText}>{msg.content}</Text>
+                  </View>
+                ))}
+
+                {phase === 'thinking' && (
+                  <View style={styles.thinkingRow}>
+                    <ActivityIndicator color={LISTEN_THEME.ember} size="small" />
+                    <Text style={styles.thinkingText}>AI正在思考…</Text>
+                  </View>
+                )}
+                {phase === 'answering' && (
+                  <View style={styles.thinkingRow}>
+                    <ActivityIndicator color={LISTEN_THEME.ember} size="small" />
+                    <Text style={styles.thinkingText}>AI正在朗读回答…</Text>
+                  </View>
+                )}
+
+                {conversation.length > 0 && phase === 'paused' && (
+                  <View style={styles.resumeRow}>
+                    <TouchableOpacity style={styles.resumeBtn} onPress={handleContinue}>
+                      <Text style={styles.resumeBtnText}>继续听下去</Text>
+                    </TouchableOpacity>
+                    <Text style={styles.continueHint}>或者接着追问</Text>
+                  </View>
+                )}
+                {!!recordingStatus && !isTranscribing && (
+                  <Text style={styles.recordingStatus}>{recordingStatus}</Text>
+                )}
+              </ScrollView>
+            )}
+          </View>
+
+          {/* 设计稿：进度条/播放控制不管在朗读还是对话视图下都原地不动。
+              这套架构没有整本书预先量好的总时长（每段TTS现场合成），
+              进度条做成"当前章节第几段/共几段"，拖动＝跳到那一段，不是
+              设计稿demo里mm:ss那种时间轴——如实说明这是跟设计稿字面的
+              一个偏差，反馈环节会跟决策层说清楚。 */}
+          <View style={styles.controls}>
+            <View style={styles.progressWrap}>
+              <Slider
+                style={styles.progressSlider}
+                minimumValue={0}
+                maximumValue={Math.max(paragraphProgress.total - 1, 0)}
+                step={1}
+                value={Math.min(paragraphProgress.idx, Math.max(paragraphProgress.total - 1, 0))}
+                minimumTrackTintColor={LISTEN_THEME.ember}
+                maximumTrackTintColor="rgba(255,255,255,0.12)"
+                thumbTintColor={LISTEN_THEME.emberBright}
+                disabled={paragraphProgress.total <= 1 || inConversation}
+                onSlidingComplete={(v) => {
+                  const idx = Math.round(v);
+                  if (idx === paragraphProgress.idx) return;
+                  epochRef.current += 1;
+                  stopSound();
+                  setIsManuallyPaused(false);
+                  playFrom(posRef.current.chapterIdx, idx, epochRef.current);
+                }}
+              />
+              <Text style={styles.progressLabelText}>
+                {paragraphProgress.total ? `第 ${paragraphProgress.idx + 1} / ${paragraphProgress.total} 段` : ''}
+              </Text>
+            </View>
+
+            <View style={styles.transport}>
+              <TouchableOpacity style={styles.transportIconBtn} onPress={() => goToAdjacentChapter(-1)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                <IconPlayerTrackPrev color={LISTEN_THEME.paperDim} size={20} strokeWidth={2} />
+              </TouchableOpacity>
               <TouchableOpacity
-                style={[styles.interruptBtn, { backgroundColor: theme.danger, borderRadius: theme.radius }]}
-                onPress={handleInterrupt}
+                style={styles.transportPlayBtn}
+                onPress={togglePlayPause}
+                disabled={phase === 'loading-chapter'}
               >
-                <IconPlayerStop color="#fff" size={20} strokeWidth={2} />
-                <Text style={styles.interruptBtnText}>打断</Text>
+                {isManuallyPaused
+                  ? <IconPlayerPlay color={LISTEN_THEME.emberBright} size={22} strokeWidth={2} />
+                  : <IconPlayerPause color={LISTEN_THEME.emberBright} size={22} strokeWidth={2} />}
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.transportIconBtn} onPress={() => goToAdjacentChapter(1)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                <IconPlayerTrackNext color={LISTEN_THEME.paperDim} size={20} strokeWidth={2} />
               </TouchableOpacity>
             </View>
-          )}
 
-          {(phase === 'paused' || phase === 'thinking' || phase === 'answering') && (
-            <ScrollView contentContainerStyle={styles.pausedContent}>
-              <Text style={[styles.capturedLabel, { color: theme.textSecondary }]}>刚才讲到——</Text>
-              <View style={[styles.capturedBox, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder, borderRadius: theme.radius }]}>
-                <Text style={[styles.capturedText, { color: theme.text }]}>{capturedText}</Text>
-              </View>
-
-              {/* 对话式UI：追问历史留在屏幕上持续展示，不再是问一次跳一次
-                  页面。用户消息靠右、AI回答靠左，跟微信这类聊天界面的
-                  阅读习惯保持一致。 */}
-              {conversation.map((msg, idx) => (
-                <View
-                  key={idx}
-                  style={[
-                    styles.chatBubble,
-                    { borderRadius: theme.radius },
-                    msg.role === 'user'
-                      ? [styles.chatBubbleUser, { backgroundColor: theme.accent }]
-                      : [styles.chatBubbleAssistant, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder, borderWidth: 1 }],
-                  ]}
-                >
-                  <Text style={msg.role === 'user' ? { color: theme.textOnAccent } : { color: theme.text }}>
-                    {msg.content}
-                  </Text>
-                </View>
-              ))}
-
-              {phase === 'thinking' && (
-                <View style={styles.thinkingRow}>
-                  <ActivityIndicator color={theme.accent} size="small" />
-                  <Text style={[styles.thinkingText, { color: theme.textSecondary }]}>AI正在思考…</Text>
-                </View>
-              )}
-              {phase === 'answering' && (
-                <View style={styles.thinkingRow}>
-                  <ActivityIndicator color={theme.accent} size="small" />
-                  <Text style={[styles.thinkingText, { color: theme.textSecondary }]}>AI正在朗读回答…</Text>
-                </View>
-              )}
-
-              {phase === 'paused' && (
-                <>
-                  <View style={styles.questionRow}>
-                    {isTranscribing ? (
-                      // 真机反馈：识别中的状态之前只在输入框下面一小行字提示，
-                      // 容易被忽略、以为"卡住了"。改成直接顶替输入框本身的显示
-                      // 内容，转圈+文字放在用户视线正对着的输入区域里，更显眼。
-                      <View style={[styles.questionInput, styles.questionInputFlex, styles.transcribingBox, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder, borderRadius: theme.radius }]}>
-                        <ActivityIndicator size="small" color={theme.accent} />
-                        <Text style={[styles.transcribingText, { color: theme.textSecondary }]}>正在识别语音…</Text>
-                      </View>
-                    ) : (
-                      <TextInput
-                        style={[styles.questionInput, styles.questionInputFlex, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder, color: theme.text, borderRadius: theme.radius }]}
-                        placeholder={conversation.length ? '继续追问…' : '想问点什么？（比如"你刚才说的这个是什么意思"）'}
-                        placeholderTextColor={theme.textMuted}
-                        value={question}
-                        onChangeText={setQuestion}
-                        multiline
-                      />
-                    )}
-                    <TouchableOpacity
-                      style={[
-                        styles.micBtn,
-                        { borderColor: theme.cardBorder, borderRadius: theme.radius },
-                        isRecording && { backgroundColor: theme.danger, borderColor: theme.danger },
-                      ]}
-                      onPress={toggleRecording}
-                    >
-                      <IconMicrophone color={isRecording ? '#fff' : theme.text} size={20} strokeWidth={1.75} />
+            {!inConversation ? (
+              <>
+                <View style={styles.askZone}>
+                  {!handsFreeEnabled ? (
+                    <TouchableOpacity style={styles.interruptPill} onPress={handleInterrupt}>
+                      <Text style={styles.interruptPillText}>打断，我想问问</Text>
                     </TouchableOpacity>
-                  </View>
-                  {/* 识别中已经在上面输入框位置显示了动效，这里不重复显示，
-                      避免两处同时出现"识别中"造成视觉上的冗余。 */}
-                  {!!recordingStatus && !isTranscribing && (
-                    <Text style={[styles.recordingStatus, { color: theme.textMuted }]}>{recordingStatus}</Text>
+                  ) : (
+                    <View style={styles.hfLive}>
+                      <Text style={styles.hfLiveTag}>
+                        {handsFreeStatus === '连接中…' ? '连接中…' : (handsFreeMuted ? '已静音 · 朗读继续' : '正在聆听 · 随时开口')}
+                      </Text>
+                      <TouchableOpacity style={styles.muteIconBtn} onPress={() => setHandsFreeMuted((v) => !v)}>
+                        {handsFreeMuted
+                          ? <IconVolumeOff color={LISTEN_THEME.paperDim} size={13} strokeWidth={2} />
+                          : <IconVolume color={LISTEN_THEME.paperDim} size={13} strokeWidth={2} />}
+                      </TouchableOpacity>
+                    </View>
                   )}
-                  <View style={styles.saveHighlightRow}>
-                    <Switch value={saveAsHighlight} onValueChange={setSaveAsHighlight} />
-                    <Text style={[styles.saveHighlightText, { color: theme.textSecondary }]}>把刚才这段保存为划线</Text>
-                  </View>
+                </View>
+                <TouchableOpacity
+                  style={[styles.micToggle, handsFreeEnabled && styles.micToggleOn]}
+                  onPress={() => setHandsFreeEnabled((v) => !v)}
+                >
+                  {handsFreeEnabled
+                    ? <IconMicrophone color={LISTEN_THEME.emberBright} size={18} strokeWidth={2} />
+                    : <IconMicrophoneOff color={LISTEN_THEME.inkSoft} size={18} strokeWidth={2} />}
+                </TouchableOpacity>
+                <Text style={styles.micLabel}>
+                  {handsFreeEnabled ? '免提已开启，随时说话' : '点击开始提问'}
+                </Text>
+              </>
+            ) : (
+              phase === 'paused' && (
+                <View style={styles.inputBar}>
                   <TouchableOpacity
-                    style={[styles.primaryBtn, { backgroundColor: theme.accent, borderRadius: theme.radius }]}
+                    style={[styles.micBtnRound, isRecording && styles.micBtnRoundActive]}
+                    onPress={toggleRecording}
+                  >
+                    <IconMicrophone color={isRecording ? '#2a1a08' : LISTEN_THEME.paperDim} size={15} strokeWidth={2} />
+                  </TouchableOpacity>
+                  {isTranscribing ? (
+                    <View style={[styles.inputField, styles.inputFieldTranscribing]}>
+                      <ActivityIndicator size="small" color={LISTEN_THEME.ember} />
+                      <Text style={styles.transcribingText}>正在识别语音…</Text>
+                    </View>
+                  ) : (
+                    <TextInput
+                      style={styles.inputField}
+                      placeholder={conversation.length ? '继续追问…' : '再问一句…'}
+                      placeholderTextColor={LISTEN_THEME.inkSoft}
+                      value={question}
+                      onChangeText={setQuestion}
+                    />
+                  )}
+                  <TouchableOpacity
+                    style={[styles.sendBtn, !question.trim() && styles.sendBtnOff]}
                     onPress={handleAsk}
                     disabled={!question.trim()}
                   >
-                    <Text style={[styles.primaryBtnText, { color: theme.textOnAccent }]}>提问</Text>
+                    <IconSend2 color="#2a1a08" size={15} strokeWidth={2} />
                   </TouchableOpacity>
-                </>
+                </View>
+              )
+            )}
+          </View>
+        </KeyboardAvoidingView>
+      )}
+
+      {/* 章节选择：设计稿说"点开是App已有的多层目录弹层，不用重新做一套"，
+          但ListenScreen手上只有chaptersRef这份扁平列表（没有ReaderScreen
+          那边epub.js渲染出来的嵌套toc数据），两边数据源不是同一份，做不到
+          真的复用同一个组件实例——这里做的是贴这次暗色视觉语言的平级列表
+          弹层，是跟设计稿字面要求的已知偏差，反馈环节会跟决策层说清楚。 */}
+      <Modal visible={showChapterPicker} animationType="fade" transparent onRequestClose={() => setShowChapterPicker(false)}>
+        <TouchableOpacity style={styles.pickerOverlay} activeOpacity={1} onPress={() => setShowChapterPicker(false)}>
+          <View style={styles.pickerSheet} onStartShouldSetResponder={() => true}>
+            <Text style={styles.pickerTitle}>选择章节</Text>
+            <FlatList
+              data={chaptersRef.current}
+              keyExtractor={(item) => String(item.id)}
+              renderItem={({ item, index }) => (
+                <TouchableOpacity style={styles.pickerRow} onPress={() => jumpToChapter(index)}>
+                  <Text
+                    style={[styles.pickerRowText, index === posRef.current.chapterIdx && styles.pickerRowTextActive]}
+                    numberOfLines={1}
+                  >
+                    {item.title}
+                  </Text>
+                </TouchableOpacity>
               )}
+            />
+          </View>
+        </TouchableOpacity>
+      </Modal>
 
-              <TouchableOpacity style={styles.linkBtn} onPress={handleContinue}>
-                <Text style={[styles.linkBtnText, { color: theme.textSecondary }]}>
-                  {conversation.length ? '不问了，继续听书' : '不问了，接着听'}
-                </Text>
-              </TouchableOpacity>
-            </ScrollView>
-          )}
-
-          {phase === 'done' && (
-            <View style={styles.centerBox}>
-              <Text style={[styles.playingHint, { color: theme.text }]}>这本书听完了</Text>
-              <TouchableOpacity
-                style={[styles.primaryBtn, { backgroundColor: theme.accent, borderRadius: theme.radius }]}
-                onPress={handleStopListening}
-              >
-                <Text style={[styles.primaryBtnText, { color: theme.textOnAccent }]}>返回</Text>
-              </TouchableOpacity>
-            </View>
-          )}
-        </View>
-      </KeyboardAvoidingView>
-    </SafeAreaView>
+      <Modal visible={showRatePicker} animationType="fade" transparent onRequestClose={() => setShowRatePicker(false)}>
+        <TouchableOpacity style={styles.pickerOverlay} activeOpacity={1} onPress={() => setShowRatePicker(false)}>
+          <View style={styles.rateSheet} onStartShouldSetResponder={() => true}>
+            <Text style={styles.pickerTitle}>语速 {rateDisplay.toFixed(2)}×</Text>
+            <Slider
+              style={styles.rateSliderDark}
+              minimumValue={RATE_MIN}
+              maximumValue={RATE_MAX}
+              step={RATE_STEP}
+              value={rateStrToMultiplier(rate)}
+              minimumTrackTintColor={LISTEN_THEME.ember}
+              maximumTrackTintColor="rgba(255,255,255,0.15)"
+              thumbTintColor={LISTEN_THEME.emberBright}
+              onValueChange={setRateDisplay}
+              onSlidingComplete={(v) => setRate(rateMultiplierToStr(v))}
+            />
+          </View>
+        </TouchableOpacity>
+      </Modal>
+    </View>
   );
 }
 
+// 光尘位置：抄设计稿inline style里的百分比坐标，5个点，不做逐点drift动画
+// （见上面渲染处注释，这是有意简化的一块）。
+const MOTE_POSITIONS = [
+  { left: '22%', top: '20%' },
+  { left: '78%', top: '30%' },
+  { left: '15%', top: '70%' },
+  { left: '85%', top: '68%' },
+  { left: '50%', top: '14%' },
+];
+
+const T = LISTEN_THEME;
+
 const styles = StyleSheet.create({
-  safe: { flex: 1 },
+  stage: { flex: 1, backgroundColor: T.ink },
   flex: { flex: 1 },
-  header: {
+  centerBox: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 14, padding: 24 },
+  errorText: { fontSize: 14, textAlign: 'center', color: T.paperDim },
+  doneText: { fontSize: 18, fontWeight: '600', color: T.paper },
+
+  bar: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    paddingHorizontal: 4, paddingBottom: 10,
+    paddingHorizontal: 18, paddingTop: 14, paddingBottom: 4,
   },
-  headerBtn: { minWidth: 64, paddingHorizontal: 12, paddingVertical: 6 },
-  headerBtnText: { fontSize: 15 },
-  headerTitle: { fontSize: 17, fontWeight: '700', flex: 1, textAlign: 'center' },
-  body: { flex: 1, padding: 20 },
-  centerBox: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 8 },
-  errorText: { fontSize: 14, textAlign: 'center' },
-  chapterLabel: { fontSize: 14, marginBottom: 16 },
-  playingHint: { fontSize: 18, fontWeight: '600' },
-  progressLabel: { fontSize: 13, marginTop: 6 },
-  interruptBtn: {
-    flexDirection: 'row', alignItems: 'center', gap: 8,
-    paddingHorizontal: 28, paddingVertical: 14, marginTop: 32,
+  iconBtn: { width: 30, height: 30, alignItems: 'center', justifyContent: 'center' },
+  crumb: { flex: 1, alignItems: 'center' },
+  crumbBook: { fontSize: 15, color: T.paper, fontWeight: '500' },
+  crumbChap: { fontSize: 10.5, color: T.inkSoft, marginTop: 3 },
+
+  quickSettings: { flexDirection: 'row', justifyContent: 'center', gap: 8, paddingHorizontal: 18, paddingTop: 6, paddingBottom: 4 },
+  settingChip: {
+    flexDirection: 'row', alignItems: 'center', gap: 5,
+    backgroundColor: 'rgba(255,255,255,0.05)', borderWidth: 0.5, borderColor: T.inkSoft,
+    borderRadius: 999, paddingHorizontal: 12, paddingVertical: 6, maxWidth: 130,
   },
-  interruptBtnText: { color: '#fff', fontSize: 16, fontWeight: '700' },
-  pausedContent: { padding: 4, gap: 12 },
-  capturedLabel: { fontSize: 13 },
-  capturedBox: { borderWidth: 1, padding: 12 },
-  capturedText: { fontSize: 15, lineHeight: 22 },
-  questionInput: { borderWidth: 1, padding: 12, fontSize: 14, minHeight: 80, textAlignVertical: 'top' },
-  primaryBtn: { paddingVertical: 13, alignItems: 'center', justifyContent: 'center', marginTop: 4 },
-  primaryBtnText: { fontSize: 15, fontWeight: '700' },
-  linkBtn: { alignItems: 'center', paddingVertical: 10 },
-  linkBtnText: { fontSize: 14 },
-  settingsPanel: { paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1 },
-  settingsLabel: { fontSize: 12, marginBottom: 6 },
-  rateLabelRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline' },
-  rateValueText: { fontSize: 13, fontWeight: '600', marginBottom: 6 },
-  rateSlider: { width: '100%', height: 32 },
-  chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  chip: { borderWidth: 1, paddingHorizontal: 12, paddingVertical: 6 },
-  chipText: { fontSize: 13 },
-  handsFreeRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 10 },
-  handsFreeLabelCol: { flex: 1, marginRight: 12 },
-  handsFreeStatusText: { fontSize: 11, marginTop: 2 },
-  handsFreeIndicator: { fontSize: 12, fontWeight: '600', marginTop: 8 },
-  questionRow: { flexDirection: 'row', gap: 8, alignItems: 'flex-start' },
-  questionInputFlex: { flex: 1 },
-  transcribingBox: { flexDirection: 'row', alignItems: 'center', gap: 8, justifyContent: 'center' },
-  transcribingText: { fontSize: 14 },
-  micBtn: { borderWidth: 1, width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
-  recordingStatusRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  recordingStatus: { fontSize: 12 },
-  saveHighlightRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  saveHighlightText: { fontSize: 13 },
-  chatBubble: { padding: 12, maxWidth: '85%' },
-  chatBubbleUser: { alignSelf: 'flex-end' },
-  chatBubbleAssistant: { alignSelf: 'flex-start' },
+  settingChipText: { fontSize: 11, color: T.paperDim },
+
+  mainStage: { flex: 1 },
+  narratingView: { flex: 1 },
+  orbZone: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  mote: { position: 'absolute', width: 3, height: 3, borderRadius: 1.5, backgroundColor: T.ember, opacity: 0.35 },
+  orbit: {
+    position: 'absolute', width: 168, height: 168, borderRadius: 84,
+    borderWidth: 0.5, borderColor: 'rgba(226,150,58,0.28)',
+    alignItems: 'center', justifyContent: 'flex-start',
+  },
+  orbitMote: {
+    width: 6, height: 6, borderRadius: 3, backgroundColor: T.emberBright, marginTop: -3,
+    shadowColor: T.emberBright, shadowOpacity: 0.8, shadowRadius: 6, shadowOffset: { width: 0, height: 0 },
+  },
+  ring: { position: 'absolute', borderWidth: 1, borderColor: T.emberDim },
+  orb: {
+    width: 92, height: 92, borderRadius: 46, backgroundColor: T.ember,
+    alignItems: 'center', justifyContent: 'center',
+    shadowColor: T.ember, shadowOpacity: 0.5, shadowRadius: 24, shadowOffset: { width: 0, height: 0 },
+    elevation: 8,
+  },
+  captionZone: { paddingHorizontal: 30, paddingBottom: 8, minHeight: 90, alignItems: 'center', justifyContent: 'flex-start' },
+  captionText: { fontFamily: Platform.select({ ios: 'Songti SC', android: 'serif' }), fontSize: 16.5, lineHeight: 27, textAlign: 'center', color: T.paper },
+  captionCount: { fontSize: 9, color: T.inkSoft, marginTop: 6, letterSpacing: 0.5 },
+
+  conversationView: { flex: 1 },
+  chatBody: { padding: 16, paddingBottom: 8, gap: 14 },
+  contextChip: {
+    backgroundColor: 'rgba(226,150,58,0.08)', borderLeftWidth: 2, borderLeftColor: T.emberDim,
+    borderRadius: 4, padding: 10,
+  },
+  contextChipLabel: { fontSize: 9.5, letterSpacing: 0.5, color: T.ember, marginBottom: 4, textTransform: 'uppercase' },
+  contextChipText: { fontSize: 12, lineHeight: 19, color: T.paperDim },
+  bubble: { maxWidth: '82%', paddingHorizontal: 13, paddingVertical: 10, borderRadius: 16 },
+  bubbleUser: { alignSelf: 'flex-end', backgroundColor: T.emberDim, borderBottomRightRadius: 4 },
+  bubbleAi: { alignSelf: 'flex-start', backgroundColor: 'rgba(255,255,255,0.06)', borderWidth: 0.5, borderColor: 'rgba(255,255,255,0.08)', borderBottomLeftRadius: 4 },
+  bubbleUserText: { color: T.paper, fontSize: 13, lineHeight: 21 },
+  bubbleAiText: { color: T.paper, fontSize: 13, lineHeight: 21 },
   thinkingRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 4 },
-  thinkingText: { fontSize: 13 },
+  thinkingText: { fontSize: 13, color: T.paperDim },
+  resumeRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 2 },
+  resumeBtn: {
+    backgroundColor: 'rgba(111,160,136,0.12)', borderWidth: 0.5, borderColor: 'rgba(111,160,136,0.4)',
+    borderRadius: 999, paddingHorizontal: 14, paddingVertical: 8,
+  },
+  resumeBtnText: { fontSize: 12.5, color: T.jade },
+  continueHint: { fontSize: 11.5, color: T.inkSoft },
+  saveHighlightRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  saveHighlightText: { fontSize: 12.5, color: T.paperDim },
+  recordingStatus: { fontSize: 11.5, color: T.inkSoft },
+
+  controls: { paddingHorizontal: 20, paddingTop: 6, paddingBottom: 20, gap: 14 },
+  progressWrap: { gap: 5 },
+  progressSlider: { width: '100%', height: 28 },
+  progressLabelText: { fontSize: 10.5, color: T.inkSoft, textAlign: 'center', fontVariant: ['tabular-nums'] },
+
+  transport: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 28 },
+  transportIconBtn: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center' },
+  transportPlayBtn: {
+    width: 52, height: 52, borderRadius: 26, alignItems: 'center', justifyContent: 'center',
+    backgroundColor: 'rgba(226,150,58,0.14)', borderWidth: 1, borderColor: 'rgba(226,150,58,0.35)',
+  },
+
+  askZone: { minHeight: 34, alignItems: 'center', justifyContent: 'center' },
+  interruptPill: {
+    backgroundColor: T.emberBright, paddingHorizontal: 30, paddingVertical: 12, borderRadius: 999,
+  },
+  interruptPillText: { color: '#2a1a08', fontSize: 13.5, fontWeight: '500' },
+  hfLive: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  hfLiveTag: { fontSize: 10.5, color: T.emberBright, letterSpacing: 0.5 },
+  muteIconBtn: {
+    width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.06)',
+  },
+
+  micToggle: {
+    alignSelf: 'center', width: 44, height: 44, borderRadius: 22,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.05)', borderWidth: 1, borderColor: T.inkSoft,
+  },
+  micToggleOn: { backgroundColor: 'rgba(226,150,58,0.14)', borderColor: T.ember },
+  micLabel: { fontSize: 9, color: T.inkSoft, textAlign: 'center', letterSpacing: 0.5 },
+
+  inputBar: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  inputField: {
+    flex: 1, backgroundColor: 'rgba(255,255,255,0.06)', borderRadius: 999,
+    paddingHorizontal: 14, paddingVertical: 9, fontSize: 12.5, color: T.paper,
+  },
+  inputFieldTranscribing: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  transcribingText: { fontSize: 12, color: T.paperDim },
+  micBtnRound: {
+    width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.06)',
+  },
+  micBtnRoundActive: { backgroundColor: T.emberBright },
+  sendBtn: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center', backgroundColor: T.ember },
+  sendBtnOff: { opacity: 0.4 },
+
+  pickerOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
+  pickerSheet: { maxHeight: '65%', backgroundColor: T.dusk, borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 18 },
+  pickerTitle: { fontSize: 15, fontWeight: '600', color: T.paper, marginBottom: 12, textAlign: 'center' },
+  pickerRow: { paddingVertical: 13, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: 'rgba(255,255,255,0.08)' },
+  pickerRowText: { fontSize: 14, color: T.paperDim },
+  pickerRowTextActive: { color: T.emberBright, fontWeight: '600' },
+  rateSheet: { backgroundColor: T.dusk, borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 22, paddingBottom: 36 },
+  rateSliderDark: { width: '100%', height: 32, marginTop: 12 },
 });
