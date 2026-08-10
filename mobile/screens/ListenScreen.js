@@ -116,13 +116,30 @@ function isContinueVoiceCommand(text) {
 // 这次先按注释形式明确标注两套数值，用哪套取决于跑在真机还是模拟器上，
 // 只是为了让本地模拟器环境能先把整条链路测通，不是最终方案。
 const VAD_POLL_INTERVAL_MS = 300;
-// 真机校准值是1.0；这里临时改成模拟器实测的量级（0.03一档，留了几倍
-// 安全边际），仅用于本地模拟器测试环境，回真机测试记得改回1.0。
-const VAD_SPEECH_THRESHOLD = 0.03;
+// 1号注释里留的话："仅用于本地模拟器测试环境，回真机测试记得改回1.0"——
+// 这次改动就是要把免提这条线正式修好、准备再推一次真机（用户朋友的安卓
+// 实体机），改回真机校准值。0.03这个模拟器量级留在上面的注释里当参考，
+// 不再是代码里生效的值——下次要在模拟器上继续测，从注释里翻出来改回去
+// 就行，不用重新测一遍。
+const VAD_SPEECH_THRESHOLD = 1.0;
 // 连续多少次轮询都超过阈值才算"真的开始说话"（而不是一声咳嗽/物体碰撞
 // 这种瞬间噪音）——2次×300ms＝大约600ms持续声音才触发，真人开口说话
 // 通常不会只响一瞬间就停，短促噪音大概率撑不到600ms。
 const VAD_SUSTAIN_POLLS = 2;
+
+// 2026-08-10真机反馈：免提点了之后直接跳转对话页、说的话没被转写、随后
+// 手动点麦克风还报"录音启动失败"——排查代码确认根因是handleAutoInterrupt
+// 复用了手动打断那套逻辑（跳转phase='paused'+方案A的startAutoListen），
+// 而免提自己的WebRTC getUserMedia流全程占着麦克风不释放（只有关掉免提
+// 开关或退出页面才stopHandsFreeVad），安卓上expo-av的Audio.Recording
+// 没法在WebRTC还占着麦克风的时候再开一路，两边抢同一份硬件资源。
+// 用户同时明确要求：免提这条交互线必须完全独立于手动"打断"那套聊天气泡
+// 流程，不共用handleInterrupt/startAutoListen/conversation这些状态，
+// 也不能跳出朗读字幕这个视图。下面这套hf*函数和状态是专门为免提新写的，
+// 跟方案A/手动打断的代码除了都调用同一个transcribeAudio/streamAsk这些
+// 底层API之外，没有其它共享状态。
+const HF_LISTEN_WINDOW_MS = 6000; // 免提是主动发问，给比方案A"继续"确认窗口(4秒)更长的时间说完整问题
+const HF_FOLLOWUP_WINDOW_MS = 4000; // AI回答完之后的追问/继续窗口，跟方案A的等待窗口时长保持一致
 
 // 章节标题精确匹配"目录"就跳过不朗读——已有真实案例证明目录会被当成
 // 普通章节混进朗读队列（IMG_1564排版反馈截图），不追求覆盖所有变体，
@@ -353,6 +370,14 @@ export default function ListenScreen({ route, navigation }) {
   const [handsFreeEnabled, setHandsFreeEnabled] = useState(false);
   const [handsFreeMuted, setHandsFreeMuted] = useState(false);
   const [handsFreeStatus, setHandsFreeStatus] = useState('');
+  // 免提"一轮对话"独立状态机：''表示没有正在进行的免提轮次（这时候ambient
+  // 的VAD监听按老逻辑跑），非空表示正在经历"暂停朗读→听问题→AI思考→
+  // 念回答"这一整套流程，全程停留在朗读字幕这个视图里，不跳phase。
+  // 命名前缀hf（hands-free），跟方案A的auto*/方案B旧的vad*/手动的
+  // recordingRef等等这些完全不共用，就是要做到用户明确要求的"两条线互不
+  // 干扰"。
+  const [hfStage, setHfStage] = useState(''); // '' | 'listening' | 'thinking' | 'replying'
+  const [hfText, setHfText] = useState(''); // 当前显示在字幕区的文字：用户问题(thinking起)或AI回答(replying)
 
   // playOneParagraph在playFrom的异步循环里调用，如果直接读voice/rate这两个
   // state会有闭包过期的问题（循环开始时闭包捕获的是当时的值，用户中途在
@@ -399,10 +424,19 @@ export default function ListenScreen({ route, navigation }) {
   const vadSustainCountRef = useRef(0); // 连续超过阈值的轮询次数
   const vadSpeakingRef = useRef(false); // 已经触发过一次打断、还没跌回安静，避免同一段话反复触发
   // 轮询定时器是startHandsFreeVad调用那一刻创建的，之后每次触发都要调用
-  // "当前这次渲染"的handleAutoInterrupt（读到最新的phase/handsFreeMuted等
+  // "当前这次渲染"的startHandsFreeTurn（读到最新的phase/handsFreeMuted等
   // 状态）——跟方案A同样的闭包过期问题，同样的解法：用一个每次渲染都更新
   // 的ref间接调用，不直接把函数引用交给setInterval。
   const autoInterruptRef = useRef(null);
+
+  // 免提独立状态机自己的一套ref，不复用recordingRef/autoListenRef等手动
+  // 打断/方案A的引用——hfActiveRef是这一轮的"总开关"，任何一步异步操作
+  // 回来发现它变成false都要立刻放弃（说明用户中途关了免提或离开了页面）。
+  const hfActiveRef = useRef(false);
+  const hfRecordingRef = useRef(null);
+  const hfListenTimerRef = useRef(null);
+  const hfListenResolveRef = useRef(null); // 让cancelHandsFreeTurn能立刻唤醒hfRecordOnce里还在等待的Promise，不用干等到windowMs超时才发现被取消了
+  const hfAbortRef = useRef(null);
 
   async function stopSound() {
     if (soundRef.current) {
@@ -665,6 +699,7 @@ export default function ListenScreen({ route, navigation }) {
       if (autoListenRef.current && recordingRef.current) {
         recordingRef.current.stopAndUnloadAsync().catch(() => {});
       }
+      cancelHandsFreeTurn();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bookId]);
@@ -730,23 +765,187 @@ export default function ListenScreen({ route, navigation }) {
     })();
   }
 
-  // 方案B：VAD轮询检测到用户开始说话时调用的入口——只在"正在朗读"这个
-  // phase、且没有开静音的时候真正触发。跟handleInterrupt的判断条件看起来
-  // 重复（handleInterrupt自己也会检查phase），但这里必须自己先判断一次：
-  // handsFreeMuted这个开关只应该拦在"要不要触发"这一步，不应该改
-  // handleInterrupt本身的行为（手动按钮打断不受静音影响，静音只管免提
-  // 这一条自动触发的路径）。触发之后紧接着调用方案A已经写好的
-  // startAutoListen——免提打断解决的是"不用碰按钮就能让朗读停下来"，
-  // 用户实际要问的问题，复用方案A那套"停下来之后自动监听几秒"的逻辑
-  // 去捕获，没有另外发明一套新的语音捕获路径。
-  function handleAutoInterrupt() {
-    console.log(`[听书诊断] handleAutoInterrupt被调用 phase=${phase} handsFreeMuted=${handsFreeMuted}`);
+  // 2026-08-10重写：VAD轮询检测到用户开始说话时调用的入口。老版本这里
+  // 直接复用handleInterrupt（跳转到聊天气泡对话页）+startAutoListen
+  // （方案A那套expo-av录音），真机反馈两个问题：(1)体验上不符合用户
+  // 要求——免提应该停留在朗读字幕视图，不该跳转；(2)技术上有真实bug——
+  // handleInterrupt跳转之后，免提自己的WebRTC连接（vadPc1/vadPc2 +
+  // getUserMedia流）并没有被关掉，只有关闭免提总开关或退出页面才会
+  // stopHandsFreeVad，于是WebRTC和接下来expo-av的Audio.Recording同时
+  // 抢占安卓的麦克风硬件，表现成"这次没转写成功"+"手动再点麦克风报录音
+  // 启动失败"。跟1号同一天在模拟器上排查出的InCallManager会切通话音频
+  // 模式那个bug是两个独立根因，两个都要解决免提才能真正可用——那个已经
+  // 由1号修掉（去掉了InCallManager.start），这里补上剩下这半个。
+  //
+  // 新逻辑：不再touch handleInterrupt/startAutoListen/conversation/
+  // phase这些手动打断链路的任何状态，改成下面这套完全独立的hf*状态机——
+  // 触发时先stopHandsFreeVad()彻底放开麦克风，再用expo-av录一段，识别、
+  // 问AI、播放回答全程只更新hfStage/hfText，字幕区域（inNarrating分支）
+  // 根据hfStage切换显示内容，phase本身始终停在'playing'不变。整轮结束后
+  // 才重新playFrom恢复朗读、重新startHandsFreeVad恢复环境监听。
+  function startHandsFreeTurn() {
     if (phase !== 'playing') return;
     if (handsFreeMuted) return;
-    handleInterrupt();
-    startAutoListen();
+    if (hfActiveRef.current) return;
+    hfActiveRef.current = true;
+    epochRef.current += 1;
+    (async () => {
+      await stopSound();
+      stopHandsFreeVad(); // 让出麦克风给下面expo-av的Audio.Recording用
+      setHfStage('listening');
+      setHfText('');
+      const text = await hfRecordOnce(HF_LISTEN_WINDOW_MS);
+      if (!hfActiveRef.current) return;
+      if (!text || isContinueVoiceCommand(text)) {
+        finishHandsFreeTurn();
+        return;
+      }
+      setHfText(text);
+      setHfStage('thinking');
+      await askHandsFree(text);
+    })();
   }
-  useEffect(() => { autoInterruptRef.current = handleAutoInterrupt; });
+  useEffect(() => { autoInterruptRef.current = startHandsFreeTurn; });
+
+  // 录一段固定窗口时长的音频并识别成文字——免提"听问题"和"回答完等继续/
+  // 追问"这两处都要用同一套逻辑，抽出来共用。没有用真正的语音端点检测来
+  // 判断用户说完了没有（现有STT是一次性上传识别的接口，不是流式的，做不到
+  // 真正的实时逐字转写），是固定窗口这个简化——跟方案A的AUTO_LISTEN_WINDOW_MS
+  // 是同一类已经如实记录过的简化，不是没考虑过。
+  async function hfRecordOnce(windowMs) {
+    try {
+      const { status: perm } = await Audio.getPermissionsAsync();
+      if (perm !== 'granted') return null;
+      await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
+      const recording = new Audio.Recording();
+      await recording.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
+      await recording.startAsync();
+      hfRecordingRef.current = recording;
+      await new Promise((resolve) => {
+        hfListenResolveRef.current = resolve;
+        hfListenTimerRef.current = setTimeout(resolve, windowMs);
+      });
+      hfListenTimerRef.current = null;
+      hfListenResolveRef.current = null;
+      if (!hfActiveRef.current) return null; // 等待期间被取消（关免提/离开页面），录音已经在cancelHandsFreeTurn里处理，这里直接放弃
+      const rec = hfRecordingRef.current;
+      hfRecordingRef.current = null;
+      if (!rec) return null;
+      await rec.stopAndUnloadAsync();
+      const uri = rec.getURI();
+      await Audio.setAudioModeAsync({ allowsRecordingIOS: false, playsInSilentModeIOS: true });
+      const text = await transcribeAudio(uri, FileSystem.uploadAsync, FileSystem.FileSystemUploadType);
+      return (text || '').trim();
+    } catch (e) {
+      return null; // 静默失败——免提是锦上添花的功能，任何一步出错都直接放弃这一轮，不打断听书体验、不弹错误
+    }
+  }
+
+  // 问AI+念回答；回答念完不是直接结束这一轮，而是跟方案A一样开一个短暂
+  // 的追问/继续窗口——用户明确要求"用户觉得没问题、说可以继续了，AI才
+  // 继续讲"，这里用"安静或说继续类的词"当作"没问题了"，识别到别的内容
+  // 就当成追问、递归再问一轮，不会把用户晾在这里出不来。
+  async function askHandsFree(question) {
+    if (!hfActiveRef.current) return;
+    const chapter = chaptersRef.current[posRef.current.chapterIdx];
+    await new Promise((resolve) => {
+      hfAbortRef.current = streamAsk(
+        {
+          context: {
+            bookTitle, author, chapterTitle: chapter?.title || '',
+            selection: currentCaption, pageText: '',
+            userHighlights: [], popularHighlights: [],
+          },
+          question,
+          style: 'simple',
+          history: [],
+        },
+        {
+          onDelta: () => {},
+          onDone: async (answer) => {
+            hfAbortRef.current = null;
+            const fakeCfi = `listen:${chapter?.id}:${posRef.current.paragraphIdx}`;
+            saveQaHistory({
+              bookId, bookTitle, chapterTitle: chapter?.title || '',
+              question, answer, selection: currentCaption, cfiRange: fakeCfi, style: 'simple',
+            }).catch(() => {});
+            if (!hfActiveRef.current) { resolve(); return; }
+            setHfStage('replying');
+            setHfText(answer);
+            const epoch = epochRef.current;
+            try {
+              await playOneParagraph(answer, epoch);
+            } catch (e) {
+              // 回答播放失败不阻塞后续流程，直接进入追问窗口
+            }
+            if (soundRef.current) {
+              soundRef.current.unloadAsync().catch(() => {});
+              soundRef.current = null;
+            }
+            resolve();
+          },
+          onError: () => {
+            hfAbortRef.current = null;
+            resolve();
+          },
+        },
+      );
+    });
+    if (!hfActiveRef.current) return;
+    setHfStage('listening');
+    setHfText('');
+    const followup = await hfRecordOnce(HF_FOLLOWUP_WINDOW_MS);
+    if (!hfActiveRef.current) return;
+    if (followup && !isContinueVoiceCommand(followup)) {
+      setHfText(followup);
+      setHfStage('thinking');
+      await askHandsFree(followup);
+      return;
+    }
+    finishHandsFreeTurn();
+  }
+
+  // 免提这一轮结束（不管是没听到问题、用户说继续、还是问答播完的追问窗口
+  // 安静下来）——恢复朗读，并且如果免提总开关还开着、没被静音，重新建一次
+  // WebRTC连接接回环境监听。
+  function finishHandsFreeTurn() {
+    hfActiveRef.current = false;
+    setHfStage('');
+    setHfText('');
+    const { chapterIdx, paragraphIdx } = posRef.current;
+    epochRef.current += 1;
+    playFrom(chapterIdx, paragraphIdx, epochRef.current);
+    if (handsFreeEnabled && !handsFreeMuted) {
+      setHandsFreeStatus('连接中…');
+      startHandsFreeVad();
+    }
+  }
+
+  // 中途取消这一轮免提对话（用户关掉免提总开关、或者离开听书页）——跟
+  // finishHandsFreeTurn的区别是不需要恢复朗读/重连WebRTC，调用方
+  // （handsFreeEnabled变化的effect、组件卸载清理）自己会处理后续。
+  function cancelHandsFreeTurn() {
+    if (!hfActiveRef.current) return;
+    hfActiveRef.current = false;
+    if (hfListenTimerRef.current) {
+      clearTimeout(hfListenTimerRef.current);
+      hfListenTimerRef.current = null;
+    }
+    if (hfListenResolveRef.current) {
+      hfListenResolveRef.current(); // 唤醒hfRecordOnce里还在await的Promise，不然它要等到windowMs自然超时才会检查到hfActiveRef已经变false
+      hfListenResolveRef.current = null;
+    }
+    hfAbortRef.current?.();
+    hfAbortRef.current = null;
+    const rec = hfRecordingRef.current;
+    hfRecordingRef.current = null;
+    if (rec) {
+      rec.stopAndUnloadAsync().catch(() => {});
+      Audio.setAudioModeAsync({ allowsRecordingIOS: false, playsInSilentModeIOS: true }).catch(() => {});
+    }
+    setHfStage('');
+    setHfText('');
+  }
 
   // 决策层这轮派发：连续追问改成"对话式"UI——之前点"继续追问"会跳回
   // 一个空白提问页，之前问过的内容全部看不见，用户反馈"像打断感"。改成
@@ -1136,10 +1335,29 @@ export default function ListenScreen({ route, navigation }) {
     if (handsFreeEnabled) {
       setHandsFreeStatus('连接中…');
       startHandsFreeVad();
-    } else {
-      stopHandsFreeVad();
     }
-    return () => { stopHandsFreeVad(); };
+    // 所有收尾逻辑都放进cleanup，不要在效果体的else分支里重复一遍——React
+    // 在依赖变化时会先跑上一次effect的cleanup，再跑这一次的效果体，如果
+    // "取消+判断要不要续播"分别写在cleanup和else分支两处，等else分支执行
+    // 的时候cleanup早就已经把hfActiveRef清成false了，读到的永远是false，
+    // 续播判断形同虚设（这是真机之外，纯代码审查就能发现的一处逻辑错误，
+    // 写完之后自己复查发现的，不是真机反馈）。
+    return () => {
+      const wasActive = hfActiveRef.current;
+      cancelHandsFreeTurn();
+      stopHandsFreeVad();
+      // 关掉总开关时如果正好卡在免提的听/答某一步，朗读已经因为这一轮被
+      // 停掉了，取消之后要自己接手续上，不然屏幕会停在"看起来正常、但
+      // 其实没在播"的状态。真正离开页面（组件卸载）这一刻理论上也会走
+      // 到这里，届时playFrom内部的epoch校验和React 18对已卸载组件
+      // setState的静默忽略保证了不会有实际副作用/报错，不需要额外区分
+      // "是不是真的在卸载"专门处理。
+      if (wasActive) {
+        const { chapterIdx, paragraphIdx } = posRef.current;
+        epochRef.current += 1;
+        playFrom(chapterIdx, paragraphIdx, epochRef.current);
+      }
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [handsFreeEnabled]);
 
@@ -1207,6 +1425,20 @@ export default function ListenScreen({ route, navigation }) {
                     <View style={styles.captionZone}>
                       {phase === 'loading-chapter' ? (
                         <ActivityIndicator color={EMBER.emberBright} />
+                      ) : hfStage ? (
+                        // 免提这一轮进行中——字幕区不显示原来在念的正文，改成
+                        // 免提自己的状态展示，全程留在这个视图里，不跳转页面。
+                        <>
+                          <Text style={styles.hfStageLabel}>
+                            {hfStage === 'listening' ? '正在聆听…' : hfStage === 'thinking' ? 'AI正在思考…' : 'AI回答'}
+                          </Text>
+                          {hfStage !== 'listening' && !!hfText && (
+                            <Text style={styles.captionTextEl}>{hfText}</Text>
+                          )}
+                          {hfStage === 'thinking' && (
+                            <ActivityIndicator color={EMBER.emberBright} style={styles.hfThinkingSpin} />
+                          )}
+                        </>
                       ) : (
                         <>
                           <Text style={styles.captionTextEl}>{currentCaption}</Text>
@@ -1315,7 +1547,9 @@ export default function ListenScreen({ route, navigation }) {
                     ) : (
                       <View style={styles.hfLive}>
                         <Text style={styles.listeningTag}>
-                          {handsFreeMuted ? '已静音 · 朗读继续' : '正在聆听 · 随时开口'}
+                          {hfStage
+                            ? (hfStage === 'listening' ? '正在聆听你的问题' : hfStage === 'thinking' ? 'AI正在思考…' : 'AI正在回答')
+                            : (handsFreeMuted ? '已静音 · 朗读继续' : '正在聆听 · 随时开口')}
                         </Text>
                         <TouchableOpacity
                           style={styles.muteIconBtn}
@@ -1495,6 +1729,8 @@ const styles = StyleSheet.create({
   },
   captionTextEl: { fontSize: 17, lineHeight: 27, textAlign: 'center', color: EMBER.paper },
   captionCountText: { fontSize: 10.5, color: EMBER.inkSoft, marginTop: 8, letterSpacing: 0.5 },
+  hfStageLabel: { fontSize: 12.5, color: EMBER.emberBright, letterSpacing: 0.3, marginBottom: 10 },
+  hfThinkingSpin: { marginTop: 12 },
 
   chatBody: { flexGrow: 1, padding: 16, gap: 14 },
   contextChip: {
