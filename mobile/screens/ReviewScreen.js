@@ -9,6 +9,7 @@ import { getReview } from '../lib/api';
 import { ReviewCard, formatTime } from '../components/ReviewCard';
 import ConceptGraph from '../components/ConceptGraph';
 import { useTheme } from '../theme';
+import { useAuthGate } from '../lib/authGate';
 
 const TABS = [
   { key: 'highlight', label: '划线' },
@@ -64,6 +65,7 @@ function BookCard({ group, onPress, theme }) {
 export default function ReviewScreen({ navigation }) {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
+  const { loggedIn, requireAuth } = useAuthGate();
   const [items, setItems]     = useState(null); // null = 加载中
   const [error, setError]     = useState('');
   const [refreshing, setRefreshing] = useState(false);
@@ -82,7 +84,16 @@ export default function ReviewScreen({ navigation }) {
     }
   }, []);
 
-  useFocusEffect(useCallback(() => { load(); }, [load]));
+  // 续二十三访客模式：划线复盘本质上就是"账号里存的划线/问答/图谱数据"，
+  // 访客压根没有这些数据，之前会照常发getReview()请求、后端401、这里
+  // 落进error状态显示一条"加载失败：HTTP 401 ..."+一个点了也没用的重试
+  // 按钮，是个死循环的糟糕体验。改成访客根本不发这个请求——不在决策层
+  // 明确列出的"我的/导入/AI入口"三个触发点里，但同一类问题（未登录必然
+  // 拿不到账号数据）需要同样的处理，不能因为没被点名就放着一个已知会
+  // 死循环的错误状态不管。
+  useFocusEffect(useCallback(() => {
+    if (loggedIn) load();
+  }, [loggedIn, load]));
 
   const isBookshelfTab = tab === 'highlight' || tab === 'qa';
 
@@ -108,6 +119,24 @@ export default function ReviewScreen({ navigation }) {
       ))}
     </View>
   );
+
+  if (!loggedIn) {
+    return (
+      <SafeAreaView edges={['bottom', 'left', 'right']} style={[styles.safe, { backgroundColor: theme.bg }]}>
+        <View style={[styles.header, { backgroundColor: theme.accent, paddingTop: insets.top + 14 }]}>
+          <Text style={[styles.headerTitle, { color: theme.textOnAccent }]}>划线复盘</Text>
+        </View>
+        <View style={styles.centerBox}>
+          <Text style={[styles.errorText, { color: theme.textMuted }]}>
+            当前是访客模式，登录后可以看到你的划线、问答记录和知识图谱
+          </Text>
+          <TouchableOpacity style={[styles.retryBtn, { backgroundColor: theme.accent, borderRadius: theme.radius }]} onPress={() => requireAuth('review')}>
+            <Text style={[styles.retryText, { color: theme.textOnAccent }]}>去登录 / 注册</Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   if (items === null && !error) {
     return (

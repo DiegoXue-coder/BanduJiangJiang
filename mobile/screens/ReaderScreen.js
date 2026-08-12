@@ -11,10 +11,11 @@ import { IconList, IconMessageCircle, IconBrightness, IconTextSize, IconHeadphon
 import { Asset } from 'expo-asset';
 import * as FileSystem from 'expo-file-system/legacy';
 import {
-  getBookContext, getBookFileUrl, getHighlights, saveHighlight, updateProgress,
+  getBookContext, getBookFileUrl, getHighlights, saveHighlight, updateProgress, isLoggedIn,
 } from '../lib/api';
 import { useTheme } from '../theme';
 import { FONT_ASSETS, FONTS } from '../fonts';
+import { useAuthGate } from '../lib/authGate';
 import BookChatScreen from './BookChatScreen';
 
 // 阶段十一：epub正文（书本原文内容）换成思源宋体——这部分渲染在
@@ -112,6 +113,8 @@ function ReaderInner({
   useEffect(() => {
     console.log(`[打开诊断] ReaderInner挂载，开始把EPUB交给WebView内的epub.js解析`);
   }, []);
+
+  const { requireAuth } = useAuthGate();
 
   const { addAnnotation, changeTheme, changeFontSize, changeFontFamily, toc, goToLocation, goNext, goPrevious, injectJavascript, currentLocation } = useReader();
 
@@ -358,12 +361,22 @@ function ReaderInner({
     if (currentSection?.label) setCurrentSectionTitle(currentSection.label.trim());
     if (!cfi) return;
     if (progressTimer.current) clearTimeout(progressTimer.current);
+    // 续二十三访客模式：访客没有账号，阅读进度不做持久化（跟划线一样，
+    // 是访客流程草案里"访客数据只存在本地临时状态，不同步"这条产品决策）
+    // ——之前这里访客会照常发请求、后端401、控制台打一条警告，不是错误
+    // 但也没必要每次翻页都发一个注定失败的请求，直接跳过。
+    if (!isLoggedIn()) return;
     progressTimer.current = setTimeout(() => {
       updateProgress(bookId, cfi).catch((e) => console.warn('[进度上报失败]', e.message));
     }, PROGRESS_DEBOUNCE_MS);
   }
 
   async function handleHighlight(cfiRange, text) {
+    // 续二十三访客模式：划线本来就是"读的过程"里要按账号持久化的数据
+    // （访客划线不做转移，见访客流程草案的产品决策），访客点划线不该
+    // 打后端一个必然401的请求再弹一个"HTTP 401 ..."的原始报错——直接
+    // 拦在请求之前，弹注册引导。
+    if (!requireAuth('ai')) return false;
     try {
       const saved = await saveHighlight(bookId, { cfiLocation: cfiRange, highlightedText: text });
       addAnnotation('highlight', cfiRange, { id: saved.id }, { color: '#ffd54f' });
@@ -374,6 +387,9 @@ function ReaderInner({
   }
 
   function openChat(selectionText = '', cfiRange = '') {
+    // 续二十三访客模式："问AI"是三个约定的注册引导触发点之一——访客点
+    // 这个按钮不弹聊天面板，先弹注册引导。
+    if (!requireAuth('ai')) return;
     setChatParams({ selection: selectionText, cfiRange });
     chatSheetRef.current?.present();
   }
@@ -675,7 +691,18 @@ export default function ReaderScreen({ route, navigation }) {
     const tStart = Date.now();
     console.log(`[打开诊断] 开始加载 bookId=${bookId}`);
     try {
-      const [c, h, uri] = await Promise.all([getBookContext(bookId), getHighlights(bookId), loadEpub()]);
+      // 续二十三访客模式：访客没有账号，getHighlights后端仍然要求登录
+      // （划线本来就是账号相关数据），会401。之前这三个请求捆在同一个
+      // Promise.all里，getHighlights这一个401会让整个all()连带拒绝，
+      // 导致访客翻开任何书都直接报错——书本信息(context)和EPUB文件本身
+      // 后端已经对访客放开了，不应该被这个账号相关的子请求拖累。改成
+      // 访客直接跳过这次请求，给个空数组（访客本来也没有已保存的划线），
+      // 不是"请求失败兜底"，是"压根不该发这个请求"。
+      const [c, h, uri] = await Promise.all([
+        getBookContext(bookId),
+        isLoggedIn() ? getHighlights(bookId) : Promise.resolve([]),
+        loadEpub(),
+      ]);
       console.log(`[打开诊断] context+highlights+EPUB文件全部就绪 累计耗时=${Date.now() - tStart}ms（此时epub.js还没开始在WebView里解析）`);
       setCtx(c);
       setHighlights(h);

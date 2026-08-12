@@ -9,6 +9,7 @@ import * as DocumentPicker from 'expo-document-picker';
 import { IconUpload, IconTrash } from '@tabler/icons-react-native';
 import { getLibrary, importFile, importEpub, deleteMyBook } from '../lib/api';
 import { useTheme } from '../theme';
+import { useAuthGate } from '../lib/authGate';
 import KnownIssueNotice from '../components/KnownIssueNotice';
 
 // 阶段十五（续，2026-08-06）：删除入口只在自己导入的书上出现——书架接口
@@ -114,6 +115,7 @@ async function pickAndImportFile(setImporting, onDone) {
 export default function BookshelfScreen({ navigation }) {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
+  const { requireAuth } = useAuthGate();
   const [books, setBooks]   = useState(null); // null = 加载中
   const [error, setError]   = useState('');
   const [refreshing, setRefreshing] = useState(false);
@@ -165,7 +167,12 @@ export default function BookshelfScreen({ navigation }) {
         <TouchableOpacity
           style={styles.importBtn}
           disabled={importing}
-          onPress={() => pickAndImportFile(setImporting, () => load())}
+          onPress={() => {
+            // 续二十三访客模式："导入"是三个约定的注册引导触发点之一——
+            // 访客点这个按钮不弹文件选择器，先弹注册引导。
+            if (!requireAuth('import')) return;
+            pickAndImportFile(setImporting, () => load());
+          }}
         >
           {importing ? (
             <ActivityIndicator size="small" color={theme.textOnAccent} />

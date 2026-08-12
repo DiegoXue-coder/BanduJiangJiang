@@ -26,6 +26,7 @@ import {
   getBookContext, getChapterText, getTtsPlayUrl, transcribeAudio,
   streamAsk, saveHighlight, saveQaHistory, classifyIntent,
 } from '../lib/api';
+import { useAuthGate } from '../lib/authGate';
 
 // 接替1号任务1：听书界面视觉改造，精确规格来自决策层定稿的设计稿
 // docs/设计稿/听书界面-设计稿.html——颜色/间距/圆角这些数值直接照抄那份
@@ -333,6 +334,7 @@ const orbStyles = StyleSheet.create({
 export default function ListenScreen({ route, navigation }) {
   const { bookId, bookTitle, author, initialChapterTitle, startFraction } = route.params;
   const insets = useSafeAreaInsets();
+  const { requireAuth } = useAuthGate();
 
   // phase: loading-book(打开界面首次拉章节列表) / loading-chapter(章节文字
   // 还没拉到) / playing / paused(打断后，对话线+输入框都在，等用户提问
@@ -730,6 +732,10 @@ export default function ListenScreen({ route, navigation }) {
 
   function handleInterrupt() {
     if (phase !== 'playing' && phase !== 'loading-chapter') return;
+    // 续二十三访客模式：打断听书是为了问AI，属于三个约定触发点里的
+    // "AI相关入口"——访客点这个按钮不进对话视图，先弹注册引导。朗读本身
+    // （包括听书这个功能的入口）对访客照常开放，只挡这一步。
+    if (!requireAuth('ai')) return;
     epochRef.current += 1;
     stopSound();
     // 免提总开关开着的话，环境监听那路expo-av录音一直在跑——用户改用手动
@@ -1593,7 +1599,13 @@ export default function ListenScreen({ route, navigation }) {
                   <>
                     <TouchableOpacity
                       style={[styles.micToggle, handsFreeEnabled && styles.micToggleOn]}
-                      onPress={() => setHandsFreeEnabled((v) => !v)}
+                      onPress={() => {
+                        // 续二十三访客模式：免提是"AI相关入口"，只挡"开启"这个
+                        // 方向——关掉免提（已经开着的情况下）不需要账号，任何
+                        // 时候都该能关，只是访客理论上没法先把它打开。
+                        if (!handsFreeEnabled && !requireAuth('ai')) return;
+                        setHandsFreeEnabled((v) => !v);
+                      }}
                       accessibilityLabel="开始提问"
                     >
                       {handsFreeEnabled
