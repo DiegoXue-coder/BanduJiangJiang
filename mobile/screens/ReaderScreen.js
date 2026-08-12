@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View, Text, TouchableOpacity, StyleSheet, ActivityIndicator, Alert,
-  Modal, FlatList, PanResponder,
+  Modal, FlatList, PanResponder, Platform,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Reader, useReader } from '@epubjs-react-native/core';
@@ -23,7 +23,22 @@ import BookChatScreen from './BookChatScreen';
 // 这部分是这次字体改造里唯一没法在任何预览环境验证的部分（epub渲染本身
 // 在这个项目的沙盒预览里一直不稳定，是这个会话里反复记录过的已知限制），
 // 需要真机确认实际效果，若加载失败WebView会静默回退到默认字体，不会白屏。
-const EPUB_SERIF_FONT_FAMILY = 'SourceHanSerifSC';
+//
+// 阶段十九：正文字体从"固定思源宋体"改成三选一（宋体/黑体/楷体，新增
+// 霞鹜文楷）。family名字是自己起的字符串，只要跟下面注入的@font-face
+// 声明和changeFontFamily调用保持一致就行，不需要跟字体文件本身的
+// 内部命名一致。
+const BODY_FONT_OPTIONS = [
+  { key: 'serif', label: '宋体', family: 'SourceHanSerifSC', asset: FONTS.serifRegular },
+  { key: 'sans', label: '黑体', family: 'SourceHanSansSC', asset: FONTS.sansRegular },
+  { key: 'kai', label: '楷体', family: 'LXGWWenKai', asset: FONTS.kaiRegular },
+];
+
+// 阶段十九：外壳视觉延伸（顶部工具栏/字号面板这类UI chrome），不动
+// 上面这块正文渲染。等宽字体标数据是新版视觉语言（书架首页-未来感
+// 设计稿.html）里明确强调的细节，这里只用在"16pt"这类数值型标签上，
+// 不是给正文用的，正文字体走的是上面BODY_FONT_OPTIONS那一套三选一。
+const MONO_FONT = Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' });
 
 // 2026-08-06排版反馈：决策层用真实截图做before/after对比后确认，行高从
 // 默认1.5调到1.75，三档主题（亮色/护眼/夜间）都要统一生效，不是只改一档。
@@ -199,6 +214,7 @@ function ReaderInner({
   const [showThemePanel, setShowThemePanel] = useState(false);
   const [showFontSizePanel, setShowFontSizePanel] = useState(false);
   const [fontSizePt, setFontSizePt] = useState(FONT_SIZE_DEFAULT);
+  const [bodyFontKey, setBodyFontKey] = useState('serif');
   // 长按原生菜单（menuItems）在拖动选区手柄调整范围后不会重新弹出——这是
   // react-native-webview 自身的已知限制，不是我们代码能修的。改用这个悬浮条
   // 兜底：只要 epub.js 报了新的选区（onSelected，拖动调整后也会正常触发），
@@ -232,31 +248,52 @@ function ReaderInner({
     }
   }
 
-  // 正文换思源宋体：往WebView文档头部插一段@font-face引用字体文件的本地
-  // 资源地址，再用changeFontFamily把它设成正文字体。字体文件是expo静态
-  // 资源，Asset.fromModule().uri开发模式下是Metro的本地HTTP地址、生产
-  // 包里是打包后的本地路径，两种情况WebView都能按URL正常发起请求加载。
+  // 正文字体：往WebView文档头部插入三份@font-face声明（宋体/黑体/楷体
+  // 一次性全注入，不是切换的时候才现下载现注入——避免每次切换字体都要
+  // 等一次asset下载+WebView脚本执行的闪烁感），再用changeFontFamily把
+  // 其中一个设成当前生效的正文字体。字体文件是expo静态资源，
+  // Asset.fromModule().uri开发模式下是Metro的本地HTTP地址、生产包里是
+  // 打包后的本地路径，两种情况WebView都能按URL正常发起请求加载。
   useEffect(() => {
     if (!isReady) return;
     let cancelled = false;
-    Asset.fromModule(FONT_ASSETS[FONTS.serifRegular]).downloadAsync().then((asset) => {
-      if (cancelled || !asset.localUri && !asset.uri) return;
-      const fontUrl = asset.localUri || asset.uri;
+    Promise.all(
+      BODY_FONT_OPTIONS.map((opt) =>
+        Asset.fromModule(FONT_ASSETS[opt.asset]).downloadAsync()
+          .then((asset) => ({ family: opt.family, url: asset.localUri || asset.uri }))
+          .catch(() => null),
+      ),
+    ).then((results) => {
+      if (cancelled) return;
+      const rules = results
+        .filter((r) => r && r.url)
+        .map((r) => `@font-face { font-family: "${r.family}"; src: url("${r.url}"); font-weight: normal; }`)
+        .join(' ');
+      if (!rules) return; // 全部加载失败就静默保留默认字体，不影响阅读
       injectJavascript(`
         (function() {
           try {
             var style = document.createElement('style');
-            style.innerHTML = '@font-face { font-family: "${EPUB_SERIF_FONT_FAMILY}"; src: url("${fontUrl}"); font-weight: normal; }';
+            style.innerHTML = '${rules}';
             document.head.appendChild(style);
           } catch (e) {}
         })();
         true;
       `);
-      changeFontFamily(EPUB_SERIF_FONT_FAMILY);
-    }).catch(() => {}); // 加载失败就静默保留默认字体，不影响阅读
+    }).catch(() => {});
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isReady]);
+
+  // 字体选择变化时单独切换生效字体——跟上面"注入全部@font-face声明"这个
+  // effect分开，切换字体不用重新走一次asset下载，只是换一下已经注入好的
+  // 样式表里选用哪个font-family。
+  useEffect(() => {
+    if (!isReady) return;
+    const opt = BODY_FONT_OPTIONS.find((o) => o.key === bodyFontKey) || BODY_FONT_OPTIONS[0];
+    changeFontFamily(opt.family);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isReady, bodyFontKey]);
 
   // 阶段十四：epub.js自带的目录导航页（章节列表那一页，见上面"首次打开
   // 跳过"那个effect的注释）虽然已经不再是首次打开的默认落脚点了，但书本
@@ -451,22 +488,46 @@ function ReaderInner({
       </View>
 
       {showFontSizePanel && (
-        <View style={[styles.controlPanel, { backgroundColor: uiTheme.cardBg, borderBottomColor: uiTheme.cardBorder }]}>
-          <TouchableOpacity
-            style={[styles.fontSizeBtn, { borderRadius: uiTheme.radius, borderColor: uiTheme.cardBorder }]}
-            onPress={() => adjustFontSize(-FONT_SIZE_STEP)}
-            disabled={fontSizePt <= FONT_SIZE_MIN}
-          >
-            <Text style={[styles.fontSizeBtnText, { color: uiTheme.text, fontSize: 14 }]}>A-</Text>
-          </TouchableOpacity>
-          <Text style={[styles.fontSizeValue, { color: uiTheme.textSecondary }]}>{fontSizePt}pt</Text>
-          <TouchableOpacity
-            style={[styles.fontSizeBtn, { borderRadius: uiTheme.radius, borderColor: uiTheme.cardBorder }]}
-            onPress={() => adjustFontSize(FONT_SIZE_STEP)}
-            disabled={fontSizePt >= FONT_SIZE_MAX}
-          >
-            <Text style={[styles.fontSizeBtnText, { color: uiTheme.text, fontSize: 20 }]}>A+</Text>
-          </TouchableOpacity>
+        <View style={[styles.controlPanelCol, { backgroundColor: uiTheme.cardBg, borderBottomColor: uiTheme.cardBorder }]}>
+          <View style={styles.controlPanelRow}>
+            <TouchableOpacity
+              style={[styles.fontSizeBtn, { borderRadius: uiTheme.radius, borderColor: uiTheme.cardBorder }]}
+              onPress={() => adjustFontSize(-FONT_SIZE_STEP)}
+              disabled={fontSizePt <= FONT_SIZE_MIN}
+            >
+              <Text style={[styles.fontSizeBtnText, { color: uiTheme.text, fontSize: 14 }]}>A-</Text>
+            </TouchableOpacity>
+            <Text style={[styles.fontSizeValue, { color: uiTheme.textSecondary, fontFamily: MONO_FONT }]}>{fontSizePt}pt</Text>
+            <TouchableOpacity
+              style={[styles.fontSizeBtn, { borderRadius: uiTheme.radius, borderColor: uiTheme.cardBorder }]}
+              onPress={() => adjustFontSize(FONT_SIZE_STEP)}
+              disabled={fontSizePt >= FONT_SIZE_MAX}
+            >
+              <Text style={[styles.fontSizeBtnText, { color: uiTheme.text, fontSize: 20 }]}>A+</Text>
+            </TouchableOpacity>
+          </View>
+          {/* 阶段十九：字体选择器（宋体/黑体/楷体三选一），跟字号调节放
+              在同一个面板里——都是排版控制，没必要单独占一个头部图标。 */}
+          <View style={styles.controlPanelRow}>
+            {BODY_FONT_OPTIONS.map((opt) => (
+              <TouchableOpacity
+                key={opt.key}
+                style={[
+                  styles.themeSegment,
+                  { borderRadius: uiTheme.radius, borderColor: uiTheme.cardBorder },
+                  bodyFontKey === opt.key && { backgroundColor: uiTheme.accent, borderColor: uiTheme.accent },
+                ]}
+                onPress={() => setBodyFontKey(opt.key)}
+              >
+                <Text style={[
+                  styles.themeSegmentText,
+                  { color: bodyFontKey === opt.key ? uiTheme.textOnAccent : uiTheme.textSecondary },
+                ]}>
+                  {opt.label}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
         </View>
       )}
 
@@ -741,6 +802,11 @@ const styles = StyleSheet.create({
     gap: 12, paddingVertical: 10, paddingHorizontal: 16,
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
+  controlPanelCol: {
+    gap: 12, paddingVertical: 10, paddingHorizontal: 16,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  controlPanelRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 12 },
   fontSizeBtn: {
     paddingHorizontal: 14, paddingVertical: 6, borderWidth: 1,
     alignItems: 'center', justifyContent: 'center',

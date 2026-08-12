@@ -1,50 +1,64 @@
-// 阶段十：统一主题系统（"暖纸古风·护眼调整版"，决策层定稿）。
+// 阶段十九：统一主题系统换代——"暖纸古风"（阶段十定稿）已被决策层否掉，
+// 换成"未来感/国际化"方向（深色精密网格+等宽字体数据标签+3D coverflow
+// 书架），配色定档"雾灰蓝"这一档。数值直接抄自
+// docs/设计稿/书架首页-未来感设计稿.html里`.phone[data-theme="fog"]`
+// 那组CSS变量，不是凭"未来感""网格"这类文字描述自己发挥的。
 //
-// 之前每个 screen 文件自己写死一份颜色常量（BLUE/AMBER/RED各写各的），
-// 这次视觉规范要求全局统一配色+支持暗色模式，散落各处没法一次改全，
-// 集中成这一个文件，所有screen改成从这里取token。
+// 设计稿本身只给了一组配色变量（--void/--paper/--paper-dim/--paper-faint/
+// --gold/--teal这些），不是像阶段十那样直接对应本文件的token结构——
+// 映射关系：--void→bg，--paper→text（这份设计稿里"paper"指的是深色
+// 文字，不是背景，命名是从旧版沿用下来的，不要按字面意思理解成纸色
+// 背景），--gold→accent（主强调色，书架里"公版经典库"分区用这个），
+// --teal→tag（第二强调色，书架里"我的导入"分区用这个，语义上跟阶段十
+// 划线/问答两种tag区分色的角色一致，所以复用tag这个token名而不是新增
+// accent2，改动面更小）。
 //
-// 亮色模式5个核心token（背景/强调色/卡片/文字/强调色上的文字）是决策层
-// 给的定稿数值，直接照抄；暗色模式的背景/卡片/强调色/文字4个也是定稿
-// 数值，但规范原文明确写了"未经用户逐项过目，工程师实现时可以微调"。
-// 除了这些核心token之外，实际界面还需要一些规范没直接给出的扩展token
-// （次要文字色、错误色、划线/问答两种tag的区分色等）——这些是在给定的
-// 暖棕色调范围内自行推导的，不是决策层规范的一部分，以后如果视觉这边
-// 觉得不对可以只改这个文件，不用满仓库找颜色值。
+// accentSoft/tagSoft/danger/dangerSoft/cardBg/cardBorder这些设计稿没有
+// 直接给出数值的扩展token，是在雾灰蓝这组给定色调范围内自行推导的浅色/
+// 功能色变体，延续阶段十定下的"核心token照抄、扩展token自行推导"这个
+// 分工方式，不是决策层规范的一部分——如果视觉上觉得不对，只用改这个
+// 文件，不用满仓库找颜色值。
+//
+// 暗色模式用设计稿四档里最暗的"深空·柔化版"（data-theme="dusk"）当
+// 对应的dark主题——决策层原文没有明确"暗色模式要不要一起换"，这是这次
+// 实现时的判断，理由是这四档配色本来就是从亮到暗排的一组同源变体，
+// dusk是其中最暗的一档，跟"暗色模式该有的样子"语义上对得上，比继续用
+// 已经被否掉的暖纸古风暗色版更一致；如果决策层认为暗色模式不该动，
+// 这里可以单独改回旧值，不影响亮色模式。
 import { useColorScheme } from 'react-native';
 
 const light = {
   mode: 'light',
-  bg: '#EAE3D3',
-  cardBg: '#F5F1E7',
-  cardBorder: '#D6CBB3',
-  text: '#3D3226',
-  textSecondary: '#8A7A63',
-  textMuted: '#B3A78F',
-  textOnAccent: '#F3EADD',
-  accent: '#8C5642',
-  accentSoft: '#E4D4C4',
-  tag: '#A8823D',
-  tagSoft: '#F0E4C8',
+  bg: '#CCD2D8',
+  cardBg: '#E4E8EB',
+  cardBorder: '#C3C9CF',
+  text: '#161C26',
+  textSecondary: '#525C68',
+  textMuted: '#7C8794',
+  textOnAccent: '#F3F5F6',
+  accent: '#B4823A',
+  accentSoft: '#E4D5B8',
+  tag: '#2F7D76',
+  tagSoft: '#CFE0DD',
   danger: '#B5473A',
-  dangerSoft: '#F3DCD7',
+  dangerSoft: '#F0DCD9',
   shadowColor: '#000',
   radius: 4,
 };
 
 const dark = {
   mode: 'dark',
-  bg: '#2A241E',
-  cardBg: '#332B22',
-  cardBorder: '#4A3F32',
-  text: '#E3D5BE',
-  textSecondary: '#B5A88F',
-  textMuted: '#8A7E6A',
-  textOnAccent: '#F3EADD',
-  accent: '#9C6B52',
-  accentSoft: '#453A2E',
-  tag: '#C0A15C',
-  tagSoft: '#413723',
+  bg: '#1B212B',
+  cardBg: '#232A35',
+  cardBorder: '#333A45',
+  text: '#EEF1F2',
+  textSecondary: '#9098A3',
+  textMuted: '#5F6772',
+  textOnAccent: '#F3F5F6',
+  accent: '#D4A24E',
+  accentSoft: '#453A2A',
+  tag: '#4FA6A0',
+  tagSoft: '#25393C',
   danger: '#C97363',
   dangerSoft: '#3E2A24',
   shadowColor: '#000',
