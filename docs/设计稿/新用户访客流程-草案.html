@@ -1,0 +1,60 @@
+<title>ChatBook 新用户流程</title>
+<style>
+  :root{
+    --bg:#f4f1ea; --ink:#1e2430; --ink-dim:#5c6673; --line:#d8d2c2;
+    --accent:#b4823a; --accent-soft:#f0e2c8;
+    --font-serif:'Songti SC','Noto Serif SC',serif;
+    --font-sans:'PingFang SC','Segoe UI',sans-serif;
+    --font-mono:ui-monospace,'SF Mono',Menlo,monospace;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{ --bg:#1a1712; --ink:#eee7d8; --ink-dim:#a89a80; --line:#3a3327; --accent-soft:#3a2e1a; }
+  }
+  :root[data-theme="dark"]{ --bg:#1a1712; --ink:#eee7d8; --ink-dim:#a89a80; --line:#3a3327; --accent-soft:#3a2e1a; }
+  :root[data-theme="light"]{ --bg:#f4f1ea; --ink:#1e2430; --ink-dim:#5c6673; --line:#d8d2c2; --accent-soft:#f0e2c8; }
+
+  *{box-sizing:border-box;}
+  body{background:var(--bg); color:var(--ink); font-family:var(--font-sans);}
+  .wrap{max-width:880px; margin:0 auto; padding:48px 24px 80px;}
+  .eyebrow{font-family:var(--font-mono); font-size:12px; letter-spacing:.1em; color:var(--accent); text-transform:uppercase; margin-bottom:10px;}
+  h1{font-family:var(--font-serif); font-size:30px; margin:0 0 14px;}
+  .sub{color:var(--ink-dim); font-size:14.5px; max-width:640px; margin-bottom:36px;}
+
+  figure{margin:0 0 36px; background:var(--bg); border:1px solid var(--line); border-radius:12px; padding:20px; overflow-x:auto;}
+  figcaption{font-size:12.5px; color:var(--ink-dim); margin-top:14px; text-align:center;}
+
+  .open-q{background:var(--accent-soft); border-radius:10px; padding:18px 22px; margin-bottom:20px;}
+  .open-q h3{font-family:var(--font-serif); font-size:15px; margin:0 0 8px;}
+  .open-q p{font-size:13.5px; line-height:1.8; margin:0; color:var(--ink);}
+</style>
+
+<div class="wrap">
+  <div class="eyebrow">Flow Draft</div>
+  <h1>访客先试用，再决定要不要注册</h1>
+  <p class="sub">灰色是访客能做的事，金色是必须登录账号才能做的事，中间那道虚线就是"到底在哪一步拦下来问你要不要注册"——这道线放在哪，是这张图里最值得跟你确认的一个点。</p>
+
+  <figure>
+    <pre class="mermaid">
+flowchart TD
+    A["打开App"] --> B{"本地有登录态？"}
+    B -- 有 --> C["直接进完整书架\n（含我的导入）"]
+    B -- 没有 --> D["访客书架\n（只看得到公版经典库）"]
+    D --> E["点开一本书 → 阅读器\n可以翻页阅读"]
+    E --> F["试着划一条线 / 问AI一个问题"]
+    F -.拦下.-> G["注册引导弹层\n说明：注册后划线和进度才会保留"]
+    G --> H["注册 / 登录"]
+    H --> C
+    C --> I["划线 · 追问 · 笔记沉淀\n全部正常存进账号"]
+    </pre>
+    <figcaption>灰色路径（打开App到"试着划线/问AI"）不需要账号；金色路径（真正保存、我的导入、笔记沉淀）需要登录</figcaption>
+  </figure>
+
+  <div class="open-q">
+    <h3>需要你拍板的三个具体问题</h3>
+    <p>
+      <b>1. 拦截点放在哪一步？</b>——图里画的是"划线或问AI的瞬间"才弹注册引导，也可以更宽松（读完一整本书才提示）或者更紧（一进阅读器就提示，但还是能看到内容）。拦得太早等于没有访客模式，拦得太晚可能有人一直白嫖不注册。<br><br>
+      <b>2. 访客期间试的东西，注册后要不要保留？</b>——最简单的做法是"访客划线只存在手机本地，不同步，注册之后从零开始"，用户可能会觉得"我刚才做的东西没了"；更好但更贵的做法是"访客行为绑一个临时设备ID，注册那一刻把之前试的东西转移到新账号下"，这个需要后端多一层"访客转正"的逻辑，不是白给的。<br><br>
+      <b>3. AI问答要不要对访客开放？</b>——书本文字免费看问题不大，但AI追问每次都真金白银调用DeepSeek接口，访客随便问会有被刷调用量的风险。建议访客能看内容、但问AI这个动作本身就是触发注册引导的那个点（图里就是这么画的），不是"随便问到饱再拦"。
+    </p>
+  </div>
+</div>

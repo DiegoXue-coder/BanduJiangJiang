@@ -1,0 +1,207 @@
+<title>ChatBook 书架 · 未来感重设计</title>
+<style>
+  :root{
+    --font-serif:'Songti SC','Noto Serif SC',serif;
+    --font-sans:'PingFang SC','Segoe UI',sans-serif;
+    --font-mono:ui-monospace,'SF Mono',Menlo,monospace;
+  }
+  *{box-sizing:border-box;}
+  body{background:#dde2e7; font-family:var(--font-sans); color:#141a24;}
+  .stage{min-height:100vh; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:20px; padding:40px 16px;}
+  .hint{font-family:var(--font-mono); font-size:11px; color:#6b7480; letter-spacing:.06em;}
+
+  .swatches{display:flex; gap:8px; flex-wrap:wrap; justify-content:center;}
+  .swatch-btn{font-family:var(--font-sans); font-size:12.5px; font-weight:600; padding:8px 16px; border-radius:999px; border:1.5px solid #c4cbd2; background:#fff; color:#3d4552; cursor:pointer; transition:all .15s ease;}
+  .swatch-btn:hover{border-color:#9aa4ae;}
+  .swatch-btn.active{background:#141a24; border-color:#141a24; color:#fff;}
+
+  .phone{width:340px; height:680px; border-radius:38px; overflow:hidden; box-shadow:0 24px 60px rgba(20,30,45,.22); border:8px solid #0f141c; position:relative;
+    --void:#ece7de; --hairline:rgba(35,28,18,.09); --paper:#241d12; --paper-dim:#6b5f4d; --paper-faint:#9a8f7a;
+    --gold:#a97a34; --gold-dim:#7d5a26; --gold-bright:#c0913f; --teal:#2f7d76; --teal-dim:#1e5652;
+    --glow1:rgba(169,122,52,.07); --glow2:rgba(47,125,118,.05);
+    background:radial-gradient(circle at 15% 8%, var(--glow1), transparent 40%), radial-gradient(circle at 85% 90%, var(--glow2), transparent 45%), var(--void);
+    transition:background .25s ease;}
+
+  .phone[data-theme="fog"]{
+    --void:#ccd2d8; --hairline:rgba(20,30,45,.12); --paper:#161c26; --paper-dim:#525c68; --paper-faint:#7c8794;
+    --gold:#b4823a; --gold-dim:#8a6428; --gold-bright:#c99a4c; --teal:#2f7d76; --teal-dim:#1e5652;
+    --glow1:rgba(180,130,58,.06); --glow2:rgba(47,125,118,.06);
+  }
+  .phone[data-theme="stone"]{
+    --void:#b8bec3; --hairline:rgba(15,20,26,.15); --paper:#12151a; --paper-dim:#454b52; --paper-faint:#6b7278;
+    --gold:#a8783a; --gold-dim:#7d5a26; --gold-bright:#bd8c46; --teal:#276e68; --teal-dim:#194440;
+    --glow1:rgba(168,120,58,.05); --glow2:rgba(39,110,104,.06);
+  }
+  .phone[data-theme="dusk"]{
+    --void:#1b212b; --hairline:rgba(255,255,255,.09); --paper:#eef1f2; --paper-dim:#9098a3; --paper-faint:#5f6772;
+    --gold:#d4a24e; --gold-dim:#a97e3c; --gold-bright:#e8bc70; --teal:#4fa6a0; --teal-dim:#2c4d4a;
+    --glow1:rgba(212,162,78,.08); --glow2:rgba(79,166,160,.07);
+  }
+
+  .grid-overlay{position:absolute; inset:0; pointer-events:none; opacity:.6;
+    background-image:linear-gradient(var(--hairline) 1px, transparent 1px), linear-gradient(90deg, var(--hairline) 1px, transparent 1px);
+    background-size:100% 64px, 64px 100%; mask-image:linear-gradient(to bottom, black, transparent 30%);}
+
+  .screen{position:relative; height:100%; display:flex; flex-direction:column; padding-top:44px;}
+
+  .top-bar{padding:4px 22px 18px; display:flex; justify-content:space-between; align-items:flex-end;}
+  .brand{font-family:var(--font-mono); font-size:10px; letter-spacing:.22em; color:var(--gold); text-transform:uppercase;}
+  .top-title{font-family:var(--font-serif); font-size:27px; font-weight:700; margin-top:6px; color:var(--paper);}
+  .top-meta{font-family:var(--font-mono); font-size:10px; color:var(--paper-faint); text-align:right;}
+
+  .section{margin-bottom:8px;}
+  .section-head{display:flex; justify-content:space-between; align-items:baseline; padding:0 22px; margin-bottom:12px;}
+  .section-title{font-family:var(--font-sans); font-size:14px; font-weight:600; color:var(--paper); display:flex; align-items:center; gap:7px;}
+  .section-dot{width:6px; height:6px; border-radius:50%; flex:none;}
+  .section-count{font-family:var(--font-mono); font-size:10px; color:var(--paper-faint);}
+
+  .shelf{display:flex; gap:0; overflow-x:auto; padding:6px 0 22px; scroll-snap-type:x proximity; perspective:900px; -ms-overflow-style:none; scrollbar-width:none; cursor:grab; user-select:none;}
+  .shelf.dragging{cursor:grabbing; scroll-snap-type:none;}
+  .shelf::-webkit-scrollbar{display:none;}
+  .shelf::before{content:''; flex:none; width:22px;}
+  .shelf::after{content:''; flex:none; width:22px;}
+
+  .cf-item{flex:none; width:104px; margin-right:-18px; scroll-snap-align:center; transition:transform .15s ease-out, filter .15s ease-out; transform-style:preserve-3d;}
+  .cf-cover{width:104px; height:148px; border-radius:4px 8px 8px 4px; position:relative; display:flex; flex-direction:column; justify-content:flex-end; padding:10px; box-shadow:0 10px 24px rgba(0,0,0,.45), inset 0 0 0 1px rgba(255,255,255,.06);}
+  .cf-cover::before{content:''; position:absolute; left:0; top:0; bottom:0; width:5px; background:rgba(0,0,0,.35); border-radius:4px 0 0 4px;}
+  .cf-title{font-family:var(--font-serif); font-size:13px; font-weight:700; color:#fff; line-height:1.3;}
+  .cf-progress{position:absolute; left:9px; right:9px; bottom:9px; height:2px; background:rgba(255,255,255,.22); border-radius:2px; display:none;}
+  .cf-progress i{display:block; height:100%; background:var(--gold-bright); border-radius:2px;}
+  .cf-label{text-align:center; margin-top:10px; font-family:var(--font-mono); font-size:9px; color:var(--paper-faint);}
+
+  .imported .cf-cover::after{content:'IMPORT'; position:absolute; top:8px; right:8px; font-family:var(--font-mono); font-size:7px; letter-spacing:.08em; color:rgba(255,255,255,.75); background:rgba(0,0,0,.3); padding:2px 5px; border-radius:2px;}
+
+  .add-tile{flex:none; width:104px; height:148px; border:1px dashed var(--hairline); border-radius:4px 8px 8px 4px; display:flex; align-items:center; justify-content:center; margin-right:18px;}
+  .add-tile svg{width:20px; height:20px; color:var(--paper-faint);}
+
+  .caption{max-width:700px; background:#ffffff; border:1px solid #d7dce2; border-radius:10px; padding:20px 24px; font-size:13px; line-height:1.85; color:#3d4552;}
+  .caption b{color:var(--gold-dim);}
+</style>
+
+<div class="stage">
+  <div class="hint">横向拖动每一排书架 · 居中的书会"立起来"，两侧的书带一点透视旋转</div>
+  <div class="swatches" id="swatches">
+    <button class="swatch-btn active" data-theme="paper">苍白纸</button>
+    <button class="swatch-btn" data-theme="fog">雾灰蓝</button>
+    <button class="swatch-btn" data-theme="stone">冷石</button>
+    <button class="swatch-btn" data-theme="dusk">深空·柔化版</button>
+  </div>
+  <div class="phone" id="phone" data-theme="paper">
+    <div class="grid-overlay"></div>
+    <div class="screen">
+      <div class="top-bar">
+        <div>
+          <div class="brand">ChatBook</div>
+          <div class="top-title">书架</div>
+        </div>
+        <div class="top-meta">6 本典籍<br/>2 本导入</div>
+      </div>
+
+      <div class="section">
+        <div class="section-head">
+          <div class="section-title"><span class="section-dot" style="background:var(--gold);"></span>公版经典库</div>
+          <div class="section-count">官方精校 · 6</div>
+        </div>
+        <div class="shelf" id="shelf1">
+          <div class="cf-item"><div class="cf-cover" style="background:linear-gradient(160deg,#3a2e1a,#20180d);"><div class="cf-title">论语</div><div class="cf-progress" style="display:block;"><i style="width:62%;"></i></div></div><div class="cf-label">62%</div></div>
+          <div class="cf-item"><div class="cf-cover" style="background:linear-gradient(160deg,#1a2e28,#0d201a);"><div class="cf-title">孟子</div></div><div class="cf-label">未开始</div></div>
+          <div class="cf-item"><div class="cf-cover" style="background:linear-gradient(160deg,#1a2530,#0d1620);"><div class="cf-title">道德经</div><div class="cf-progress" style="display:block;"><i style="width:18%;"></i></div></div><div class="cf-label">18%</div></div>
+          <div class="cf-item"><div class="cf-cover" style="background:linear-gradient(160deg,#2e1c1a,#20100d);"><div class="cf-title">中庸</div></div><div class="cf-label">未开始</div></div>
+          <div class="cf-item"><div class="cf-cover" style="background:linear-gradient(160deg,#22201a,#15130d);"><div class="cf-title">庄子</div></div><div class="cf-label">未开始</div></div>
+          <div class="cf-item"><div class="cf-cover" style="background:linear-gradient(160deg,#1a1e2e,#0d0f20);"><div class="cf-title">墨子</div></div><div class="cf-label">未开始</div></div>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-head">
+          <div class="section-title"><span class="section-dot" style="background:var(--teal);"></span>我的导入</div>
+          <div class="section-count">仅自己可见 · 2</div>
+        </div>
+        <div class="shelf" id="shelf2">
+          <div class="cf-item imported"><div class="cf-cover" style="background:linear-gradient(160deg,#243a3a,#132020);"><div class="cf-title">百年孤独</div><div class="cf-progress" style="display:block;"><i style="width:40%;"></i></div></div><div class="cf-label">40%</div></div>
+          <div class="cf-item imported"><div class="cf-cover" style="background:linear-gradient(160deg,#3a2438,#201320);"><div class="cf-title">局外人</div></div><div class="cf-label">未开始</div></div>
+          <div class="add-tile"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M12 5v14M5 12h14"/></svg></div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="caption">
+    <b>网格线是故意做的</b>，不是随手加的装饰——精密网格、等宽字体标数据（"62%""6本"这类）、书架末尾的细描边"+"号，这几样凑在一起才是"未来/全球化精密感"的来源，比单靠配色更耐看，也是这次刻意要保留、不管选哪个配色都不会去掉的部分。<br><br>
+    <b>上面四个按钮是同一套版式换了四种配色深浅</b>，从最亮到最暗排：<br>
+    · <b>苍白纸</b>——暖白偏米，最接近纸感，但已经不是旧版那种"做旧"暖棕<br>
+    · <b>雾灰蓝</b>——比苍白纸压暗一档，偏冷灰，阴天光线那种感觉<br>
+    · <b>冷石</b>——再压暗一档，中间调的石灰色，不刺眼也不发闷<br>
+    · <b>深空·柔化版</b>——回到深色方向，但比你之前看的那版浅一些，没有那么"沉底"<br>
+    点按钮切换，哪个顺眼选哪个，也可以告诉我"再往哪个方向调一点"，不用照单全收。<br><br>
+    <b>横向可转的书架</b>——真实3D transform做的，鼠标按住拖动能看到两侧的书带透视旋转，效果类似老式CoverFlow或者实体旋转书架。<br><br>
+    <b>字体没换新的</b>——书名还是App已经打包好的思源宋体，换配色之后同一个字体读出来的感觉完全不一样，不再显"中国风"。
+  </div>
+</div>
+
+<script>
+(function(){
+  function applyCoverflow(container){
+    var items = container.querySelectorAll('.cf-item');
+    function update(){
+      var rect = container.getBoundingClientRect();
+      var centerX = rect.left + rect.width / 2;
+      items.forEach(function(item){
+        var ir = item.getBoundingClientRect();
+        var itemCenter = ir.left + ir.width / 2;
+        var dist = (itemCenter - centerX) / (rect.width / 2);
+        var clamped = Math.max(-1.4, Math.min(1.4, dist));
+        var rotate = clamped * 34;
+        var scale = 1 - Math.min(0.22, Math.abs(clamped) * 0.16);
+        var translateZ = -Math.abs(clamped) * 30;
+        item.style.transform = 'rotateY(' + (-rotate) + 'deg) scale(' + scale + ') translateZ(' + translateZ + 'px)';
+        item.style.filter = 'brightness(' + (1 - Math.min(0.35, Math.abs(clamped) * 0.3)) + ')';
+        item.style.zIndex = String(100 - Math.round(Math.abs(clamped) * 10));
+      });
+    }
+    container.addEventListener('scroll', function(){ requestAnimationFrame(update); }, { passive: true });
+    update();
+  }
+
+  // 普通鼠标滚轮默认只会让整个页面纵向滚动，不会触发这个横向容器——
+  // 加上"按住鼠标拖动"这个桌面端最常见的横向滚动交互方式，触控板/
+  // 手机上的原生横滑手势不受影响，两种操作方式都能用
+  function enableDragScroll(el){
+    var isDown = false, startX = 0, startScroll = 0, moved = false;
+    el.addEventListener('mousedown', function(e){
+      isDown = true; moved = false;
+      el.classList.add('dragging');
+      startX = e.pageX; startScroll = el.scrollLeft;
+    });
+    window.addEventListener('mouseup', function(){
+      isDown = false;
+      el.classList.remove('dragging');
+    });
+    window.addEventListener('mousemove', function(e){
+      if(!isDown) return;
+      e.preventDefault();
+      var delta = e.pageX - startX;
+      if(Math.abs(delta) > 3) moved = true;
+      el.scrollLeft = startScroll - delta;
+    });
+    // 拖动之后紧跟着的click事件屏蔽掉，避免把"拖拽"误判成"点击选中这本书"
+    el.addEventListener('click', function(e){ if(moved) e.preventDefault(); }, true);
+  }
+
+  applyCoverflow(document.getElementById('shelf1'));
+  applyCoverflow(document.getElementById('shelf2'));
+  enableDragScroll(document.getElementById('shelf1'));
+  enableDragScroll(document.getElementById('shelf2'));
+
+  var phone = document.getElementById('phone');
+  var swatchBtns = document.querySelectorAll('.swatch-btn');
+  swatchBtns.forEach(function(btn){
+    btn.addEventListener('click', function(){
+      phone.setAttribute('data-theme', btn.getAttribute('data-theme'));
+      swatchBtns.forEach(function(b){ b.classList.remove('active'); });
+      btn.classList.add('active');
+    });
+  });
+})();
+</script>
