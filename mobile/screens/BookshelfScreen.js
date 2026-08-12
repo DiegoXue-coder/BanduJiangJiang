@@ -12,6 +12,7 @@ import { IconTrash, IconPlus } from '@tabler/icons-react-native';
 import { getLibrary, importFile, importEpub, deleteMyBook } from '../lib/api';
 import { useTheme } from '../theme';
 import { FONTS } from '../fonts';
+import { useAuthGate } from '../lib/authGate';
 import KnownIssueNotice from '../components/KnownIssueNotice';
 
 // 阶段十九：书架首页视觉换代——脱离阶段十"暖纸古风"的纵向列表卡片，
@@ -245,6 +246,7 @@ export default function BookshelfScreen({ navigation }) {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
   const { width: screenWidth, height: screenHeight } = useWindowDimensions();
+  const { requireAuth } = useAuthGate();
   const [books, setBooks]   = useState(null); // null = 加载中
   const [error, setError]   = useState('');
   const [refreshing, setRefreshing] = useState(false);
@@ -367,7 +369,16 @@ export default function BookshelfScreen({ navigation }) {
                 </Text>
               </View>
             ))}
-            <AddTile theme={theme} disabled={importing} onPress={() => pickAndImportFile(setImporting, () => load())} />
+            <AddTile
+              theme={theme}
+              disabled={importing}
+              onPress={() => {
+                // 续二十三访客模式："导入"是三个约定的注册引导触发点之一——
+                // 访客点这个按钮不弹文件选择器，先弹注册引导。
+                if (!requireAuth('import')) return;
+                pickAndImportFile(setImporting, () => load());
+              }}
+            />
           </ScrollView>
         </View>
 

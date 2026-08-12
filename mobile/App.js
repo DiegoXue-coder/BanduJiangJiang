@@ -21,10 +21,11 @@ import ProfileScreen from './screens/ProfileScreen';
 import BugReportScreen from './screens/BugReportScreen';
 import FeedbackWallScreen from './screens/FeedbackWallScreen';
 import WebrtcAecTestScreen from './screens/WebrtcAecTestScreen';
-import LoginScreen from './screens/LoginScreen';
 import { useTheme } from './theme';
 import { FONT_ASSETS } from './fonts';
 import { loadStoredToken, isLoggedIn, onAuthExpired } from './lib/api';
+import { AuthGateProvider } from './lib/authGate';
+import GuestPromptModal from './components/GuestPromptModal';
 
 // 阶段十一：底部tab从emoji换成Tabler Icons（MIT协议，免费商用）
 const TAB_ICON_COMPONENT = { 书架: IconBooks, 划线复盘: IconHighlight, 我的: IconUserCircle };
@@ -129,9 +130,15 @@ export default function App() {
   const [fontsLoaded] = useFonts(FONT_ASSETS);
   const tabBarStyle = { backgroundColor: theme.cardBg, borderTopColor: theme.cardBorder };
 
-  // 阶段十三：登录态守卫。authChecked=false 期间不知道用户登没登录过，
-  // 先转圈，不能默认展示任何一边——直接默认展示书架会闪一下已登录界面，
-  // 默认展示登录页会让已登录用户每次开App都先看一眼登录页再跳走。
+  // 阶段十三：登录态检查。authChecked=false 期间不知道用户登没登录过，
+  // 先转圈，不能默认当成访客或已登录先渲染一下再纠正——那样已登录用户
+  // 会闪一下访客书架，纯浪费一次不必要的重渲染/请求。
+  //
+  // 续二十三访客模式：这里不再有"没登录=只能看登录页"这条硬性拦截了。
+  // authChecked之后不管loggedIn是true还是false，都渲染同一套
+  // Tab.Navigator——访客能正常进书架看预置书库、能翻开书阅读，只有碰到
+  // "我的"/"导入"/"AI相关入口"这三个触发点时才会由AuthGateProvider弹出
+  // 注册引导（GuestPromptModal），不是在App这一层就整个拦死。
   const [authChecked, setAuthChecked] = useState(false);
   const [loggedIn, setLoggedIn] = useState(false);
 
@@ -140,7 +147,9 @@ export default function App() {
       setLoggedIn(isLoggedIn());
       setAuthChecked(true);
     });
-    // token失效（过期/被后端拒绝）时 appFetch 会广播这个事件，统一弹回登录页。
+    // token失效（过期/被后端拒绝）时 appFetch 会广播这个事件——以前是"统一
+    // 弹回登录页"，现在改成"统一掉回访客态"，不再整个卡住不让用，用户可以
+    // 继续看公版书库，下次碰到需要登录的操作再走AuthGate那套引导重新登录。
     return onAuthExpired(() => setLoggedIn(false));
   }, []);
 
@@ -155,69 +164,62 @@ export default function App() {
     );
   }
 
-  if (!loggedIn) {
-    return (
-      <SafeAreaProvider>
-        <StatusBar style="auto" />
-        <LoginScreen onLoggedIn={handleLoggedIn} />
-        <EngineerBadge />
-      </SafeAreaProvider>
-    );
-  }
-
   return (
-    <SafeAreaProvider>
-      <EngineerBadge />
-      <GestureHandlerRootView style={{ flex: 1 }}>
-        <BottomSheetModalProvider>
-          <ReaderProvider>
-            <NavigationContainer>
-              <StatusBar style="auto" />
-              <Tab.Navigator
-                screenOptions={({ route }) => ({
-                  headerShown: false,
-                  tabBarActiveTintColor: theme.accent,
-                  tabBarInactiveTintColor: theme.textMuted,
-                  tabBarStyle,
-                  tabBarIcon: ({ color, size }) => {
-                    const IconComponent = TAB_ICON_COMPONENT[route.name];
-                    return <IconComponent color={color} size={size} strokeWidth={1.75} />;
-                  },
-                })}
-              >
-                <Tab.Screen
-                  name="书架"
-                  component={BookshelfStackScreen}
-                  options={({ route }) => ({ tabBarStyle: getTabBarStyle(route, tabBarStyle) })}
-                />
-                <Tab.Screen
-                  name="划线复盘"
-                  component={ReviewStackScreen}
-                  options={({ route }) => ({
-                    tabBarStyle: getTabBarStyle(route, tabBarStyle),
-                    // 切到别的tab再切回来，要回到总览列表，不能停在上次看的详情页。
-                    // 上一版用的 unmountOnBlur 在装的这个 react-navigation 版本里
-                    // 根本不存在（凭记忆写的，没查证，等于没修）——查了源码
-                    // （@react-navigation/bottom-tabs 的 BottomTabView.js）确认
-                    // popToTopOnBlur 才是这个版本真正支持、专门给"tab下面挂了个
-                    // stack 导航"这种场景设计的选项：离开这个tab时把嵌套的 stack
-                    // pop 回第一页（ReviewHome）。
-                    popToTopOnBlur: true,
+    <AuthGateProvider loggedIn={loggedIn} onLoggedIn={handleLoggedIn}>
+      <SafeAreaProvider>
+        <EngineerBadge />
+        <GuestPromptModal />
+        <GestureHandlerRootView style={{ flex: 1 }}>
+          <BottomSheetModalProvider>
+            <ReaderProvider>
+              <NavigationContainer>
+                <StatusBar style="auto" />
+                <Tab.Navigator
+                  screenOptions={({ route }) => ({
+                    headerShown: false,
+                    tabBarActiveTintColor: theme.accent,
+                    tabBarInactiveTintColor: theme.textMuted,
+                    tabBarStyle,
+                    tabBarIcon: ({ color, size }) => {
+                      const IconComponent = TAB_ICON_COMPONENT[route.name];
+                      return <IconComponent color={color} size={size} strokeWidth={1.75} />;
+                    },
                   })}
-                />
-                <Tab.Screen
-                  name="我的"
-                  component={ProfileStackScreen}
-                  options={({ route }) => ({
-                    tabBarStyle: getTabBarStyle(route, tabBarStyle),
-                    popToTopOnBlur: true,
-                  })}
-                />
-              </Tab.Navigator>
-            </NavigationContainer>
-          </ReaderProvider>
-        </BottomSheetModalProvider>
-      </GestureHandlerRootView>
-    </SafeAreaProvider>
+                >
+                  <Tab.Screen
+                    name="书架"
+                    component={BookshelfStackScreen}
+                    options={({ route }) => ({ tabBarStyle: getTabBarStyle(route, tabBarStyle) })}
+                  />
+                  <Tab.Screen
+                    name="划线复盘"
+                    component={ReviewStackScreen}
+                    options={({ route }) => ({
+                      tabBarStyle: getTabBarStyle(route, tabBarStyle),
+                      // 切到别的tab再切回来，要回到总览列表，不能停在上次看的详情页。
+                      // 上一版用的 unmountOnBlur 在装的这个 react-navigation 版本里
+                      // 根本不存在（凭记忆写的，没查证，等于没修）——查了源码
+                      // （@react-navigation/bottom-tabs 的 BottomTabView.js）确认
+                      // popToTopOnBlur 才是这个版本真正支持、专门给"tab下面挂了个
+                      // stack 导航"这种场景设计的选项：离开这个tab时把嵌套的 stack
+                      // pop 回第一页（ReviewHome）。
+                      popToTopOnBlur: true,
+                    })}
+                  />
+                  <Tab.Screen
+                    name="我的"
+                    component={ProfileStackScreen}
+                    options={({ route }) => ({
+                      tabBarStyle: getTabBarStyle(route, tabBarStyle),
+                      popToTopOnBlur: true,
+                    })}
+                  />
+                </Tab.Navigator>
+              </NavigationContainer>
+            </ReaderProvider>
+          </BottomSheetModalProvider>
+        </GestureHandlerRootView>
+      </SafeAreaProvider>
+    </AuthGateProvider>
   );
 }

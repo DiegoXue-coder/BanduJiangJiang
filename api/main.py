@@ -341,11 +341,26 @@ CurrentUser = Depends(get_current_user)
 def get_optional_user(request: Request) -> int | None:
     """跟 get_current_user 一样解析 JWT，但缺失/无效不报错、返回 None——专给
     `/history` 这种插件和手机端共用、鉴权仍然主要走 ExtAuth 的接口用：带了
-    有效JWT就归到真实登录用户名下，插件那边（不发JWT）完全不受影响。"""
+    有效JWT就归到真实登录用户名下，插件那边（不发JWT）完全不受影响。
+
+    续二十三访客模式：这个函数也被 app_get_book_file 复用（改造前用的是
+    CurrentUser，现在改成OptionalUser好放行访客读预置书）——那个接口的
+    token 是走 query string 的十六进制编码（见 get_current_user 注释，
+    expo-file-system下载请求没法带自定义header），一开始只照抄了
+    get_current_user读Authorization header那部分，漏了这个query string
+    分支，会导致已登录用户读自己导入的书触发_assert_book_readable误判成
+    访客而被拦掉——写完app_get_book_file那部分之后自查发现的，在真的接
+    到该接口之前先补上，不是真机反馈出来的bug。"""
     if not JWT_SECRET:
         return None
     auth_header = request.headers.get("authorization", "")
     token = auth_header[7:] if auth_header.lower().startswith("bearer ") else ""
+    if not token:
+        token_hex = request.query_params.get("token", "")
+        try:
+            token = bytes.fromhex(token_hex).decode("ascii") if token_hex else ""
+        except ValueError:
+            token = ""
     if not token:
         return None
     try:
@@ -2990,51 +3005,90 @@ async def app_delete_my_book(book_id: int, user_id: int = CurrentUser):
         pass
     return {"deleted": True, "book_id": book_id}
 
+def _assert_book_readable(book: dict, user_id: int | None) -> None:
+    """访客模式（续二十三）新增：预置书库对所有人（含未登录访客）可读；用户
+    自己导入的书只对导入者本人可读。404而不是403——不额外泄露"这个id存在
+    但你无权看"这种信息，跟别处"书本不存在"的既有措辞保持一致。
+
+    如实说明一处顺手补上的口子：在这次之前，下面几个读接口（context/
+    chapter-text/file.epub）只检查了book_id存不存在，没检查"这本导入书是不是
+    当前用户的"——也就是说任何一个已登录用户之前理论上都能靠猜/枚举book_id
+    读到别人导入的私有书，这不是访客模式引入的新问题，是本来就有的授权漏洞，
+    这次加访客可选鉴权顺带一起堵上，不是本次任务范围之外的额外改动。"""
+    if book["source"] != "preset" and (user_id is None or book["imported_by"] != user_id):
+        raise HTTPException(status_code=404, detail="书本不存在")
+
 @app.get("/app/books", response_model=list[BookOut])
-async def app_get_library(user_id: int = CurrentUser):
-    """书架：预置书库（source='preset'）对所有登录用户可见——产品定位是
-    "所有人共享同一套公版经典"，不是"各自拥有的书"，只有划线/进度/问答这些
-    "读的过程"才按用户隔离。阶段十三加真实多用户之前，这里错误地把全部
-    books按user_id过滤了，导致新注册用户书架是空的，那是bug，已修复。
+async def app_get_library(user_id: int | None = OptionalUser):
+    """书架：预置书库（source='preset'）对所有人可见，包括未登录的访客——
+    产品定位是"所有人共享同一套公版经典"，不是"各自拥有的书"，只有划线/
+    进度/问答这些"读的过程"才按用户隔离。阶段十三加真实多用户之前，这里
+    错误地把全部books按user_id过滤了，导致新注册用户书架是空的，那是bug，
+    已修复。
 
     阶段十五（续，2026-08-06）新增一条**有意为之**的例外：用户自己导入的书
     （source='imported'）只对导入者本人可见——跟上面"预置书不按用户隔离"
-    不是同一件事，不要把这条过滤条件当成阶段十三那个bug的回归再删掉。"""
+    不是同一件事，不要把这条过滤条件当成阶段十三那个bug的回归再删掉。
+
+    续二十三（2026-08-10~13访客模式）：user_id 从强制鉴权（CurrentUser）
+    改成可选（OptionalUser）——访客（user_id 为 None）只能看到预置书库，
+    看不到任何人的导入书，也没有阅读进度（阅读进度本来就按user_id关联，
+    访客没有账号，SQL直接不做这个join，不是"查出来是空的"而是"压根不查"，
+    避免用user_id=NULL去跟reading_progress.user_id这个非空外键字段比较
+    产生的NULL语义歧义）。"""
     pool = await get_pool()
     async with pool.acquire() as conn:
-        rows = await conn.fetch("""
-            SELECT b.id, b.title, b.author, b.added_at, b.source,
-                   COALESCE(rp.current_cfi_location, '') AS current_cfi_location
-            FROM books b
-            LEFT JOIN reading_progress rp
-                   ON rp.book_id = b.id AND rp.user_id = $1
-            WHERE b.source = 'preset' OR b.imported_by = $1
-            ORDER BY b.added_at DESC
-        """, user_id)
+        if user_id is None:
+            rows = await conn.fetch("""
+                SELECT b.id, b.title, b.author, b.added_at, b.source,
+                       '' AS current_cfi_location
+                FROM books b
+                WHERE b.source = 'preset'
+                ORDER BY b.added_at DESC
+            """)
+        else:
+            rows = await conn.fetch("""
+                SELECT b.id, b.title, b.author, b.added_at, b.source,
+                       COALESCE(rp.current_cfi_location, '') AS current_cfi_location
+                FROM books b
+                LEFT JOIN reading_progress rp
+                       ON rp.book_id = b.id AND rp.user_id = $1
+                WHERE b.source = 'preset' OR b.imported_by = $1
+                ORDER BY b.added_at DESC
+            """, user_id)
     return [BookOut(**dict(r)) for r in rows]
 
 @app.get("/app/books/{book_id}/context", response_model=BookContextOut)
-async def app_get_book_context(book_id: int, user_id: int = CurrentUser):
+async def app_get_book_context(book_id: int, user_id: int | None = OptionalUser):
     """翻开一本书：书本信息 + 章节目录 + 上次读到的位置。书本本身是共享预置
     书库，不按用户过滤（见 app_get_library 注释）；下面的阅读进度才按当前
-    用户过滤。"""
+    用户过滤。
+
+    续二十三访客模式：user_id 可选——访客（None）能正常翻开预置书库的书
+    （_assert_book_readable 挡掉导入书），但没有阅读进度可言（访客压根
+    不发起reading_progress查询，进度固定返回空字符串，前端从头开始读，
+    这跟"访客划线只存本地不同步"是同一条产品决策，进度也一样不做持久化）。
+    """
     pool = await get_pool()
     async with pool.acquire() as conn:
         book = await conn.fetchrow("""
-            SELECT id, title, author FROM books WHERE id = $1
+            SELECT id, title, author, source, imported_by FROM books WHERE id = $1
         """, book_id)
         if not book:
             raise HTTPException(status_code=404, detail="书本不存在")
+        _assert_book_readable(book, user_id)
 
         chapters = await conn.fetch("""
             SELECT id, order_index, title FROM chapters
             WHERE book_id = $1 ORDER BY order_index
         """, book_id)
 
-        progress = await conn.fetchrow("""
-            SELECT current_cfi_location FROM reading_progress
-            WHERE book_id = $1 AND user_id = $2
-        """, book_id, user_id)
+        progress = None
+        if user_id is not None:
+            progress = await conn.fetchrow("""
+                SELECT current_cfi_location FROM reading_progress
+                WHERE book_id = $1 AND user_id = $2
+            """, book_id, user_id)
 
     return BookContextOut(
         id=book["id"], title=book["title"], author=book["author"],
@@ -3043,7 +3097,7 @@ async def app_get_book_context(book_id: int, user_id: int = CurrentUser):
     )
 
 @app.get("/app/books/{book_id}/chapters/{chapter_id}/text")
-async def app_get_chapter_text(book_id: int, chapter_id: int, user_id: int = CurrentUser):
+async def app_get_chapter_text(book_id: int, chapter_id: int, user_id: int | None = OptionalUser):
     """阶段十七听书功能：把一章的正文按段落文字返回给手机端逐段TTS朗读。
     书本内容只存在EPUB文件本身，没有单独的文字表——复用阶段十八/EPUB清洗
     那套 _epub_doc_to_marker_paragraphs 解析逻辑。能这样做是因为本项目
@@ -3052,6 +3106,10 @@ async def app_get_chapter_text(book_id: int, chapter_id: int, user_id: int = Cur
     （spine顺序 = chapters.order_index），不是原始五花八门的用户文件，
     可以放心按下标索引对应章节，不用像清洗阶段那样处理任意结构。表格/
     图片这类没法朗读的内容直接跳过，标题转成普通文字混在正文里一起读。
+
+    续二十三访客模式：跟阅读器翻页一样，听书对访客也开放——访客流程草案
+    里"打开App到试着划线/问AI"这条灰色路径本来就包含"翻页阅读"，听书是
+    阅读的另一种形式，没有理由单独把它划进需要登录那一侧。
     """
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -3061,9 +3119,12 @@ async def app_get_chapter_text(book_id: int, chapter_id: int, user_id: int = Cur
         )
         if not chapter:
             raise HTTPException(status_code=404, detail="章节不存在")
-        book_row = await conn.fetchrow("SELECT file_path FROM books WHERE id = $1", book_id)
+        book_row = await conn.fetchrow(
+            "SELECT file_path, source, imported_by FROM books WHERE id = $1", book_id
+        )
     if not book_row or not os.path.isfile(book_row["file_path"]):
         raise HTTPException(status_code=404, detail="书本文件不存在")
+    _assert_book_readable(book_row, user_id)
 
     def _extract() -> list[str]:
         book = epub.read_epub(book_row["file_path"])
@@ -3097,23 +3158,29 @@ async def app_get_chapter_text(book_id: int, chapter_id: int, user_id: int = Cur
     return {"title": chapter["title"], "paragraphs": paragraphs}
 
 @app.get("/app/books/{book_id}/file.epub")
-async def app_get_book_file(book_id: int, user_id: int = CurrentUser):
+async def app_get_book_file(book_id: int, user_id: int | None = OptionalUser):
     """阅读器下载原始 EPUB 文件。
 
     路径必须以 .epub 结尾——epubjs-react-native 内部靠 URL 字符串里有没有
     ".epub" 子串来判断源文件类型（见 getSourceType.js），不是这个后缀的话它会
     判断成"未知类型"，内部抛错但没有把错误抛到 UI 上，界面会卡在"正在下载书本"
     转圈转到天荒地老——踩过这个坑，所以特意记这条注释。
-    鉴权 token 走 query string（见 get_current_user 注释）。书本是共享预置
-    书库，不按用户过滤（见 app_get_library 注释）。
+    鉴权 token 走 query string（见 get_current_user 注释，get_optional_user
+    这次也补上了同样的query string兜底，见那边注释）。书本是共享预置书库，
+    不按用户过滤（见 app_get_library 注释）。
+
+    续二十三访客模式：改成OptionalUser放行访客下载预置书的EPUB文件（阅读器
+    要读正文内容本来就得先下载这个文件），_assert_book_readable挡掉访客/
+    非本人读导入书。
     """
     pool = await get_pool()
     async with pool.acquire() as conn:
         book = await conn.fetchrow(
-            "SELECT file_path FROM books WHERE id = $1", book_id
+            "SELECT file_path, source, imported_by FROM books WHERE id = $1", book_id
         )
     if not book or not os.path.isfile(book["file_path"]):
         raise HTTPException(status_code=404, detail="书本文件不存在")
+    _assert_book_readable(book, user_id)
     return FileResponse(book["file_path"], media_type="application/epub+zip")
 
 @app.get("/app/books/{book_id}/highlights", response_model=list[HighlightOut])
