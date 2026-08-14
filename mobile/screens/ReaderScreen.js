@@ -13,7 +13,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import {
   getBookContext, getBookFileUrl, getHighlights, saveHighlight, updateProgress, isLoggedIn,
 } from '../lib/api';
-import { useTheme } from '../theme';
+import { useTheme, setThemeMode } from '../theme';
 import { FONT_ASSETS, FONTS } from '../fonts';
 import { useAuthGate } from '../lib/authGate';
 import BookChatScreen from './BookChatScreen';
@@ -431,9 +431,16 @@ function ReaderInner({
     chatSheetRef.current?.present();
   }
 
+  // 续二十七：正文背景色(THEMES，EPUB WebView内部)和全局chrome主题
+  // (theme.js)语义上是同一件事的两个渲染面——"护眼模式"这个概念只应该
+  // 有一份状态，不能正文变护眼色、外面的顶栏/按钮却没跟着变。这里改选
+  // 项时两头一起改，'paper'这个内部名字映射到theme.js的'eyecare'
+  // （命名不统一是历史遗留：THEMES这个对象阶段十一就有了，theme.js的
+  // eyecare是续二十七才加的，两边改名对不上收益不大，就地做一次映射）。
   function selectTheme(next) {
     setThemeName(next);
     changeTheme(THEMES[next]);
+    setThemeMode(next === 'paper' ? 'eyecare' : next);
   }
 
   function toggleThemePanel() {

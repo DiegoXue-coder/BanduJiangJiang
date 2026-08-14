@@ -7,7 +7,7 @@ import {
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import * as DocumentPicker from 'expo-document-picker';
-import Svg, { Line, Rect, Defs, LinearGradient as SvgLinearGradient, Stop, Mask, G } from 'react-native-svg';
+import Svg, { Line, Circle, Rect, Defs, LinearGradient as SvgLinearGradient, Stop, Mask, G } from 'react-native-svg';
 import { IconTrash, IconPlus } from '@tabler/icons-react-native';
 import { getLibrary, importFile, importEpub, deleteMyBook } from '../lib/api';
 import { useTheme } from '../theme';
@@ -83,6 +83,61 @@ function gradientForBook(id) {
   return COVER_GRADIENTS[n % COVER_GRADIENTS.length];
 }
 
+// 续二十七"定稿"原型：书架封面故意留两种状态并存——极少数书已经有人手工
+// 画过线条装饰（illustrated），大多数书还没轮到做、用兜底渐变+书名占位
+// （旧版就是这样，没有改变）。这不是"以后要给每本书都配一张精美插画"，
+// 是如实展示"内容库里哪些书已经有精修封面、哪些还没有"这个真实状态。
+// 定稿原型里只给了"中庸"和"论语"两本书的具体线条画法（分别是"圆环+
+// 中轴线"和"四道竹简纹"），这里原样照抄这两本书的SVG路径数值和专属
+// 渐变色——没有随手给其它书也编一套"看起来差不多"的装饰线条，那样等于
+// 我自己在设计稿没画的地方替决策层做设计决定，不是"实现"是"发挥"。
+// 以后要给别的书补插画，往这个表里加一条就行，不用碰其它代码。
+const ILLUSTRATED_COVERS = {
+  '中庸': {
+    gradient: ['#2e1c1a', '#20100d'],
+    Art: () => (
+      <>
+        <Circle cx="52" cy="56" r="30" fill="none" stroke="rgba(201,154,76,.5)" strokeWidth="1.2" />
+        <Circle cx="52" cy="56" r="16" fill="none" stroke="rgba(201,154,76,.35)" strokeWidth="1" />
+        <Line x1="52" y1="26" x2="52" y2="86" stroke="rgba(201,154,76,.3)" strokeWidth="1" />
+      </>
+    ),
+  },
+  '论语': {
+    gradient: ['#3a2e1a', '#20180d'],
+    Art: () => (
+      <>
+        <Line x1="30" y1="20" x2="30" y2="92" stroke="rgba(201,154,76,.4)" strokeWidth="2" />
+        <Line x1="46" y1="20" x2="46" y2="92" stroke="rgba(201,154,76,.4)" strokeWidth="2" />
+        <Line x1="62" y1="20" x2="62" y2="92" stroke="rgba(201,154,76,.4)" strokeWidth="2" />
+        <Line x1="78" y1="20" x2="78" y2="92" stroke="rgba(201,154,76,.4)" strokeWidth="2" />
+      </>
+    ),
+  },
+};
+
+// 封面渐变+装饰线条画在一个<Svg>里——之前书架的coverflow和"我的导入"横向
+// 列表各自内联重复了一份几乎一样的<Svg>渐变绘制代码，这次要插入illustrated
+// 判断逻辑，顺手把这段抽出来共用一次，两处都改成调这一个组件，不是留着
+// 两份重复代码各自加一遍同样的判断。
+function CoverArt({ book }) {
+  const illustrated = ILLUSTRATED_COVERS[book.title];
+  const [c1, c2] = illustrated ? illustrated.gradient : gradientForBook(book.id);
+  const Art = illustrated?.Art;
+  return (
+    <Svg style={StyleSheet.absoluteFill} width={COVER_W} height={COVER_H}>
+      <Defs>
+        <SvgLinearGradient id={`cg${book.id}`} x1="0" y1="0" x2="0.5" y2="1">
+          <Stop offset="0" stopColor={c1} />
+          <Stop offset="1" stopColor={c2} />
+        </SvgLinearGradient>
+      </Defs>
+      <Rect x="0" y="0" width={COVER_W} height={COVER_H} fill={`url(#cg${book.id})`} />
+      {Art ? <Art /> : null}
+    </Svg>
+  );
+}
+
 const COVER_W = 104;
 const COVER_H = 148;
 const ITEM_GAP = 14; // 设计稿用-18px负margin做重叠，RN动画版改成正向间距，效果更稳定
@@ -91,7 +146,6 @@ const STRIDE = COVER_W + ITEM_GAP;
 function CoverItem({ book, index, scrollX, onPress, onDeleted, theme }) {
   const isImported = book.source === 'imported';
   const hasProgress = !!book.current_cfi_location;
-  const [c1, c2] = gradientForBook(book.id);
   // scrollX=index*STRIDE正好是这个item在屏幕正中间的那一刻——sidePad在
   // 两端加的留白刚好让scrollX=0时第0个item居中，代数上会跟这里的sidePad
   // 项抵消，这里不能重复加一次，加了会导致除了第0个之外的item永远算不出
@@ -111,15 +165,7 @@ function CoverItem({ book, index, scrollX, onPress, onDeleted, theme }) {
     >
       <TouchableOpacity activeOpacity={0.85} onPress={onPress}>
         <Animated.View style={[styles.cfCover, { opacity: brightness }]}>
-          <Svg style={StyleSheet.absoluteFill} width={COVER_W} height={COVER_H}>
-            <Defs>
-              <SvgLinearGradient id={`cg${book.id}`} x1="0" y1="0" x2="0.5" y2="1">
-                <Stop offset="0" stopColor={c1} />
-                <Stop offset="1" stopColor={c2} />
-              </SvgLinearGradient>
-            </Defs>
-            <Rect x="0" y="0" width={COVER_W} height={COVER_H} fill={`url(#cg${book.id})`} />
-          </Svg>
+          <CoverArt book={book} />
           <View style={styles.cfSpine} />
           {isImported && (
             <View style={styles.cfImportBadge}>
@@ -138,6 +184,16 @@ function CoverItem({ book, index, scrollX, onPress, onDeleted, theme }) {
           <Text style={[styles.cfTitle, { fontFamily: FONTS.serifBold }]} numberOfLines={2}>{book.title}</Text>
         </Animated.View>
       </TouchableOpacity>
+      {/* 如实说明一个没做的部分："定稿"原型的封面标签画了三种状态：
+          已读完（带右上角金色勾选徽章）、具体读到百分之几（"18%"这种
+          数字）、未开始/继续阅读。后端reading_progress表只存
+          current_cfi_location这一个CFI字符串，能不能算出"读到多少%"、
+          "是不是读完了"，取决于epub.js的CFI跟整本书spine总长度的比较，
+          现在完全没有这层计算，也没有一个"读完了"的显式标记字段——这次
+          没有编一个假百分比/假徽章出来，是真的没有数据支撑这两个状态，
+          需要决策层先定"读完"怎么算（比如翻到最后一章末尾就算，还是
+          需要用户手动标记），或者后端加一个进度百分比字段，这块不是
+          忘了做，是卡在数据源上，如实标注在这里。 */}
       <Text style={[styles.cfLabel, { color: theme.textMuted, fontFamily: MONO_FONT }]} numberOfLines={1}>
         {hasProgress ? '继续阅读' : '未开始'}
       </Text>
@@ -154,6 +210,53 @@ function AddTile({ theme, onPress, disabled }) {
     >
       {disabled ? <ActivityIndicator size="small" color={theme.textMuted} /> : <IconPlus color={theme.textMuted} size={20} strokeWidth={1.75} />}
     </TouchableOpacity>
+  );
+}
+
+// 续二十七"定稿"原型：点"+"之前先弹一层格式说明（EPUB/PDF/TXT三种都
+// 支持，标出哪种排版最完整），确认之后才去跳系统原生文件选择器——旧版
+// 是点"+"直接弹文件选择器，用户对"选哪种格式的文件会怎样"没有预期。
+// 这里没有引入额外的bottom sheet依赖，用现成的transparent Modal +
+// 底部对齐的卡片自己实现滑出效果，跟这个文件里"importing"状态那个
+// Modal是同一个套路，不用为了这一个新面板多装一个库。
+const IMPORT_FORMATS = [
+  { key: 'epub', label: 'EPUB', hint: '推荐 · 排版最完整', good: true },
+  { key: 'pdf', label: 'PDF', hint: '自动转换，长文档可能需要1-2分钟', good: false },
+  { key: 'txt', label: 'TXT', hint: '自动转换，速度最快', good: false },
+];
+
+function ImportFormatSheet({ visible, theme, onClose, onConfirm }) {
+  return (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <TouchableOpacity style={styles.sheetBackdrop} activeOpacity={1} onPress={onClose}>
+        {/* 内层再包一层TouchableOpacity吸收点击事件，不让点卡片本身也
+            触发外层backdrop的onClose——跟GuestPromptModal/其它弹层同样
+            的"点背景关闭、点内容不关闭"处理方式，项目里已经有这个约定。 */}
+        <TouchableOpacity activeOpacity={1} onPress={() => {}} style={[styles.importSheetCard, { backgroundColor: theme.cardBg }]}>
+          <View style={[styles.sheetHandle, { backgroundColor: theme.cardBorder }]} />
+          <Text style={[styles.importSheetTitle, { color: theme.text, fontFamily: FONTS.serifBold }]}>导入你的书</Text>
+          <View style={styles.fmtList}>
+            {IMPORT_FORMATS.map((f) => (
+              <View
+                key={f.key}
+                style={[styles.fmtTag, { backgroundColor: f.good ? theme.accentSoft : theme.cardBg2 }]}
+              >
+                <Text style={[styles.fmtTagLabel, { color: f.good ? theme.accentDim : theme.textSecondary, fontFamily: MONO_FONT }]}>
+                  {f.label}
+                </Text>
+                <Text style={[styles.fmtTagHint, { color: theme.textMuted }]}>{f.hint}</Text>
+              </View>
+            ))}
+          </View>
+          <TouchableOpacity
+            style={[styles.importConfirmBtn, { backgroundColor: theme.accent, borderRadius: theme.radius }]}
+            onPress={onConfirm}
+          >
+            <Text style={[styles.importConfirmBtnText, { color: theme.textOnAccent }]}>从文件里选一本</Text>
+          </TouchableOpacity>
+        </TouchableOpacity>
+      </TouchableOpacity>
+    </Modal>
   );
 }
 
@@ -251,6 +354,7 @@ export default function BookshelfScreen({ navigation }) {
   const [error, setError]   = useState('');
   const [refreshing, setRefreshing] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [showImportSheet, setShowImportSheet] = useState(false);
 
   const load = useCallback(async (isRefresh = false) => {
     if (isRefresh) setRefreshing(true);
@@ -343,15 +447,7 @@ export default function BookshelfScreen({ navigation }) {
               <View key={book.id} style={{ width: COVER_W, marginRight: ITEM_GAP }}>
                 <TouchableOpacity activeOpacity={0.85} onPress={() => navigation.navigate('Reader', { bookId: book.id })}>
                   <View style={styles.cfCover}>
-                    <Svg style={StyleSheet.absoluteFill} width={COVER_W} height={COVER_H}>
-                      <Defs>
-                        <SvgLinearGradient id={`cgi${book.id}`} x1="0" y1="0" x2="0.5" y2="1">
-                          <Stop offset="0" stopColor={gradientForBook(book.id)[0]} />
-                          <Stop offset="1" stopColor={gradientForBook(book.id)[1]} />
-                        </SvgLinearGradient>
-                      </Defs>
-                      <Rect x="0" y="0" width={COVER_W} height={COVER_H} fill={`url(#cgi${book.id})`} />
-                    </Svg>
+                    <CoverArt book={book} />
                     <View style={styles.cfSpine} />
                     <View style={styles.cfImportBadge}><Text style={styles.cfImportBadgeText}>IMPORT</Text></View>
                     <TouchableOpacity
@@ -374,9 +470,11 @@ export default function BookshelfScreen({ navigation }) {
               disabled={importing}
               onPress={() => {
                 // 续二十三访客模式："导入"是三个约定的注册引导触发点之一——
-                // 访客点这个按钮不弹文件选择器，先弹注册引导。
+                // 访客点这个按钮不弹文件选择器，先弹注册引导。续二十七
+                // "定稿"原型加了一层：通过了鉴权之后不直接跳文件选择器，
+                // 先弹格式说明sheet，用户确认了解支持哪些格式再继续。
                 if (!requireAuth('import')) return;
-                pickAndImportFile(setImporting, () => load());
+                setShowImportSheet(true);
               }}
             />
           </ScrollView>
@@ -388,6 +486,16 @@ export default function BookshelfScreen({ navigation }) {
           </View>
         )}
       </ScrollView>
+
+      <ImportFormatSheet
+        visible={showImportSheet}
+        theme={theme}
+        onClose={() => setShowImportSheet(false)}
+        onConfirm={() => {
+          setShowImportSheet(false);
+          pickAndImportFile(setImporting, () => load());
+        }}
+      />
 
       {/* 决策层这轮派发：导入过程之前只有头部按钮里一个不起眼的小转圈，
           用户完全不知道要等多久、能不能退出App。这里不做真实进度条——
@@ -475,4 +583,15 @@ const styles = StyleSheet.create({
   importTitle: { fontSize: 16, fontWeight: '700', marginTop: 14 },
   importHint: { marginTop: 8 },
   importWarning: { fontSize: 13, fontWeight: '600', marginTop: 14, textAlign: 'center' },
+
+  sheetBackdrop: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(10,14,20,0.4)' },
+  importSheetCard: { borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 20, paddingBottom: 34 },
+  sheetHandle: { width: 34, height: 4, borderRadius: 2, alignSelf: 'center', marginBottom: 16 },
+  importSheetTitle: { fontSize: 17, fontWeight: '700', marginBottom: 16 },
+  fmtList: { gap: 10, marginBottom: 18 },
+  fmtTag: { flexDirection: 'row', alignItems: 'baseline', gap: 10, paddingHorizontal: 14, paddingVertical: 11, borderRadius: 8 },
+  fmtTagLabel: { fontSize: 12, fontWeight: '700' },
+  fmtTagHint: { fontSize: 11.5 },
+  importConfirmBtn: { paddingVertical: 13, alignItems: 'center' },
+  importConfirmBtnText: { fontSize: 14, fontWeight: '700' },
 });
