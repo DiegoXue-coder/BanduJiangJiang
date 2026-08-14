@@ -1,0 +1,702 @@
+<title>ChatBook 可交互原型</title>
+<style>
+  :root{
+    --font-serif:'Songti SC','Noto Serif SC',serif;
+    --font-sans:'PingFang SC','Segoe UI',sans-serif;
+    --font-mono:ui-monospace,'SF Mono',Menlo,monospace;
+    --void:#ccd2d8; --hairline:rgba(20,30,45,.12); --paper:#161c26; --paper-dim:#525c68; --paper-faint:#7c8794;
+    --gold:#b4823a; --gold-dim:#8a6428; --gold-bright:#c99a4c; --teal:#2f7d76; --teal-dim:#1e5652;
+    --surface:#ffffff; --surface-2:#f2f4f6;
+  }
+  .phone[data-mode="dark"]{
+    --void:#12161d; --hairline:rgba(255,255,255,.09); --paper:#eef1f4; --paper-dim:#a6b0bd; --paper-faint:#68717d;
+    --gold:#c99a4c; --gold-dim:#e0b46a; --gold-bright:#e6c284; --teal:#4a9b93; --teal-dim:#2f6961;
+    --surface:#1a2029; --surface-2:#212936;
+  }
+  .phone[data-mode="eyecare"]{
+    --void:#ece3d0; --hairline:rgba(60,45,20,.12); --paper:#4a3c26; --paper-dim:#7a6a4d; --paper-faint:#9c8f74;
+    --gold:#9a7233; --gold-dim:#7d5a26; --gold-bright:#b4823a; --teal:#4d7a68; --teal-dim:#345449;
+    --surface:#f6efdd; --surface-2:#eee3ca;
+  }
+  *{box-sizing:border-box;}
+  body{background:#dde2e7; font-family:var(--font-sans); color:var(--paper);}
+  .stage{min-height:100vh; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:20px; padding:40px 16px;}
+  .hint{font-family:var(--font-mono); font-size:11px; color:#6b7480; letter-spacing:.06em; text-align:center; max-width:340px;}
+
+  .phone{width:340px; height:680px; border-radius:38px; overflow:hidden;
+    box-shadow:0 2px 4px rgba(20,30,45,.12), 0 12px 20px rgba(20,30,45,.14), 0 32px 64px rgba(20,30,45,.24);
+    border:8px solid #0f141c; position:relative;
+    background:radial-gradient(circle at 18% 6%, rgba(201,154,76,.10), transparent 42%), radial-gradient(circle at 88% 92%, rgba(47,125,118,.08), transparent 48%), var(--void);}
+
+  /* 之前32%就淡出，下半屏完全没纹理，是"看着单调/空"的真实原因之一——
+     改成大部分屏幕高度都保留网格，只在最底部（贴近tab栏/工具栏那一小
+     段）才淡出，不是整个下半屏都没有 */
+  .grid-overlay{position:absolute; inset:0; pointer-events:none; opacity:.5; z-index:0;
+    background-image:linear-gradient(var(--hairline) 1px, transparent 1px), linear-gradient(90deg, var(--hairline) 1px, transparent 1px);
+    background-size:100% 64px, 64px 100%; mask-image:linear-gradient(to bottom, black, black 78%, transparent 100%);}
+
+  .statusbar{position:absolute; top:0; left:0; right:0; height:44px; z-index:5; display:flex; align-items:center; justify-content:space-between;
+    padding:0 26px; font-family:var(--font-mono); font-size:13px; font-weight:600; color:var(--paper); pointer-events:none;}
+  .statusbar .status-icons{display:flex; align-items:center; gap:5px;}
+  .statusbar svg{width:16px; height:11px;}
+
+  .app{position:relative; height:100%; display:flex; flex-direction:column; z-index:1;}
+  .screens{position:relative; flex:1; overflow:hidden;}
+  .screen{position:absolute; inset:0; display:flex; flex-direction:column; padding-top:50px;
+    opacity:0; pointer-events:none; transform:translateX(12px); transition:opacity .22s ease, transform .22s ease;}
+  .screen.active{opacity:1; pointer-events:auto; transform:translateX(0);}
+  .screen::before{content:''; position:absolute; top:0; left:0; right:0; height:180px; pointer-events:none; z-index:-1;
+    background:linear-gradient(180deg, rgba(201,154,76,.09), transparent);}
+
+  .topbar{padding:4px 20px 16px; display:flex; align-items:center; gap:10px;}
+  .back-btn{width:30px; height:30px; border-radius:50%; background:var(--surface); display:flex; align-items:center; justify-content:center; flex:none; cursor:pointer;
+    box-shadow:0 1px 2px rgba(20,30,45,.06), 0 4px 10px rgba(20,30,45,.10), inset 0 0 0 1px rgba(20,30,45,.05); transition:transform .12s ease;}
+  .back-btn:active{transform:scale(.9);}
+  .back-btn svg{width:15px; height:15px; color:var(--paper-dim);}
+  .topbar-title{font-family:var(--font-serif); font-size:19px; font-weight:700;}
+  .topbar-spacer{flex:1;}
+  .icon-btn{width:32px; height:32px; border-radius:50%; background:var(--surface); display:flex; align-items:center; justify-content:center; cursor:pointer; transition:transform .12s ease;
+    box-shadow:0 1px 2px rgba(20,30,45,.06), 0 4px 10px rgba(20,30,45,.10), inset 0 0 0 1px rgba(20,30,45,.05);}
+  .icon-btn:active{transform:scale(.9);}
+  .icon-btn svg{width:15px; height:15px; color:var(--gold-dim);}
+  .voice-chip{font-family:var(--font-mono); font-size:10.5px; color:var(--gold-dim); background:var(--surface); padding:6px 12px; border-radius:999px; cursor:pointer;
+    box-shadow:0 1px 2px rgba(20,30,45,.06), 0 4px 10px rgba(20,30,45,.10), inset 0 0 0 1px rgba(20,30,45,.05);}
+
+  .brand-row{padding:4px 22px 18px; display:flex; justify-content:space-between; align-items:flex-end;}
+  .brand{font-family:var(--font-mono); font-size:10px; letter-spacing:.22em; color:var(--gold); text-transform:uppercase;}
+  .brand-title{font-family:var(--font-serif); font-size:27px; font-weight:700; margin-top:6px;}
+  .brand-meta{font-family:var(--font-mono); font-size:10px; color:var(--paper-faint); text-align:right;}
+
+  /* ===== 书架 ===== */
+  .section-head{display:flex; justify-content:space-between; align-items:baseline; padding:0 22px; margin-bottom:12px;}
+  .section-title{font-size:14px; font-weight:600; display:flex; align-items:center; gap:7px;}
+  .section-dot{width:6px; height:6px; border-radius:50%; flex:none;}
+  .section-count{font-family:var(--font-mono); font-size:10px; color:var(--paper-faint);}
+  .shelf{display:flex; overflow-x:auto; padding:6px 0 22px; -ms-overflow-style:none; scrollbar-width:none;}
+  .shelf::-webkit-scrollbar{display:none;}
+  .shelf::before,.shelf::after{content:''; flex:none; width:22px;}
+  .cf-item{flex:none; width:104px; margin-right:-16px; cursor:pointer;}
+  .cf-cover{width:104px; height:148px; border-radius:3px 9px 9px 3px; position:relative; display:flex; flex-direction:column; justify-content:flex-end; padding:10px;
+    box-shadow:0 2px 4px rgba(0,0,0,.18), 0 14px 28px rgba(0,0,0,.32), inset 0 1px 0 rgba(255,255,255,.10), inset 0 0 0 1px rgba(255,255,255,.05);
+    transition:transform .15s ease, box-shadow .15s ease;}
+  .cf-item:active .cf-cover{transform:scale(.95); box-shadow:0 1px 2px rgba(0,0,0,.16), 0 6px 14px rgba(0,0,0,.28);}
+  .cf-cover::before{content:''; position:absolute; left:0; top:0; bottom:0; width:5px; background:rgba(0,0,0,.35); border-radius:3px 0 0 3px;}
+  .cf-cover::after{content:''; position:absolute; inset:0; border-radius:inherit; background:linear-gradient(115deg, rgba(255,255,255,.10), transparent 40%); pointer-events:none;}
+  .cf-title{font-family:var(--font-serif); font-size:13px; font-weight:700; color:#fff; line-height:1.3; position:relative;}
+  .cf-label{text-align:center; margin-top:10px; font-family:var(--font-mono); font-size:9px; color:var(--paper-faint);}
+  .cf-label.done{color:var(--gold-dim); font-weight:600;}
+  /* illustrated = 有真实设计封面的书；没有这个class的就是兜底渐变+
+     书名占位（真实App里对应BookshelfScreen.js现有的取首字兜底逻辑），
+     这次故意留两种状态并存，因为后续封面是逐步补的，不会一次性齐全 */
+  .cf-art{position:absolute; inset:0; width:100%; height:100%; pointer-events:none;}
+  .cf-finished-badge{position:absolute; top:8px; right:8px; width:18px; height:18px; border-radius:50%; background:var(--gold);
+    display:flex; align-items:center; justify-content:center; box-shadow:0 2px 6px rgba(0,0,0,.3); z-index:1;}
+  .cf-finished-badge svg{width:11px; height:11px; color:#fff;}
+  .add-tile{flex:none; width:104px; margin-right:18px; cursor:pointer; transition:transform .12s ease;}
+  .add-tile:active{transform:scale(.95);}
+  .add-tile > svg{width:104px; height:148px; padding:38px; box-sizing:border-box; border:1.5px dashed var(--hairline); border-radius:3px 9px 9px 3px; color:var(--paper-faint);}
+  .add-tile span{display:block; text-align:center; margin-top:10px; font-family:var(--font-mono); font-size:9px; color:var(--paper-faint);}
+
+  /* ===== 阅读器 ===== */
+  .reader-body{flex:1; overflow-y:auto; padding:0 24px 140px;}
+  .reader-chapter{font-family:var(--font-mono); font-size:10px; color:var(--gold-dim); text-transform:uppercase; margin-bottom:14px;}
+  .reader-text{font-family:var(--font-serif); font-size:16.5px; line-height:2.05; color:var(--paper);}
+  .reader-text .hl{background:rgba(180,130,58,.18); border-bottom:1.5px solid var(--gold); border-radius:2px 2px 0 0; padding:1px 2px;}
+  .reader-text .selectable{cursor:pointer; border-radius:2px;}
+  .reader-text .selectable.picked{background:rgba(180,130,58,.14);}
+  .select-popup{position:absolute; display:none; background:var(--paper); border-radius:8px; padding:6px; gap:2px;
+    box-shadow:0 4px 12px rgba(0,0,0,.3); z-index:10; transform:translate(-50%,-110%);}
+  .select-popup.show{display:flex;}
+  .select-popup button{font-family:var(--font-sans); font-size:12px; font-weight:600; color:#eef1f2; background:transparent; border:none; padding:7px 12px; border-radius:5px; cursor:pointer;}
+  .select-popup button:active{background:rgba(255,255,255,.12);}
+  .select-popup button:first-child{color:var(--gold-bright);}
+  /* 之前是通栏的底部工具栏，只放两个按钮时两侧空得很怪——改成贴右下角
+     悬浮的竖排按钮，不占用一整条阅读区域，也不会显得"中间空落落" */
+  .reader-fab{position:absolute; right:18px; bottom:calc(20px + env(safe-area-inset-bottom,0px)); display:flex; flex-direction:column; gap:10px; z-index:4;}
+  .rt-btn{width:46px; height:46px; border-radius:50%; background:var(--surface); display:flex; align-items:center; justify-content:center; cursor:pointer;
+    box-shadow:0 2px 4px rgba(20,30,45,.10), 0 8px 18px rgba(20,30,45,.16), inset 0 0 0 1px rgba(20,30,45,.05); transition:transform .12s ease;}
+  .rt-btn:active{transform:scale(.9);}
+  .rt-btn svg{width:19px; height:19px; color:var(--gold-dim);}
+  .rt-btn.primary{background:radial-gradient(circle at 32% 28%, var(--gold-bright), var(--gold-dim)); box-shadow:0 4px 14px rgba(138,100,40,.38), inset 0 1px 0 rgba(255,255,255,.2);}
+  .rt-btn.primary svg{color:#fff;}
+
+  /* ===== 问AI 面板（底部弹出的sheet，不是整页跳转）===== */
+  .ask-backdrop{position:absolute; inset:0; background:rgba(10,14,20,.4); opacity:0; pointer-events:none; transition:opacity .2s ease; z-index:6;}
+  .ask-backdrop.show{opacity:1; pointer-events:auto;}
+  .ask-sheet{position:absolute; left:0; right:0; bottom:0; background:var(--surface); border-radius:20px 20px 0 0; z-index:7;
+    box-shadow:0 -8px 30px rgba(0,0,0,.25); padding:10px 20px calc(18px + env(safe-area-inset-bottom,0px));
+    transform:translateY(100%); transition:transform .26s cubic-bezier(.32,.72,0,1); max-height:78%; display:flex; flex-direction:column;}
+  .ask-sheet.show{transform:translateY(0);}
+  .ask-handle{width:34px; height:4px; border-radius:2px; background:var(--hairline); margin:0 auto 16px;}
+  .ask-quote{background:var(--surface-2); border-left:2.5px solid var(--gold); border-radius:2px 8px 8px 2px; padding:10px 12px; font-family:var(--font-serif); font-size:13.5px; color:var(--paper-dim); margin-bottom:14px; display:none;}
+  .ask-quote.show{display:block;}
+  .ask-reply{display:flex; gap:10px; margin-bottom:16px;}
+  .ask-reply-dot{width:26px; height:26px; border-radius:50%; background:radial-gradient(circle at 32% 28%, var(--gold-bright), var(--gold-dim)); flex:none;}
+  .ask-reply-text{font-family:var(--font-sans); font-size:13.5px; line-height:1.75; color:var(--paper);}
+  .ask-input-row{display:flex; gap:10px; align-items:center; padding-top:12px; border-top:1px solid var(--hairline);}
+  .ask-input{flex:1; background:var(--surface-2); border-radius:999px; padding:10px 16px; font-family:var(--font-sans); font-size:12.5px; color:var(--paper-faint);}
+  .ask-send{width:34px; height:34px; border-radius:50%; background:var(--gold); display:flex; align-items:center; justify-content:center; flex:none;}
+  .ask-send svg{width:14px; height:14px; color:#fff;}
+
+  /* ===== 导入提示（点"+"之后先给格式说明，再去跳原生文件选择器，
+     不是一点就直接甩给系统的文件夹，用户对结果没有预期） ===== */
+  .import-title{font-family:var(--font-serif); font-size:17px; font-weight:700; margin-bottom:16px;}
+  .import-formats{display:flex; flex-direction:column; gap:10px; margin-bottom:18px;}
+  .fmt-tag{display:flex; align-items:baseline; gap:10px; padding:11px 14px; border-radius:8px; background:var(--surface-2);
+    font-family:var(--font-mono); font-size:12px; font-weight:700; color:var(--paper-dim);}
+  .fmt-tag.good{background:rgba(180,130,58,.10); color:var(--gold-dim);}
+  .fmt-tag span{font-family:var(--font-sans); font-size:11.5px; font-weight:400; color:var(--paper-faint);}
+  .import-confirm-btn{width:100%; font-family:var(--font-sans); font-size:14px; font-weight:700; color:#fff; background:var(--gold);
+    border:none; border-radius:10px; padding:13px; cursor:pointer;}
+  .import-confirm-btn:active{transform:scale(.98);}
+
+  /* ===== 听书 ===== */
+  .listen-stage{flex:1; position:relative; overflow:hidden;}
+  .narrating-view, .conversation-view{position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:28px; padding:0 24px 20px;
+    transition:opacity .22s ease; }
+  .conversation-view{opacity:0; pointer-events:none; justify-content:flex-start; padding-top:16px; align-items:stretch;}
+  .listen-stage.in-conversation .narrating-view{opacity:0; pointer-events:none;}
+  .listen-stage.in-conversation .conversation-view{opacity:1; pointer-events:auto;}
+
+  .context-chip{font-family:var(--font-serif); font-size:12.5px; color:var(--paper-dim); background:var(--surface-2); border-radius:2px 10px 10px 2px;
+    border-left:2.5px solid var(--gold); padding:9px 12px; margin-bottom:18px;}
+  .chat-bubbles{display:flex; flex-direction:column; gap:10px; flex:1;}
+  .bubble{max-width:84%; padding:9px 13px; border-radius:14px; font-size:13px; line-height:1.6; font-family:var(--font-sans);}
+  .bubble.user{align-self:flex-end; background:var(--gold); color:#fff; border-radius:14px 14px 3px 14px;}
+  .bubble.ai{align-self:flex-start; background:var(--surface); color:var(--paper); border-radius:14px 14px 14px 3px; box-shadow:0 1px 2px rgba(20,30,45,.06);}
+  .resume-btn{margin-top:16px; align-self:center; font-family:var(--font-sans); font-size:13px; font-weight:600; color:#fff; background:var(--teal);
+    border:none; border-radius:999px; padding:11px 26px; cursor:pointer; box-shadow:0 4px 12px rgba(30,86,82,.3);}
+  .resume-btn:active{transform:scale(.96);}
+
+  .ask-zone{display:flex; justify-content:center; padding:0 24px 6px;}
+  .interrupt-btn{font-family:var(--font-sans); font-size:13px; font-weight:600; color:var(--gold-dim); background:var(--surface); border-radius:999px;
+    padding:11px 22px; cursor:pointer; box-shadow:0 1px 2px rgba(20,30,45,.06), 0 6px 16px rgba(20,30,45,.10), inset 0 0 0 1px rgba(20,30,45,.05);}
+  .interrupt-btn:active{transform:scale(.96);}
+  .hf-live{display:none; align-items:center; gap:7px; font-family:var(--font-mono); font-size:11.5px; color:var(--teal-dim);}
+  .hf-live.show{display:flex;}
+  .hf-dot{width:7px; height:7px; border-radius:50%; background:var(--teal); animation:hfpulse 1.6s ease-in-out infinite;}
+  @keyframes hfpulse{0%,100%{opacity:.4; transform:scale(1);} 50%{opacity:1; transform:scale(1.3);}}
+
+  .mic-row{display:flex; flex-direction:column; align-items:center; gap:8px; padding:14px 0 calc(18px + env(safe-area-inset-bottom,0px));}
+  .mic-toggle{width:52px; height:52px; border-radius:50%; background:var(--surface-2); display:flex; align-items:center; justify-content:center; position:relative; cursor:pointer;
+    box-shadow:0 1px 2px rgba(20,30,45,.06), 0 6px 16px rgba(20,30,45,.10), inset 0 0 0 1px rgba(20,30,45,.05); transition:background .15s ease, transform .12s ease;}
+  .mic-toggle:active{transform:scale(.92);}
+  .mic-toggle svg:first-child{width:20px; height:20px; color:var(--paper-faint);}
+  .mic-toggle .mic-slash{position:absolute; width:26px; height:26px; color:var(--paper-faint);}
+  .mic-toggle.on{background:var(--teal);}
+  .mic-toggle.on svg:first-child{color:#fff;}
+  .mic-toggle.on .mic-slash{display:none;}
+  .mic-label{font-family:var(--font-mono); font-size:10.5px; color:var(--paper-faint);}
+  .orb-glow{position:absolute; width:220px; height:220px; border-radius:50%; top:50%; left:50%; transform:translate(-50%,-70%);
+    background:radial-gradient(circle, rgba(201,154,76,.22), transparent 65%); filter:blur(2px); pointer-events:none;
+    animation:glowpulse 2.8s ease-in-out infinite;}
+  @keyframes glowpulse{0%,100%{opacity:.7;} 50%{opacity:1;}}
+  .orb{width:96px; height:96px; border-radius:50%; background:radial-gradient(circle at 35% 30%, var(--gold-bright), var(--gold-dim));
+    box-shadow:0 0 0 1px rgba(180,130,58,.2), inset 0 2px 6px rgba(255,255,255,.25), inset 0 -8px 16px rgba(0,0,0,.15), 0 20px 40px rgba(180,130,58,.3);
+    animation:breathe 2.8s ease-in-out infinite; position:relative;}
+  @keyframes breathe{0%,100%{transform:scale(1);} 50%{transform:scale(1.08);}}
+  .listen-caption{font-family:var(--font-serif); font-size:16px; text-align:center; padding:0 40px; min-height:52px; transition:opacity .25s ease; position:relative;}
+  .listen-controls{display:flex; align-items:center; gap:22px; position:relative;}
+  .lc-btn{width:44px; height:44px; border-radius:50%; background:var(--surface); display:flex; align-items:center; justify-content:center; cursor:pointer; transition:transform .12s ease;
+    box-shadow:0 1px 2px rgba(20,30,45,.06), 0 6px 14px rgba(20,30,45,.10), inset 0 0 0 1px rgba(20,30,45,.05);}
+  .lc-btn:active{transform:scale(.92);}
+  .lc-btn.primary{width:56px; height:56px; background:radial-gradient(circle at 32% 28%, var(--gold-bright), var(--gold-dim));
+    box-shadow:0 4px 14px rgba(138,100,40,.4), inset 0 1px 0 rgba(255,255,255,.2);}
+  .lc-btn svg{width:17px; height:17px; color:var(--gold-dim);}
+  .lc-btn.primary svg{color:#fff; width:20px; height:20px;}
+
+  /* ===== 复盘 ===== */
+  .review-list{padding:0 22px; display:flex; flex-direction:column; gap:12px; overflow-y:auto;}
+  .review-card{background:var(--surface); border-radius:4px 16px 16px 4px; padding:14px 16px; display:flex; align-items:center; gap:14px; cursor:pointer;
+    box-shadow:0 1px 2px rgba(20,30,45,.05), 0 6px 16px rgba(20,30,45,.08); transition:transform .12s ease, box-shadow .12s ease;}
+  .review-card:active{transform:scale(.98); box-shadow:0 1px 2px rgba(20,30,45,.05), 0 3px 8px rgba(20,30,45,.06);}
+  .review-cover{width:38px; height:52px; border-radius:2px 6px 6px 2px; flex:none; box-shadow:0 4px 10px rgba(0,0,0,.22), inset 0 0 0 1px rgba(255,255,255,.08);}
+  .review-info b{font-family:var(--font-serif); font-size:15px; display:block;}
+  .review-info span{font-family:var(--font-mono); font-size:11px; color:var(--paper-faint);}
+
+  .graph-frame{background:var(--paper); border-radius:18px; margin:0 22px 20px; padding:20px 18px 16px; cursor:pointer;
+    box-shadow:0 1px 2px rgba(20,30,45,.06), 0 10px 24px rgba(20,30,45,.14), inset 0 0 0 1px rgba(255,255,255,.04);
+    background-image:radial-gradient(circle at 20% 0%, rgba(201,154,76,.14), transparent 55%), radial-gradient(circle at 100% 100%, rgba(47,125,118,.12), transparent 55%);
+    transition:transform .12s ease;}
+  .graph-frame:active{transform:scale(.98);}
+  .graph-frame svg{width:100%; height:auto; display:block;}
+  .graph-caption{font-family:var(--font-mono); font-size:10px; color:#9a8f7a; margin-top:10px; text-align:center;}
+  .stat-row{display:flex; justify-content:space-between; padding:11px 24px; border-bottom:1px solid var(--hairline); font-size:13px;}
+  .stat-row span:first-child{color:var(--paper-dim);}
+  .stat-row b{font-family:var(--font-mono); color:var(--gold-dim);}
+
+  /* ===== 知识星图（独立全屏页）===== */
+  .graph-count{font-family:var(--font-mono); font-size:10px; color:var(--paper-faint);}
+  .kg-canvas{flex:1; margin:0 16px; border-radius:16px; background:var(--paper); position:relative; overflow:hidden;
+    box-shadow:0 1px 2px rgba(20,30,45,.06), 0 10px 24px rgba(20,30,45,.14), inset 0 0 0 1px rgba(255,255,255,.04);
+    background-image:radial-gradient(circle at 15% 10%, rgba(201,154,76,.10), transparent 50%), radial-gradient(circle at 85% 90%, rgba(47,125,118,.10), transparent 50%);}
+  .kg-canvas svg{width:100%; height:100%; display:block;}
+  .kg-legend{display:flex; justify-content:center; gap:20px; padding:16px 0 6px;}
+  .kg-legend-item{display:flex; align-items:center; gap:6px; font-family:var(--font-mono); font-size:10.5px; color:var(--paper-dim);}
+  .kg-dot{width:8px; height:8px; border-radius:50%; flex:none;}
+  .kg-hint{text-align:center; font-family:var(--font-mono); font-size:10px; color:var(--paper-faint); padding:0 24px 18px;}
+
+  /* ===== 我的 ===== */
+  .profile-card{margin:0 22px 20px; background:var(--surface); border-radius:6px 20px 20px 6px; padding:18px 20px; display:flex; align-items:center; gap:14px;
+    box-shadow:0 1px 2px rgba(20,30,45,.05), 0 8px 20px rgba(20,30,45,.09);}
+  .profile-avatar{width:48px; height:48px; border-radius:50%; background:radial-gradient(circle at 32% 28%, var(--gold-bright), var(--gold-dim));
+    flex:none; display:flex; align-items:center; justify-content:center; color:#fff; font-family:var(--font-serif); font-size:18px; font-weight:700;
+    box-shadow:0 4px 10px rgba(138,100,40,.35);}
+  .profile-name{font-family:var(--font-serif); font-size:16px; font-weight:700;}
+  .profile-sub{font-family:var(--font-mono); font-size:10px; color:var(--paper-faint); margin-top:2px;}
+  .settings-list{margin:0 22px; background:var(--surface); border-radius:8px; overflow:hidden;
+    box-shadow:0 1px 2px rgba(20,30,45,.05), 0 6px 16px rgba(20,30,45,.07);}
+  .settings-row{padding:15px 18px; font-size:13.5px; border-bottom:0.5px solid var(--hairline); display:flex; justify-content:space-between; color:var(--paper); transition:background .12s ease;}
+  .settings-row:active{background:var(--surface-2);}
+  .settings-row:last-child{border-bottom:none;}
+  .settings-row span:last-child{color:var(--paper-faint); font-family:var(--font-mono); font-size:11px;}
+
+  /* ===== 底部Tab ===== */
+  .tabbar{display:flex; background:var(--surface); box-shadow:0 -1px 0 var(--hairline), 0 -8px 20px rgba(20,30,45,.06); padding:10px 0 calc(10px + env(safe-area-inset-bottom,0px));}
+  .tab-item{flex:1; display:flex; flex-direction:column; align-items:center; gap:4px; cursor:pointer; opacity:.5; transition:opacity .15s ease;}
+  .tab-item.active{opacity:1;}
+  .tab-item svg{width:19px; height:19px; color:var(--gold-dim);}
+  .tab-item span{font-family:var(--font-mono); font-size:9.5px; color:var(--paper-dim);}
+</style>
+
+<div class="stage">
+  <div class="hint">阅读器：右上角"Aa"调字体、图标循环日间/护眼/夜间；选中文字弹划线/问AI；右下角悬浮球进听书或问AI。听书页："打断"按钮进对话，麦克风图标切换免提（有斜杠=关闭）</div>
+  <div class="phone">
+    <div class="grid-overlay"></div>
+    <div class="statusbar">
+      <span>9:41</span>
+      <div class="status-icons">
+        <svg viewBox="0 0 18 12" fill="currentColor"><rect x="0" y="7" width="3" height="5" rx="0.5"/><rect x="4.5" y="4.5" width="3" height="7.5" rx="0.5"/><rect x="9" y="2" width="3" height="10" rx="0.5"/><rect x="13.5" y="0" width="3" height="12" rx="0.5" opacity=".35"/></svg>
+        <svg viewBox="0 0 24 12" fill="none" stroke="currentColor" stroke-width="1"><rect x="0.5" y="1" width="20" height="10" rx="2.5" fill="currentColor" fill-opacity=".12"/><rect x="2" y="2.5" width="14" height="7" rx="1.2" fill="currentColor"/><rect x="21.5" y="4" width="1.5" height="4" rx="0.7" fill="currentColor"/></svg>
+      </div>
+    </div>
+    <div class="app">
+      <div class="screens" id="screens">
+
+        <!-- 书架 -->
+        <div class="screen active" data-screen="bookshelf">
+          <div class="brand-row">
+            <div><div class="brand">ChatBook</div><div class="brand-title">书架</div></div>
+            <div class="brand-meta">4 本典籍<br/>1 本导入</div>
+          </div>
+          <div class="section-head"><div class="section-title"><span class="section-dot" style="background:var(--gold);"></span>公版经典库</div><div class="section-count">官方精校 · 4</div></div>
+          <div class="shelf">
+            <div class="cf-item" data-goto="reader" data-book="中庸">
+              <div class="cf-cover illustrated" style="background:linear-gradient(160deg,#2e1c1a,#20100d);">
+                <svg class="cf-art" viewBox="0 0 104 148"><circle cx="52" cy="56" r="30" fill="none" stroke="rgba(201,154,76,.5)" stroke-width="1.2"/><circle cx="52" cy="56" r="16" fill="none" stroke="rgba(201,154,76,.35)" stroke-width="1"/><line x1="52" y1="26" x2="52" y2="86" stroke="rgba(201,154,76,.3)" stroke-width="1"/></svg>
+                <div class="cf-finished-badge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 13l4 4L19 7"/></svg></div>
+                <div class="cf-title">中庸</div>
+              </div>
+              <div class="cf-label done">已读完</div>
+            </div>
+            <div class="cf-item" data-goto="reader" data-book="论语">
+              <div class="cf-cover illustrated" style="background:linear-gradient(160deg,#3a2e1a,#20180d);">
+                <svg class="cf-art" viewBox="0 0 104 148"><line x1="30" y1="20" x2="30" y2="92" stroke="rgba(201,154,76,.4)" stroke-width="2"/><line x1="46" y1="20" x2="46" y2="92" stroke="rgba(201,154,76,.4)" stroke-width="2"/><line x1="62" y1="20" x2="62" y2="92" stroke="rgba(201,154,76,.4)" stroke-width="2"/><line x1="78" y1="20" x2="78" y2="92" stroke="rgba(201,154,76,.4)" stroke-width="2"/></svg>
+                <div class="cf-title">论语</div>
+              </div>
+              <div class="cf-label">未开始</div>
+            </div>
+            <div class="cf-item" data-goto="reader" data-book="道德经">
+              <div class="cf-cover" style="background:linear-gradient(160deg,#1a2530,#0d1620);"><div class="cf-title">道德经</div></div>
+              <div class="cf-label">18%</div>
+            </div>
+            <div class="cf-item" data-goto="reader" data-book="庄子">
+              <div class="cf-cover" style="background:linear-gradient(160deg,#22201a,#15130d);"><div class="cf-title">庄子</div></div>
+              <div class="cf-label">未开始</div>
+            </div>
+          </div>
+          <div class="section-head"><div class="section-title"><span class="section-dot" style="background:var(--teal);"></span>我的导入</div><div class="section-count">仅自己可见 · 1</div></div>
+          <div class="shelf">
+            <div class="cf-item" data-goto="reader" data-book="百年孤独">
+              <div class="cf-cover" style="background:linear-gradient(160deg,#243a3a,#132020);"><div class="cf-title">百年孤独</div></div>
+              <div class="cf-label">40%</div>
+            </div>
+            <div class="add-tile" id="importTile">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 5v14M5 12h14"/></svg>
+              <span>导入书籍</span>
+            </div>
+          </div>
+
+          <div class="ask-backdrop" id="importBackdrop"></div>
+          <div class="ask-sheet" id="importSheet">
+            <div class="ask-handle"></div>
+            <div class="import-title">导入你的书</div>
+            <div class="import-formats">
+              <div class="fmt-tag good">EPUB<span>推荐 · 排版最完整</span></div>
+              <div class="fmt-tag">PDF<span>自动转换，长文档可能需要1-2分钟</span></div>
+              <div class="fmt-tag">TXT<span>自动转换，速度最快</span></div>
+            </div>
+            <button class="import-confirm-btn" id="importConfirmBtn">从文件里选一本</button>
+          </div>
+        </div>
+
+        <!-- 阅读器 -->
+        <div class="screen" data-screen="reader" style="position:relative;">
+          <div class="topbar">
+            <div class="back-btn" data-back><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg></div>
+            <div class="topbar-title" id="readerTitle">中庸</div>
+            <div class="topbar-spacer"></div>
+            <div class="icon-btn" title="字体"><span style="font-family:var(--font-serif); font-size:13px; font-weight:700; color:var(--gold-dim);">Aa</span></div>
+            <div class="icon-btn" id="modeToggle" title="日间 / 护眼 / 夜间，点一下换一档">
+              <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="4.2"/><path d="M12 2v2.4M12 19.6V22M4.9 4.9l1.7 1.7M17.4 17.4l1.7 1.7M2 12h2.4M19.6 12H22M4.9 19.1l1.7-1.7M17.4 6.6l1.7-1.7"/></svg>
+              <svg class="icon-leaf" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="display:none;"><path d="M4 20c8-1 14-6 15-16-10 1-15 7-16 15z"/><path d="M8 16c2-2 5-4 8-9"/></svg>
+              <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="display:none;"><path d="M20 14.5A8.5 8.5 0 019.5 4a8.5 8.5 0 1010.5 10.5z"/></svg>
+            </div>
+          </div>
+          <div class="reader-body" style="position:relative;">
+            <div class="reader-chapter">第一章</div>
+            <div class="reader-text">天命之谓性，率性之谓道，修道之谓教。道也者，不可须臾离也，可离非道也。是故君子戒慎乎其所不睹，恐惧乎其所不闻。<span class="selectable" id="pickSpan">莫见乎隐，莫显乎微，故君子慎其独也。</span>喜怒哀乐之未发，谓之中；发而皆中节，谓之和。中也者，天下之大本也；和也者，天下之达道也。</div>
+            <div class="select-popup" id="selectPopup">
+              <button data-pick-action="highlight">划线</button>
+              <button data-pick-action="ask">问AI</button>
+            </div>
+          </div>
+          <div class="reader-fab">
+            <div class="rt-btn" data-goto="listen" title="听书"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 18v-6a9 9 0 0118 0v6"/></svg></div>
+            <div class="rt-btn primary" id="askGeneralBtn" title="问AI"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 8v4l3 2"/></svg></div>
+          </div>
+
+          <div class="ask-backdrop" id="askBackdrop"></div>
+          <div class="ask-sheet" id="askSheet">
+            <div class="ask-handle"></div>
+            <div class="ask-quote" id="askQuote"></div>
+            <div class="ask-reply"><div class="ask-reply-dot"></div><div class="ask-reply-text" id="askReplyText">想问问关于这本书的什么？可以问具体某句话，也可以问整体的理解。</div></div>
+            <div class="ask-input-row">
+              <div class="ask-input">输入你的问题…</div>
+              <div class="ask-send"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 11l18-8-8 18-2-8-8-2z"/></svg></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 听书 -->
+        <div class="screen" data-screen="listen">
+          <div class="topbar">
+            <div class="back-btn" data-back><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg></div>
+            <div class="topbar-title">中庸 · 第一章</div>
+            <div class="topbar-spacer"></div>
+            <div class="voice-chip">云健 · 1.0×</div>
+          </div>
+          <div class="listen-stage" id="listenStage">
+            <div class="narrating-view" id="narratingView">
+              <div class="orb-glow"></div>
+              <div class="orb"></div>
+              <div class="listen-caption" id="listenCaption">"天命之谓性，率性之谓道，修道之谓教。"</div>
+              <div class="listen-controls">
+                <div class="lc-btn"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h4v12H6zM14 6h4v12h-4z"/></svg></div>
+                <div class="lc-btn primary"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></div>
+                <div class="lc-btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 18v-6a9 9 0 0118 0v6"/></svg></div>
+              </div>
+            </div>
+            <div class="conversation-view" id="conversationView">
+              <div class="context-chip">你打断时正讲到："莫见乎隐，莫显乎微，故君子慎其独也。"</div>
+              <div class="chat-bubbles">
+                <div class="bubble user">这跟和稀泥有什么区别？</div>
+                <div class="bubble ai">和稀泥是没有立场地讨好所有人。中庸恰好相反，它要求你先看清"过"与"不及"两端各自是什么，再站定中间。</div>
+              </div>
+              <button class="resume-btn" id="resumeBtn">继续听下去</button>
+            </div>
+          </div>
+
+          <div class="ask-zone">
+            <div class="interrupt-btn" id="interruptBtn">打断，我想问问</div>
+            <div class="hf-live" id="hfLive"><span class="hf-dot"></span>正在聆听 · 随时开口</div>
+          </div>
+          <div class="mic-row">
+            <div class="mic-toggle" id="micToggle">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0014 0M12 18v3"/></svg>
+              <svg class="mic-slash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4l16 16"/></svg>
+            </div>
+            <div class="mic-label" id="micLabel">点击开始提问</div>
+          </div>
+        </div>
+
+        <!-- 复盘（tab root） -->
+        <div class="screen" data-screen="review">
+          <div class="brand-row"><div><div class="brand">ChatBook</div><div class="brand-title">复盘</div></div></div>
+          <div class="review-list">
+            <div class="review-card" data-goto="reviewDetail"><div class="review-cover" style="background:linear-gradient(160deg,#2e1c1a,#20100d);"></div><div class="review-info"><b>中庸</b><span>23 处划线 · 67 轮追问</span></div></div>
+            <div class="review-card" data-goto="reviewDetail"><div class="review-cover" style="background:linear-gradient(160deg,#1a2530,#0d1620);"></div><div class="review-info"><b>道德经</b><span>9 处划线 · 21 轮追问</span></div></div>
+          </div>
+        </div>
+
+        <!-- 复盘详情 + 知识图谱 -->
+        <div class="screen" data-screen="reviewDetail">
+          <div class="topbar">
+            <div class="back-btn" data-back data-back-to="review"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg></div>
+            <div class="topbar-title">中庸 · 复盘</div>
+          </div>
+          <div class="graph-frame" data-goto="knowledgeGraph">
+            <svg viewBox="0 0 280 150">
+              <g stroke="#2f7d76" stroke-width="1" opacity="0.55">
+                <line x1="50" y1="85" x2="140" y2="35"/><line x1="50" y1="85" x2="130" y2="120"/>
+                <line x1="140" y1="35" x2="225" y2="65"/><line x1="130" y1="120" x2="225" y2="65"/>
+              </g>
+              <g font-family="'Songti SC',serif" font-size="10" fill="#eef1f2">
+                <circle cx="50" cy="85" r="15" fill="#b4823a"/><text x="50" y="89" text-anchor="middle">中庸</text>
+                <circle cx="140" cy="35" r="12" fill="#8a6428"/><text x="140" y="39" text-anchor="middle" font-size="9">豫则立</text>
+                <circle cx="130" cy="120" r="12" fill="#8a6428"/><text x="130" y="124" text-anchor="middle" font-size="9">慎独</text>
+                <circle cx="225" cy="65" r="12" fill="#1e5652"/><text x="225" y="69" text-anchor="middle" font-size="9">论语</text>
+              </g>
+            </svg>
+            <div class="graph-caption">节点=追问过的概念 · 连线=跨书呼应 · 点开看完整版 ›</div>
+          </div>
+          <div class="stat-row"><span>划线数</span><b>23</b></div>
+          <div class="stat-row"><span>追问轮次</span><b>67</b></div>
+          <div class="stat-row"><span>最常追问的主题</span><b>分寸感</b></div>
+        </div>
+
+        <!-- 知识图谱（独立全屏页，不是缩略图） -->
+        <div class="screen" data-screen="knowledgeGraph">
+          <div class="topbar">
+            <div class="back-btn" data-back><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg></div>
+            <div class="topbar-title">知识星图</div>
+            <div class="topbar-spacer"></div>
+            <div class="graph-count">9 个节点</div>
+          </div>
+          <div class="kg-canvas">
+            <svg viewBox="0 0 320 460" id="kgSvg">
+              <g stroke="rgba(47,125,118,.5)" stroke-width="1">
+                <line x1="160" y1="220" x2="90" y2="130"/>
+                <line x1="160" y1="220" x2="230" y2="120"/>
+                <line x1="160" y1="220" x2="100" y2="310"/>
+                <line x1="160" y1="220" x2="235" y2="300"/>
+                <line x1="100" y1="310" x2="255" y2="380"/>
+                <line x1="90" y1="130" x2="255" y2="380"/>
+                <line x1="230" y1="120" x2="60" y2="60"/>
+                <line x1="235" y1="300" x2="255" y2="380"/>
+              </g>
+              <g font-family="'Songti SC',serif" fill="#fff" text-anchor="middle">
+                <circle cx="160" cy="220" r="26" fill="#b4823a"/><text x="160" y="225" font-size="13" font-weight="700">中庸</text>
+                <circle cx="90" cy="130" r="16" fill="#8a6428"/><text x="90" y="134" font-size="10">豫则立</text>
+                <circle cx="230" cy="120" r="16" fill="#8a6428"/><text x="230" y="124" font-size="10">慎独</text>
+                <circle cx="100" cy="310" r="16" fill="#8a6428"/><text x="100" y="314" font-size="10">道不远人</text>
+                <circle cx="235" cy="300" r="16" fill="#8a6428"/><text x="235" y="304" font-size="10">中和</text>
+                <circle cx="60" cy="60" r="20" fill="#2f7d76"/><text x="60" y="65" font-size="11" font-weight="700">论语</text>
+                <circle cx="255" cy="380" r="20" fill="#2f7d76"/><text x="255" y="385" font-size="11" font-weight="700">道德经</text>
+                <circle cx="30" cy="180" r="13" fill="#1e5652"/><text x="30" y="184" font-size="9">克己</text>
+                <circle cx="290" cy="210" r="13" fill="#1e5652"/><text x="290" y="214" font-size="9">无为</text>
+              </g>
+              <line x1="60" y1="60" x2="30" y2="180" stroke="rgba(47,125,118,.5)" stroke-width="1"/>
+              <line x1="255" y1="380" x2="290" y2="210" stroke="rgba(47,125,118,.5)" stroke-width="1"/>
+            </svg>
+          </div>
+          <div class="kg-legend">
+            <div class="kg-legend-item"><span class="kg-dot" style="background:var(--gold);"></span>《中庸》本书概念</div>
+            <div class="kg-legend-item"><span class="kg-dot" style="background:var(--teal);"></span>跨书呼应</div>
+          </div>
+          <div class="kg-hint">双指缩放查看细节 · 长按节点看这个概念具体聊过什么</div>
+        </div>
+
+        <!-- 我的（tab root） -->
+        <div class="screen" data-screen="profile">
+          <div class="brand-row"><div><div class="brand">ChatBook</div><div class="brand-title">我的</div></div></div>
+          <div class="profile-card">
+            <div class="profile-avatar">薛</div>
+            <div><div class="profile-name">薛盛泽</div><div class="profile-sub">已读 6 本 · 累计 341 轮追问</div></div>
+          </div>
+          <div class="settings-list">
+            <div class="settings-row"><span>账号与安全</span><span>›</span></div>
+            <div class="settings-row"><span>意见反馈</span><span>›</span></div>
+            <div class="settings-row"><span>关于ChatBook</span><span>›</span></div>
+          </div>
+        </div>
+
+      </div>
+
+      <div class="tabbar" id="tabbar">
+        <div class="tab-item active" data-tab="bookshelf">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 4h4v16H4zM10 4h4v16h-4zM16 4h4v16h-4z"/></svg><span>书架</span>
+        </div>
+        <div class="tab-item" data-tab="review">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/></svg><span>复盘</span>
+        </div>
+        <div class="tab-item" data-tab="profile">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg><span>我的</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+  var TAB_ROOTS = ['bookshelf', 'review', 'profile'];
+  var stack = ['bookshelf'];
+
+  var screens = document.querySelectorAll('.screen');
+  var tabItems = document.querySelectorAll('.tab-item');
+  var tabbar = document.getElementById('tabbar');
+
+  function render(){
+    var current = stack[stack.length - 1];
+    screens.forEach(function(s){
+      s.classList.toggle('active', s.getAttribute('data-screen') === current);
+    });
+    var onTabRoot = TAB_ROOTS.indexOf(current) !== -1 && stack.length === 1;
+    tabbar.style.display = onTabRoot ? 'flex' : 'none';
+    tabItems.forEach(function(t){
+      t.classList.toggle('active', t.getAttribute('data-tab') === current);
+    });
+  }
+
+  document.querySelectorAll('[data-goto]').forEach(function(el){
+    el.addEventListener('click', function(){
+      var target = el.getAttribute('data-goto');
+      if(target === 'reader'){
+        var book = el.getAttribute('data-book');
+        if(book) document.getElementById('readerTitle').textContent = book;
+      }
+      stack.push(target);
+      render();
+    });
+  });
+
+  document.querySelectorAll('[data-back]').forEach(function(el){
+    el.addEventListener('click', function(){
+      var to = el.getAttribute('data-back-to');
+      if(to){
+        stack = [to];
+      } else {
+        stack.pop();
+        if(stack.length === 0) stack = ['bookshelf'];
+      }
+      render();
+    });
+  });
+
+  tabItems.forEach(function(t){
+    t.addEventListener('click', function(){
+      stack = [t.getAttribute('data-tab')];
+      render();
+    });
+  });
+
+  // 日间/护眼/夜间三档循环——真实App里theme.js本来就有light/dark两套
+  // token，默认跟系统深色模式设置走(useColorScheme)；护眼模式是这次新
+  // 加的第三档，暖色低对比度、降低蓝光刺激，是长时间阅读场景专门要的，
+  // 跟"夜间模式"（纯粹为了暗光环境不刺眼）目的不一样，不能互相替代
+  var phoneEl = document.querySelector('.phone');
+  var modeToggle = document.getElementById('modeToggle');
+  var MODES = ['light', 'eyecare', 'dark'];
+  if(modeToggle){
+    modeToggle.addEventListener('click', function(){
+      var current = phoneEl.getAttribute('data-mode') || 'light';
+      var next = MODES[(MODES.indexOf(current) + 1) % MODES.length];
+      phoneEl.setAttribute('data-mode', next);
+      modeToggle.querySelector('.icon-sun').style.display = next === 'light' ? '' : 'none';
+      modeToggle.querySelector('.icon-leaf').style.display = next === 'eyecare' ? '' : 'none';
+      modeToggle.querySelector('.icon-moon').style.display = next === 'dark' ? '' : 'none';
+    });
+  }
+
+  // 模拟"选中文字→弹出划线/问AI气泡"这个真实交互（真机是拖动选区，
+  // 网页demo里用点击这段文字代替选中动作，效果示意，不是真的文字选择）
+  var pickSpan = document.getElementById('pickSpan');
+  var selectPopup = document.getElementById('selectPopup');
+  if(pickSpan && selectPopup){
+    pickSpan.addEventListener('click', function(e){
+      e.stopPropagation();
+      var rect = pickSpan.getBoundingClientRect();
+      var parentRect = pickSpan.closest('.reader-body').getBoundingClientRect();
+      selectPopup.style.left = (rect.left - parentRect.left + rect.width / 2) + 'px';
+      selectPopup.style.top = (rect.top - parentRect.top) + 'px';
+      selectPopup.classList.toggle('show');
+    });
+    selectPopup.addEventListener('click', function(e){
+      var action = e.target.getAttribute('data-pick-action');
+      if(action === 'highlight'){
+        pickSpan.classList.add('picked');
+      } else if(action === 'ask'){
+        openAskSheet(pickSpan.textContent);
+      }
+      selectPopup.classList.remove('show');
+    });
+    document.addEventListener('click', function(){ selectPopup.classList.remove('show'); });
+  }
+
+  // 问AI面板——从选中文字弹出的"问AI"进来，带着原文；从右下角悬浮球
+  // 进来，不带原文，两个入口共用同一个面板，区别只是有没有引用原文
+  var askSheet = document.getElementById('askSheet');
+  var askBackdrop = document.getElementById('askBackdrop');
+  var askQuote = document.getElementById('askQuote');
+  var askReplyText = document.getElementById('askReplyText');
+  function openAskSheet(quoteText){
+    if(quoteText){
+      askQuote.textContent = '"' + quoteText + '"';
+      askQuote.classList.add('show');
+      askReplyText.textContent = '这句话在讲"慎独"——一个人独处、没人看着的时候，反而更要谨慎。想从哪个角度接着聊？';
+    } else {
+      askQuote.classList.remove('show');
+      askReplyText.textContent = '想问问关于这本书的什么？可以问具体某句话，也可以问整体的理解。';
+    }
+    askSheet.classList.add('show');
+    askBackdrop.classList.add('show');
+  }
+  function closeAskSheet(){
+    askSheet.classList.remove('show');
+    askBackdrop.classList.remove('show');
+  }
+  var askGeneralBtn = document.getElementById('askGeneralBtn');
+  if(askGeneralBtn) askGeneralBtn.addEventListener('click', function(){ openAskSheet(null); });
+  if(askBackdrop) askBackdrop.addEventListener('click', closeAskSheet);
+
+  // 导入提示——先说明支持的格式，再去跳原生文件选择器，这一步不能省，
+  // 直接甩给系统文件夹用户不知道该选什么格式
+  var importTile = document.getElementById('importTile');
+  var importSheet = document.getElementById('importSheet');
+  var importBackdrop = document.getElementById('importBackdrop');
+  var importConfirmBtn = document.getElementById('importConfirmBtn');
+  function closeImportSheet(){
+    importSheet.classList.remove('show');
+    importBackdrop.classList.remove('show');
+  }
+  if(importTile){
+    importTile.addEventListener('click', function(){
+      importSheet.classList.add('show');
+      importBackdrop.classList.add('show');
+    });
+  }
+  if(importBackdrop) importBackdrop.addEventListener('click', closeImportSheet);
+  // 真实App这一步是调用expo-document-picker弹出系统原生文件选择器，
+  // demo里没有真实文件系统可选，点了直接收起提示当作示意
+  if(importConfirmBtn) importConfirmBtn.addEventListener('click', closeImportSheet);
+
+  // 听书页语音交互：默认是"手动打断"（点按钮才进对话），麦克风打开后
+  // 变成"免提"（不用点，说话就自动打断）——两条路并存，不是互相替代，
+  // 跟最早那版听书设计稿是同一套逻辑，这次做出真的能点的效果
+  var micToggle = document.getElementById('micToggle');
+  var micLabel = document.getElementById('micLabel');
+  var interruptBtn = document.getElementById('interruptBtn');
+  var hfLive = document.getElementById('hfLive');
+  var listenStage = document.getElementById('listenStage');
+  var resumeBtn = document.getElementById('resumeBtn');
+
+  if(micToggle){
+    micToggle.addEventListener('click', function(){
+      var on = micToggle.classList.toggle('on');
+      interruptBtn.style.display = on ? 'none' : '';
+      hfLive.classList.toggle('show', on);
+      micLabel.textContent = on ? '免提已开启，随时说话' : '点击开始提问';
+    });
+  }
+  if(interruptBtn){
+    interruptBtn.addEventListener('click', function(){ listenStage.classList.add('in-conversation'); });
+  }
+  if(resumeBtn){
+    resumeBtn.addEventListener('click', function(){ listenStage.classList.remove('in-conversation'); });
+  }
+
+  // 听书字幕循环，跟之前的听书界面设计稿同一个逻辑
+  var sentences = ['"天命之谓性，率性之谓道，修道之谓教。"', '"道也者，不可须臾离也。"', '"莫见乎隐，莫显乎微，故君子慎其独也。"'];
+  var si = 0;
+  setInterval(function(){
+    si = (si + 1) % sentences.length;
+    var el = document.getElementById('listenCaption');
+    if(!el) return;
+    el.style.opacity = 0;
+    setTimeout(function(){ el.textContent = sentences[si]; el.style.opacity = 1; }, 250);
+  }, 3200);
+
+  render();
+})();
+</script>

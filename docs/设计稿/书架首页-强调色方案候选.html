@@ -1,0 +1,166 @@
+<title>ChatBook 书架 · 强调色方案候选（雾灰蓝底色不动，只换强调色）</title>
+<style>
+  :root{
+    --font-serif:'Songti SC','Noto Serif SC',serif;
+    --font-sans:'PingFang SC','Segoe UI',sans-serif;
+    --font-mono:ui-monospace,'SF Mono',Menlo,monospace;
+  }
+  *{box-sizing:border-box;}
+  body{background:#dde2e7; font-family:var(--font-sans); color:#141a24; margin:0;}
+  .stage{min-height:100vh; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:20px; padding:40px 16px;}
+  .hint{font-family:var(--font-mono); font-size:11px; color:#6b7480; letter-spacing:.06em; text-align:center;}
+
+  .swatches{display:flex; gap:8px; flex-wrap:wrap; justify-content:center;}
+  .swatch-btn{font-family:var(--font-sans); font-size:12.5px; font-weight:600; padding:8px 16px; border-radius:999px; border:1.5px solid #c4cbd2; background:#fff; color:#3d4552; cursor:pointer; transition:all .15s ease;}
+  .swatch-btn:hover{border-color:#9aa4ae;}
+  .swatch-btn.active{background:#141a24; border-color:#141a24; color:#fff;}
+
+  /* 底色锁死"雾灰蓝"，只有强调色(--accent/--accent-bright/--accent-dim)跟着方案变 */
+  .phone{width:340px; height:680px; border-radius:38px; overflow:hidden; box-shadow:0 24px 60px rgba(20,30,45,.22); border:8px solid #0f141c; position:relative;
+    --void:#ccd2d8; --hairline:rgba(20,30,45,.12); --paper:#161c26; --paper-dim:#525c68; --paper-faint:#7c8794;
+    --card:#e4e8eb; --card-border:#c3c9cf;
+    --accent:#b4823a; --accent-dim:#8a6428; --accent-bright:#c99a4c;
+    --teal:#2f7d76;
+    background:radial-gradient(circle at 15% 8%, rgba(0,0,0,.04), transparent 40%), var(--void);
+    transition:background .25s ease;}
+
+  /* 方案A：靛蓝——冷调、有科技感，跟雾灰蓝底色同一个色系家族，最"安全"的换法 */
+  .phone[data-accent="indigo"]{ --accent:#4c5fd0; --accent-dim:#3a4aa8; --accent-bright:#6a7ae0; }
+  /* 方案B：青蓝——比现有"我的导入"分区用的teal更亮更饱和，直接把teal升级成主强调色 */
+  .phone[data-accent="cyan"]{ --accent:#1f9c94; --accent-dim:#166e68; --accent-bright:#2ec4ba; }
+  /* 方案C：石墨极简——强调色本身接近墨黑，靠对比度不靠彩度，胭脂红只用在"删除/退出登录"这类危险动作上（跟--accent是分开的两个token，这里只是同屏对比给你看危险色不受影响） */
+  .phone[data-accent="graphite"]{ --accent:#2a3038; --accent-dim:#12151a; --accent-bright:#454c56; }
+  /* 方案D：藕紫——比靛蓝更柔和一点，偏梅紫色，同样是冷色系但没那么"科技冷" */
+  .phone[data-accent="plum"]{ --accent:#7d5a9e; --accent-dim:#5e4278; --accent-bright:#9576b8; }
+
+  .grid-overlay{position:absolute; inset:0; pointer-events:none; opacity:.6;
+    background-image:linear-gradient(var(--hairline) 1px, transparent 1px), linear-gradient(90deg, var(--hairline) 1px, transparent 1px);
+    background-size:100% 64px, 64px 100%; mask-image:linear-gradient(to bottom, black, transparent 30%);}
+
+  .screen{position:relative; height:100%; display:flex; flex-direction:column; padding-top:44px;}
+
+  .top-bar{padding:4px 22px 18px; display:flex; justify-content:space-between; align-items:flex-end;}
+  .brand{font-family:var(--font-mono); font-size:10px; letter-spacing:.22em; color:var(--accent); text-transform:uppercase;}
+  .top-title{font-family:var(--font-serif); font-size:27px; font-weight:700; margin-top:6px; color:var(--paper);}
+  .top-meta{font-family:var(--font-mono); font-size:10px; color:var(--paper-faint); text-align:right;}
+
+  .section{margin-bottom:8px;}
+  .section-head{display:flex; justify-content:space-between; align-items:baseline; padding:0 22px; margin-bottom:12px;}
+  .section-title{font-family:var(--font-sans); font-size:14px; font-weight:600; color:var(--paper); display:flex; align-items:center; gap:7px;}
+  .section-dot{width:6px; height:6px; border-radius:50%; flex:none;}
+  .section-count{font-family:var(--font-mono); font-size:10px; color:var(--paper-faint);}
+
+  .shelf{display:flex; gap:0; overflow-x:auto; padding:6px 0 22px; -ms-overflow-style:none; scrollbar-width:none;}
+  .shelf::-webkit-scrollbar{display:none;}
+  .shelf::before{content:''; flex:none; width:22px;}
+  .shelf::after{content:''; flex:none; width:22px;}
+
+  .cf-item{flex:none; width:104px; margin-right:14px;}
+  .cf-item:last-child{margin-right:0;}
+  .cf-cover{width:104px; height:148px; border-radius:4px 8px 8px 4px; position:relative; display:flex; flex-direction:column; justify-content:flex-end; padding:10px; box-shadow:0 10px 24px rgba(0,0,0,.45), inset 0 0 0 1px rgba(255,255,255,.06);}
+  .cf-cover::before{content:''; position:absolute; left:0; top:0; bottom:0; width:5px; background:rgba(0,0,0,.35); border-radius:4px 0 0 4px;}
+  .cf-title{font-family:var(--font-serif); font-size:13px; font-weight:700; color:#fff; line-height:1.3;}
+  .cf-label{text-align:center; margin-top:10px; font-family:var(--font-mono); font-size:9px; color:var(--paper-faint);}
+
+  .add-tile{flex:none; width:104px; height:148px; border:1px dashed var(--hairline); border-radius:4px 8px 8px 4px; display:flex; align-items:center; justify-content:center;}
+  .add-tile svg{width:20px; height:20px; color:var(--paper-faint);}
+
+  /* 底部tab bar——原方案背景用--card(#e4e8eb)配底色--void(#ccd2d8)，两个都是浅灰，
+     对比度太低导致"感觉不到导航栏存在"。这里改成明显更亮的卡片背景+更强的顶部描边
+     +投影，"浮"在底色之上而不是融进去；选中态的图标/文字用--accent，不选中用--paper-faint。*/
+  .tabbar{position:absolute; left:0; right:0; bottom:0; height:76px; background:#eef1f4; border-top:1px solid var(--card-border);
+    box-shadow:0 -6px 16px rgba(20,30,45,.08); display:flex; align-items:flex-start; padding-top:10px;}
+  .tab-item{flex:1; display:flex; flex-direction:column; align-items:center; gap:4px; font-family:var(--font-sans); font-size:10px; color:var(--paper-faint);}
+  .tab-item svg{width:22px; height:22px;}
+  .tab-item.active{color:var(--accent); font-weight:600;}
+
+  .filler{flex:1; display:flex; align-items:center; justify-content:center; padding:0 32px;}
+  .filler-inner{font-family:var(--font-mono); font-size:10px; color:var(--paper-faint); text-align:center; line-height:1.8; opacity:.55;}
+
+  .caption{max-width:700px; background:#ffffff; border:1px solid #d7dce2; border-radius:10px; padding:20px 24px; font-size:13px; line-height:1.85; color:#3d4552;}
+  .caption b{color:#4c5fd0;}
+</style>
+
+<div class="stage">
+  <div class="hint">底色"雾灰蓝"锁定不变，下面4个按钮只切强调色（按钮/高亮/标题小字用的那个颜色）——顺手也把底部导航栏的对比度改高了，这个不管选哪个方案都会一起改</div>
+  <div class="swatches" id="swatches">
+    <button class="swatch-btn active" data-accent="indigo">A 靛蓝</button>
+    <button class="swatch-btn" data-accent="cyan">B 青蓝</button>
+    <button class="swatch-btn" data-accent="graphite">C 石墨极简</button>
+    <button class="swatch-btn" data-accent="plum">D 藕紫</button>
+  </div>
+  <div class="phone" id="phone" data-accent="indigo">
+    <div class="grid-overlay"></div>
+    <div class="screen">
+      <div class="top-bar">
+        <div>
+          <div class="brand">ChatBook</div>
+          <div class="top-title">书架</div>
+        </div>
+        <div class="top-meta">7 本典籍<br/>0 本导入</div>
+      </div>
+
+      <div class="section">
+        <div class="section-head">
+          <div class="section-title"><span class="section-dot" style="background:var(--accent);"></span>公版经典库</div>
+          <div class="section-count">官方精校 · 7</div>
+        </div>
+        <div class="shelf">
+          <div class="cf-item"><div class="cf-cover" style="background:linear-gradient(160deg,#3a2e1a,#20180d);"><div class="cf-title">大学</div></div><div class="cf-label">未开始</div></div>
+          <div class="cf-item"><div class="cf-cover" style="background:linear-gradient(160deg,#1a2e28,#0d201a);"><div class="cf-title">庄子</div></div><div class="cf-label">继续阅读</div></div>
+          <div class="cf-item"><div class="cf-cover" style="background:linear-gradient(160deg,#1a2530,#0d1620);"><div class="cf-title">墨子</div></div><div class="cf-label">未开始</div></div>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-head">
+          <div class="section-title"><span class="section-dot" style="background:var(--teal);"></span>我的导入</div>
+          <div class="section-count">仅自己可见 · 0</div>
+        </div>
+        <div class="shelf">
+          <div class="add-tile"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M12 5v14M5 12h14"/></svg></div>
+        </div>
+      </div>
+
+      <div class="filler"><div class="filler-inner">这块空白之前是真实存在的问题——<br/>导入0本书时下面就是一大片空网格<br/>（下一步会加"没有导入书"的引导文案填住，<br/>不是这次配色方案要解决的事，先记录）</div></div>
+
+      <div class="tabbar">
+        <div class="tab-item active">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M4 4h6v16H4zM14 4h6v16h-6z"/></svg>
+          书架
+        </div>
+        <div class="tab-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M4 20l4-1 11-11-3-3L5 16l-1 4z"/></svg>
+          划线复盘
+        </div>
+        <div class="tab-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg>
+          我的
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="caption">
+    <b>这个demo回应两件事</b>：①金棕色强调色换成什么——四个按钮切的都是同一套雾灰蓝底色，只换按钮/高亮/品牌小字用的强调色；②"导航栏感觉不见了"——原方案tab bar背景(#e4e8eb)跟底色(#ccd2d8)太接近，这里改成更亮的卡片色+顶部描边+投影，让它"浮"起来，这条改进不管选哪个强调色方案都会一起做，不是要额外拍板的事。<br><br>
+    <b>A 靛蓝</b>——冷色系，跟雾灰蓝底色是同一个色相家族，最协调也最"科技感"，是四个里最接近原设计稿"未来感/国际化"定位的选择<br>
+    <b>B 青蓝</b>——把原来只用在"我的导入"分区小点的teal升级成主强调色，比A更亮更抓眼，适合想要更醒目一点的按钮<br>
+    <b>C 石墨极简</b>——强调色本身接近墨黑，靠粗细/对比度而不是彩度来突出，最"性冷淡风"，国际化极简App常见的做法（如Notion/Linear这类工具型产品）<br>
+    <b>D 藕紫</b>——比靛蓝柔和，偏紫调，没有A/B那么"硬"，会更文艺一点<br><br>
+    <b>demo里那块留白也标出来了</b>——"我的导入"是0本书时下面一大片空白，这是你说的"很空"里能确认到的一个真实原因，跟强调色无关，等配色定了之后一起修（补一句引导文案，或者把整体内容垂直居中/收紧空白）。
+  </div>
+</div>
+
+<script>
+(function(){
+  var phone = document.getElementById('phone');
+  var swatchBtns = document.querySelectorAll('.swatch-btn');
+  swatchBtns.forEach(function(btn){
+    btn.addEventListener('click', function(){
+      phone.setAttribute('data-accent', btn.getAttribute('data-accent'));
+      swatchBtns.forEach(function(b){ b.classList.remove('active'); });
+      btn.classList.add('active');
+    });
+  });
+})();
+</script>

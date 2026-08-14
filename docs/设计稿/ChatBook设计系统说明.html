@@ -1,0 +1,221 @@
+<title>ChatBook 设计系统</title>
+<style>
+  :root{
+    --bg:#eef1f4; --surface:#ffffff; --surface-2:#f7f9fb; --hairline:rgba(20,30,45,.10);
+    --ink:#141a24; --ink-dim:#5c6673; --ink-faint:#8a93a0;
+    --gold:#b4823a; --gold-dim:#8a6428; --gold-bright:#c99a4c; --gold-soft:#f0e2c8;
+    --teal:#2f7d76; --teal-dim:#1e5652; --teal-soft:#d9ece9;
+    --void:#141a24; --void-2:#1e2632;
+    --font-serif:'Songti SC','Noto Serif SC',serif;
+    --font-sans:'PingFang SC','Segoe UI',sans-serif;
+    --font-mono:ui-monospace,'SF Mono',Menlo,monospace;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{ --bg:#12161d; --surface:#1a2029; --surface-2:#212936; --hairline:rgba(255,255,255,.09);
+      --ink:#eef1f4; --ink-dim:#a6b0bd; --ink-faint:#68717d; }
+  }
+  :root[data-theme="dark"]{ --bg:#12161d; --surface:#1a2029; --surface-2:#212936; --hairline:rgba(255,255,255,.09);
+    --ink:#eef1f4; --ink-dim:#a6b0bd; --ink-faint:#68717d; }
+  :root[data-theme="light"]{ --bg:#eef1f4; --surface:#ffffff; --surface-2:#f7f9fb; --hairline:rgba(20,30,45,.10);
+    --ink:#141a24; --ink-dim:#5c6673; --ink-faint:#8a93a0; }
+
+  *{box-sizing:border-box;}
+  body{background:var(--bg); color:var(--ink); font-family:var(--font-sans); line-height:1.7;}
+  .wrap{max-width:920px; margin:0 auto; padding:56px 24px 100px;}
+
+  .hero{margin-bottom:64px;}
+  .eyebrow{font-family:var(--font-mono); font-size:12px; letter-spacing:.14em; color:var(--gold-dim); text-transform:uppercase; margin-bottom:12px;}
+  h1{font-family:var(--font-serif); font-size:36px; margin:0 0 16px; font-weight:700; text-wrap:balance;}
+  .sub{color:var(--ink-dim); font-size:15px; max-width:640px;}
+
+  section{margin-bottom:72px;}
+  .sec-head{display:flex; align-items:baseline; gap:14px; margin-bottom:28px; border-bottom:1px solid var(--hairline); padding-bottom:14px;}
+  .sec-num{font-family:var(--font-mono); font-size:13px; color:var(--gold-dim);}
+  h2{font-family:var(--font-serif); font-size:22px; margin:0; font-weight:700;}
+
+  /* 色彩 */
+  .swatch-grid{display:flex; flex-direction:column; gap:0;}
+  .swatch-row{display:grid; grid-template-columns:120px 1fr; gap:24px; padding:20px 0; border-bottom:1px solid var(--hairline); align-items:center;}
+  .swatch-row:last-child{border-bottom:none;}
+  .swatch{width:88px; height:88px; border-radius:10px; flex:none; box-shadow:0 2px 8px rgba(0,0,0,.08);}
+  .swatch-info b{font-family:var(--font-mono); font-size:12px; color:var(--ink); display:block; margin-bottom:4px;}
+  .swatch-info p{margin:0; font-size:13.5px; color:var(--ink-dim); max-width:520px;}
+
+  /* 字体 */
+  .type-sample{display:grid; grid-template-columns:140px 1fr; gap:24px; padding:22px 0; border-bottom:1px solid var(--hairline); align-items:center;}
+  .type-sample:last-child{border-bottom:none;}
+  .type-role{font-family:var(--font-mono); font-size:11px; color:var(--gold-dim); text-transform:uppercase; letter-spacing:.06em;}
+  .type-demo-serif{font-family:var(--font-serif); font-size:26px; color:var(--ink);}
+  .type-demo-sans{font-family:var(--font-sans); font-size:16px; color:var(--ink);}
+  .type-demo-mono{font-family:var(--font-mono); font-size:15px; color:var(--ink); letter-spacing:.02em;}
+  .type-note{font-size:13px; color:var(--ink-dim); margin-top:6px;}
+
+  /* 版式 */
+  .grid-demo{background:var(--surface); border:1px solid var(--hairline); border-radius:12px; padding:24px; position:relative; overflow:hidden;}
+  .grid-demo-bg{position:absolute; inset:0; opacity:.5;
+    background-image:linear-gradient(var(--hairline) 1px, transparent 1px), linear-gradient(90deg, var(--hairline) 1px, transparent 1px);
+    background-size:32px 32px;}
+  .grid-demo-content{position:relative; display:flex; gap:16px; flex-wrap:wrap;}
+  .grid-card{background:var(--surface-2); border-radius:8px; padding:16px; flex:1; min-width:140px; font-size:12px; color:var(--ink-dim); font-family:var(--font-mono);}
+
+  /* 动效演示 */
+  .motion-block{background:var(--surface); border:1px solid var(--hairline); border-radius:12px; padding:28px; margin-bottom:18px;}
+  .motion-label{font-family:var(--font-mono); font-size:11px; color:var(--gold-dim); text-transform:uppercase; margin-bottom:16px;}
+  .motion-desc{font-size:13.5px; color:var(--ink-dim); margin-bottom:20px; max-width:560px;}
+
+  .breathe-demo{display:flex; align-items:center; gap:24px;}
+  .breathe-orb{width:52px; height:52px; border-radius:50%; background:radial-gradient(circle at 35% 30%, var(--gold-bright), var(--gold-dim));
+    animation:breathe 2.6s ease-in-out infinite;}
+  @keyframes breathe{0%,100%{transform:scale(1); opacity:.85;} 50%{transform:scale(1.15); opacity:1;}}
+  .breathe-caption{font-size:12.5px; color:var(--ink-faint); font-family:var(--font-mono);}
+
+  .tilt-demo{display:flex; gap:14px; padding:20px 0;}
+  .tilt-card{width:70px; height:98px; background:linear-gradient(160deg,var(--void),var(--void-2)); border-radius:4px 8px 8px 4px;
+    transition:transform .25s ease; cursor:pointer; box-shadow:0 6px 16px rgba(0,0,0,.18);}
+  .tilt-card:hover{transform:rotateY(-18deg) scale(1.05);}
+
+  .press-demo button{font-family:var(--font-sans); font-size:14px; font-weight:600; padding:11px 22px; border-radius:8px; border:none;
+    background:var(--gold); color:#fff; cursor:pointer; transition:transform .12s ease, box-shadow .12s ease;}
+  .press-demo button:active{transform:scale(.96); box-shadow:inset 0 2px 4px rgba(0,0,0,.2);}
+
+  .avoid-list{display:flex; flex-direction:column; gap:0;}
+  .avoid-row{display:grid; grid-template-columns:26px 1fr; gap:12px; padding:14px 0; border-bottom:1px solid var(--hairline); font-size:13.5px;}
+  .avoid-row:last-child{border-bottom:none;}
+  .avoid-x{color:var(--ink-faint); font-family:var(--font-mono);}
+  .avoid-row b{color:var(--ink);}
+  .avoid-row span{color:var(--ink-dim);}
+
+  @media (max-width:600px){
+    .swatch-row, .type-sample{grid-template-columns:1fr;}
+  }
+</style>
+
+<div class="wrap">
+
+  <div class="hero">
+    <div class="eyebrow">Design System · v1</div>
+    <h1>ChatBook 设计系统——不是一版效果图，是一套判断标准</h1>
+    <p class="sub">这份文档说的是"为什么这么选"，不是"长什么样"——颜色、字体、版式、动效，每一条背后都有一个具体要解决的问题，不是凭审美直觉堆出来的。你可以挑战任何一条，但至少先知道我在想什么。</p>
+  </div>
+
+  <section>
+    <div class="sec-head"><span class="sec-num">01</span><h2>色彩——每个颜色解决一个具体问题</h2></div>
+    <div class="swatch-grid">
+      <div class="swatch-row">
+        <div class="swatch" style="background:#eef1f4;"></div>
+        <div class="swatch-info">
+          <b>--bg 雾灰蓝 #EEF1F4</b>
+          <p>不用纯白也不用纯黑。纯白配深色文字是最常见的"没想过配色"的默认选择，纯黑配荧光色是最常见的"想显得AI/科技感"的默认选择——两个套路你在Stitch生成的东西里应该都见过。往蓝灰偏一点点，是让背景本身带一点"冷静、精密"的性格，而不是一张没有态度的白纸。</p>
+        </div>
+      </div>
+      <div class="swatch-row">
+        <div class="swatch" style="background:#b4823a;"></div>
+        <div class="swatch-info">
+          <b>--gold 金棕 #B4823A</b>
+          <p>整套配色里唯一的暖色，故意留的。纯冷色系（蓝、灰、青）做久了会显得疏离、没有人情味，尤其你们做的是"读书+对话"这种需要亲近感的产品。这个金棕色也是刻意从旧版"暖纸古风"主题里延续下来的——不是推翻重来，是留一条线索，老用户/你自己看着不会觉得这是完全陌生的另一个产品。</p>
+        </div>
+      </div>
+      <div class="swatch-row">
+        <div class="swatch" style="background:#2f7d76;"></div>
+        <div class="swatch-info">
+          <b>--teal 青绿 #2F7D76</b>
+          <p>专门用来区分"这是不一样的东西"——比如"我的导入"跟"公版书库"要一眼分清楚，不能靠文字标签硬分，用第二个高辨识度的颜色比"深浅不同的同一个颜色"更快被眼睛识别出差异。</p>
+        </div>
+      </div>
+      <div class="swatch-row">
+        <div class="swatch" style="background:#5c6673;"></div>
+        <div class="swatch-info">
+          <b>--ink-dim 次要文字 #5C6673</b>
+          <p>不是纯灰(#666666这种)，往蓝色偏了一点点，肉眼几乎看不出来，但效果是让灰色显得"是从这套配色里推导出来的"，不是"随手拿系统默认灰糊上去的"。这是最容易被忽略、但最能看出有没有认真调过色的一个细节。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><span class="sec-num">02</span><h2>字体——三种字体各自的工作</h2></div>
+    <div class="swatch-grid">
+      <div class="type-sample">
+        <div class="type-role">书名 / 标题<br/>思源宋体</div>
+        <div>
+          <div class="type-demo-serif">中庸 · 第十二章</div>
+          <div class="type-note">衬线字体没有被这次"未来感"改造换掉——这个App的核心是"阅读文字"这个动作本身，字体气质要服务这件事，全部换成无衬线会让整个App失去"这是文学/思考"的氛围，变成一个纯工具App的感觉。</div>
+        </div>
+      </div>
+      <div class="type-sample">
+        <div class="type-role">界面标签 / 按钮<br/>思源黑体</div>
+        <div>
+          <div class="type-demo-sans">继续阅读　设置　我的</div>
+          <div class="type-note">纯功能性文字用无衬线，读起来更快、不抢正文的注意力，这是最基本的分工，不用过度解释。</div>
+        </div>
+      </div>
+      <div class="type-sample">
+        <div class="type-role">数据 / 统计<br/>等宽字体</div>
+        <div>
+          <div class="type-demo-mono">62%　·　128 条划线　·　341 轮</div>
+          <div class="type-note">数字用等宽字体是"精密感/未来感"最便宜、最有效的一个手段——所有数字对齐、宽度统一，看起来像仪表盘读数，这个细节比换配色更能让人感觉到"这是经过设计的"。</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><span class="sec-num">03</span><h2>版式——网格不是装饰，是这套视觉语言的母题</h2></div>
+    <div class="grid-demo">
+      <div class="grid-demo-bg"></div>
+      <div class="grid-demo-content">
+        <div class="grid-card">间距用gap控制，<br/>不用margin互相叠加</div>
+        <div class="grid-card">背景网格线呼应<br/>"精密测量"这个概念</div>
+        <div class="grid-card">卡片圆角统一走小<br/>数值，不无脑套大圆角</div>
+      </div>
+    </div>
+    <p class="type-note" style="margin-top:14px;">网格线这个元素贯穿书架、阅读器外壳这些界面，是这套设计的"视觉签名"——去掉网格线，剩下的配色单独放在别的App上也说得过去，加上网格线之后才真正有"这是ChatBook"的辨识度。</p>
+  </section>
+
+  <section>
+    <div class="sec-head"><span class="sec-num">04</span><h2>动态——这是你specifically问到的部分，之前没系统讲过</h2></div>
+
+    <div class="motion-block">
+      <div class="motion-label">原则一 · 动效只用来说话，不用来表演</div>
+      <div class="motion-desc">下面这个光球在真实App里是"AI正在准备回答"的等待状态——它不是随便加的装饰动画，去掉它用户就不知道系统在处理。任何动效先问一句"去掉这个动画，用户会不会漏掉一个信息"，答案是否定的动效原则上不做。</div>
+      <div class="breathe-demo">
+        <div class="breathe-orb"></div>
+        <div class="breathe-caption">呼吸式缩放，2.6秒一个周期<br/>不用旋转菊花图标（那是最常见的"没设计过"的加载态）</div>
+      </div>
+    </div>
+
+    <div class="motion-block">
+      <div class="motion-label">原则二 · 跟手，不是自动播放</div>
+      <div class="motion-desc">鼠标悬停/手指触碰这几张卡片试试——书架的横向滚动、卡片的透视旋转，全部是跟着你的手指实时联动的，不是定时器驱动的"自动轮播动画"。跟手的动效传达"这是你在操作的界面"，定时播放的动效传达"这是在演示给你看"，这两种感觉对一个要天天用的工具来说完全不一样。</div>
+      <div class="tilt-demo">
+        <div class="tilt-card"></div>
+        <div class="tilt-card"></div>
+        <div class="tilt-card"></div>
+        <div class="tilt-card"></div>
+      </div>
+    </div>
+
+    <div class="motion-block">
+      <div class="motion-label">原则三 · 反馈要快、要轻，不要弹跳</div>
+      <div class="motion-desc">点一下这个按钮——反应是瞬间的轻微下沉，不是那种"哐"一下弹起来的夸张回弹。弹跳感（bounce/spring效果）适合玩具/游戏类App，"精密未来感"这个调性要的是干脆利落，不是活泼俏皮。</div>
+      <div class="press-demo"><button>试试点我</button></div>
+    </div>
+
+    <div class="motion-block">
+      <div class="motion-label">原则四 · 尊重"减少动态效果"这个系统设置</div>
+      <div class="motion-desc">手机系统里如果用户开了"减弱动态效果"这个无障碍选项，上面这几种动效都要相应收敛或者关掉——这不是锦上添花的选项，是真实存在的、部分用户（比如容易眩晕的人）需要的设置，这次改造要求做到这一点，不是可做可不做。</div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><span class="sec-num">05</span><h2>刻意避开的东西——不是没想到，是想到了不用</h2></div>
+    <div class="avoid-list">
+      <div class="avoid-row"><span class="avoid-x">✕</span><div><b>紫蓝渐变的大标题区</b> <span>——AI生成设计里出现频率最高的一种，一眼被认出来是"随手让AI做的"</span></div></div>
+      <div class="avoid-row"><span class="avoid-x">✕</span><div><b>纯黑背景配一个荧光绿/朱红点缀色</b> <span>——另一种同样泛滥的"科技感"套路，跟真的用心做的深色系设计一眼能分辨出来</span></div></div>
+      <div class="avoid-row"><span class="avoid-x">✕</span><div><b>所有卡片无脑套大圆角(rounded-lg)</b> <span>——圆角这次统一走小数值，克制比"看起来友好"更符合这次的调性</span></div></div>
+      <div class="avoid-row"><span class="avoid-x">✕</span><div><b>emoji当分段符号</b> <span>——图省事的排版手段，跟"精密感"这个方向直接冲突</span></div></div>
+      <div class="avoid-row"><span class="avoid-x">✕</span><div><b>暖米白+衬线字体+陶土色点缀的"文艺复古风"</b> <span>——这套刚好是另一个方向上同样泛滥的AI生成套路，跟旧版"暖纸古风"看着像但其实是两回事，容易被混淆，特意避开</span></div></div>
+    </div>
+  </section>
+
+</div>
