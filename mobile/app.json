@@ -8,8 +8,10 @@
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "ios": {
+      "bundleIdentifier": "com.diegoxue.bandujiangjiang",
       "supportsTablet": true,
       "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false,
         "NSMicrophoneUsageDescription": "伴读讲讲需要麦克风权限来进行语音提问",
         "NSSpeechRecognitionUsageDescription": "伴读讲讲使用语音识别将提问转为文字",
         "UIBackgroundModes": ["audio"]
