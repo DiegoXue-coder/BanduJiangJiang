@@ -149,13 +149,16 @@ const HF_METER_INTERVAL_MS = 120; // metering回调间隔，够快能及时发�
 // dBFS量纲下这个阈值需要真机校准（跟之前的1.0是完全不同的量纲，不能
 // 类比），先给一个业内VAD教程常见的经验起点，真机验证后如果偏松/偏紧
 // 再调整——这一步没有真机数据支撑，如实标注是估计值不是校准值。
-const HF_SPEECH_DB = -35;
+const HF_SPEECH_DB = -30;
+const HF_SPEECH_NOISE_MARGIN_DB = 12;
+const HF_SPEECH_MIN_PEAK_DB = -26;
 // 连续多久超过阈值才算"真的开始说话"（不是一声咳嗽），跟上一版
 // VAD_SUSTAIN_POLLS×VAD_POLL_INTERVAL_MS(~600ms)是同一个用途，这版
 // 调快到300ms——因为触发之后紧接着是"动态录到用户说完为止"，不再是
 // 固定长窗口，稍微灵敏一点换来的是响应更快，代价（误触发）比以前小，
 // 因为下面新加的"是不是真的在提问"这道语义过滤会兜住多数误触发。
-const HF_SPEECH_SUSTAIN_MS = 300;
+const HF_SPEECH_SUSTAIN_MS = 720;
+const HF_TRIGGER_COOLDOWN_MS = 1800;
 // 说话开始后，连续多久没检测到声音就认为"这句说完了"——不再是用户明确
 // 反对的"固定6秒"，改成真的等用户说完。1.1秒是常见语音助手产品的经验
 // 区间（太短容易在自然停顿处提前切断，太长等待感明显）。
@@ -477,6 +480,9 @@ export default function ListenScreen({ route, navigation }) {
   const hfAmbientRecordingRef = useRef(null);
   const hfAmbientSustainCountRef = useRef(0); // 连续超过阈值的metering回调次数
   const hfAmbientSpeakingRef = useRef(false); // 已经触发过一次、还没跌回安静，避免同一段话反复触发
+  const hfAmbientNoiseFloorRef = useRef(-60);
+  const hfAmbientPeakDbRef = useRef(-160);
+  const hfLastTriggerAtRef = useRef(0);
   // 环境监听的metering回调是startHandsFreeAmbient调用那一刻创建的，之后
   // 每次判定"开始说话"都要调用"当前这次渲染"的startHandsFreeTurn（读到
   // 最新的phase/handsFreeMuted等状态）——跟方案A同样的闭包过期问题，同样
@@ -1364,15 +1370,30 @@ export default function ListenScreen({ route, navigation }) {
   // 才会重新允许下一次触发。
   function handleAmbientMeterUpdate(status) {
     if (!status.isRecording || typeof status.metering !== 'number') return;
-    if (status.metering >= HF_SPEECH_DB) {
+    const db = status.metering;
+    const now = Date.now();
+    const floor = hfAmbientNoiseFloorRef.current;
+    const triggerDb = Math.max(HF_SPEECH_DB, floor + HF_SPEECH_NOISE_MARGIN_DB);
+    const cooldownActive = now - hfLastTriggerAtRef.current < HF_TRIGGER_COOLDOWN_MS;
+    if (db < triggerDb) {
+      // 环境底噪用慢速均值估计，只在没触发时更新。这样空调/路噪这类
+      // 持续背景声会抬高门槛，但用户真正开口时不会马上把门槛也抬上去。
+      hfAmbientNoiseFloorRef.current = floor * 0.94 + db * 0.06;
+    }
+    if (!cooldownActive && db >= triggerDb) {
       hfAmbientSustainCountRef.current += 1;
+      hfAmbientPeakDbRef.current = Math.max(hfAmbientPeakDbRef.current, db);
       if (!hfAmbientSpeakingRef.current
-          && hfAmbientSustainCountRef.current * HF_METER_INTERVAL_MS >= HF_SPEECH_SUSTAIN_MS) {
+          && hfAmbientSustainCountRef.current * HF_METER_INTERVAL_MS >= HF_SPEECH_SUSTAIN_MS
+          && hfAmbientPeakDbRef.current >= HF_SPEECH_MIN_PEAK_DB) {
         hfAmbientSpeakingRef.current = true;
+        hfLastTriggerAtRef.current = now;
+        console.log(`[免提诊断] 环境监听触发 db=${db.toFixed(1)} peak=${hfAmbientPeakDbRef.current.toFixed(1)} floor=${floor.toFixed(1)} trigger=${triggerDb.toFixed(1)}`);
         autoInterruptRef.current?.();
       }
     } else {
       hfAmbientSustainCountRef.current = 0;
+      hfAmbientPeakDbRef.current = -160;
       hfAmbientSpeakingRef.current = false;
     }
   }
@@ -1393,6 +1414,8 @@ export default function ListenScreen({ route, navigation }) {
       const recording = new Audio.Recording();
       hfAmbientSustainCountRef.current = 0;
       hfAmbientSpeakingRef.current = false;
+      hfAmbientPeakDbRef.current = -160;
+      hfAmbientNoiseFloorRef.current = -60;
       recording.setProgressUpdateInterval(HF_METER_INTERVAL_MS);
       recording.setOnRecordingStatusUpdate(handleAmbientMeterUpdate);
       await recording.prepareToRecordAsync({ ...Audio.RecordingOptionsPresets.HIGH_QUALITY, isMeteringEnabled: true });

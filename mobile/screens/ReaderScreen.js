@@ -76,6 +76,7 @@ function formatFontDiagnostics(payload, assetReport) {
   const lines = [];
   lines.push(`当前选择：${payload?.currentFamily || '未知'}`);
   lines.push(`rendition：${payload?.hasRendition ? '存在' : '不存在'}`);
+  lines.push(`window.rendition：${payload?.hasWindowRendition ? '存在' : '不存在'}`);
   lines.push(`contents数量：${payload?.contentsCount ?? '未知'}`);
   if (assetReport?.length) {
     lines.push('');
@@ -354,20 +355,31 @@ function ReaderInner({
                 '}'
               );
             }
+            function getReaderRendition() {
+              if (typeof rendition !== 'undefined' && rendition) return rendition;
+              if (window.rendition) return window.rendition;
+              return null;
+            }
             window.__chatbookApplyReaderFont = function(family) {
               applyFont(document, family);
-              if (window.rendition && typeof window.rendition.getContents === 'function') {
-                window.rendition.getContents().forEach(function(contents) {
+              var r = getReaderRendition();
+              if (r && typeof r.getContents === 'function') {
+                r.getContents().forEach(function(contents) {
                   applyFont(contents && contents.document, family);
                 });
               }
               console.log('[字体诊断] 已应用正文字体 ' + family);
             };
-            if (!window.__chatbookFontRenderedHook && window.rendition && typeof window.rendition.on === 'function') {
+            var readerRendition = getReaderRendition();
+            if (!window.__chatbookFontRenderedHook && readerRendition && typeof readerRendition.on === 'function') {
               window.__chatbookFontRenderedHook = true;
-              window.rendition.on('rendered', function(section, contents) {
+              readerRendition.on('rendered', function(section, contents) {
                 var family = window.__chatbookReaderFontFamily || ${jsStringLiteral(currentOpt.family)};
-                applyFont(contents && contents.document, family);
+                if (contents && contents.document) {
+                  applyFont(contents.document, family);
+                } else {
+                  window.__chatbookApplyReaderFont(family);
+                }
               });
             }
             window.__chatbookReaderFontFamily = ${jsStringLiteral(currentOpt.family)};
@@ -427,12 +439,16 @@ function ReaderInner({
         }
         try {
           var family = ${jsStringLiteral(opt.family)};
-          var contents = window.rendition && typeof window.rendition.getContents === 'function'
-            ? window.rendition.getContents()
+          var readerRendition = null;
+          if (typeof rendition !== 'undefined' && rendition) readerRendition = rendition;
+          else if (window.rendition) readerRendition = window.rendition;
+          var contents = readerRendition && typeof readerRendition.getContents === 'function'
+            ? readerRendition.getContents()
             : [];
           post({
             currentFamily: window.__chatbookReaderFontFamily || family,
-            hasRendition: !!window.rendition,
+            hasRendition: !!readerRendition,
+            hasWindowRendition: !!window.rendition,
             contentsCount: contents.length,
             outer: summarizeDoc(document, 'outer', family),
             contents: contents.map(function(contents, idx) {
