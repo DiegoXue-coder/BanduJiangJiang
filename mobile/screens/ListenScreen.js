@@ -1024,12 +1024,18 @@ export default function ListenScreen({ route, navigation }) {
             setHfText(answer);
             const epoch = epochRef.current;
             try {
-              if (handsFreeEnabled && !handsFreeMuted) {
-                setHandsFreeStatus('AI回复中也在监听');
-                await startHandsFreeAmbient();
-                markHfTiming('AI回复期间环境监听已开启');
-              }
-              await playOneParagraph(answer, epoch, () => markHfTiming('AI回复TTS开始播放'));
+              await playOneParagraph(answer, epoch, () => {
+                markHfTiming('AI回复TTS开始播放');
+                // 只在AI回答已经真正出声之后开启二次打断监听。上一版在
+                // 回答加载/TTS加载阶段就开环境监听，轻微杂音会把尚未完成
+                // 的第一轮回答打断，导致用户的问题没有任何回复。
+                if (handsFreeEnabled && !handsFreeMuted) {
+                  setHandsFreeStatus('AI回复中也在监听');
+                  startHandsFreeAmbient()
+                    .then(() => markHfTiming('AI回复期间环境监听已开启'))
+                    .catch((e) => markHfTiming(`AI回复期间环境监听启动失败 ${e.message || e}`));
+                }
+              });
             } catch (e) {
               markHfTiming(`AI回复播放失败/中断 ${e.message || e}`);
               // 回答播放失败不阻塞后续流程，直接进入追问窗口

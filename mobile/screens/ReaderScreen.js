@@ -72,6 +72,38 @@ function jsStringLiteral(value) {
   return JSON.stringify(String(value ?? ''));
 }
 
+function formatFontDiagnostics(payload, assetReport) {
+  const lines = [];
+  lines.push(`当前选择：${payload?.currentFamily || '未知'}`);
+  lines.push(`rendition：${payload?.hasRendition ? '存在' : '不存在'}`);
+  lines.push(`contents数量：${payload?.contentsCount ?? '未知'}`);
+  if (assetReport?.length) {
+    lines.push('');
+    lines.push('RN字体资源：');
+    assetReport.forEach((item) => {
+      lines.push(`- ${item.family}: ${item.ok ? 'OK' : 'FAIL'} ${item.url || item.error || ''}`);
+    });
+  }
+  const docs = [payload?.outer, ...(payload?.contents || [])].filter(Boolean);
+  if (docs.length) {
+    lines.push('');
+    lines.push('WebView正文状态：');
+    docs.forEach((doc) => {
+      lines.push(`- ${doc.index}: computed=${doc.computedFontFamily || '无'} body=${doc.bodyFontFamily || '无'}`);
+      lines.push(`  style face=${doc.hasFaceStyle ? doc.faceCssLen : 0} override=${doc.hasOverrideStyle ? doc.overrideCssLen : 0} fonts=${doc.fontsStatus || '无'}`);
+      if (doc.fontChecks) {
+        lines.push(`  check=${Object.entries(doc.fontChecks).map(([k, v]) => `${k}:${v ? 'Y' : 'N'}`).join(' ')}`);
+      }
+      if (doc.sampleText) lines.push(`  sample=${doc.sampleText}`);
+    });
+  }
+  if (payload?.error) {
+    lines.push('');
+    lines.push(`错误：${payload.error}`);
+  }
+  return lines.join('\n').slice(0, 4000);
+}
+
 // 目录树递归节点：不管epub.js给的toc有几层（章/节/小节，深度不固定），
 // 都能正确展开/收起——上一版写死只渲染一层subitems，这次改成组件自己
 // 递归调自己，depth决定缩进和字号（顶层稍大，往下逐级变淡变小，跟微信
@@ -224,6 +256,7 @@ function ReaderInner({
   const [showFontSizePanel, setShowFontSizePanel] = useState(false);
   const [fontSizePt, setFontSizePt] = useState(FONT_SIZE_DEFAULT);
   const [bodyFontKey, setBodyFontKey] = useState('serif');
+  const [fontAssetReport, setFontAssetReport] = useState([]);
   // 长按原生菜单（menuItems）在拖动选区手柄调整范围后不会重新弹出——这是
   // react-native-webview 自身的已知限制，不是我们代码能修的。改用这个悬浮条
   // 兜底：只要 epub.js 报了新的选区（onSelected，拖动调整后也会正常触发），
@@ -269,11 +302,23 @@ function ReaderInner({
     Promise.all(
       BODY_FONT_OPTIONS.map((opt) =>
         Asset.fromModule(FONT_ASSETS[opt.asset]).downloadAsync()
-          .then((asset) => ({ family: opt.family, url: asset.localUri || asset.uri }))
-          .catch(() => null),
+          .then((asset) => ({
+            family: opt.family,
+            url: asset.localUri || asset.uri,
+            localUri: asset.localUri,
+            uri: asset.uri,
+            ok: true,
+          }))
+          .catch((e) => ({
+            family: opt.family,
+            url: '',
+            ok: false,
+            error: e.message || String(e),
+          })),
       ),
     ).then((results) => {
       if (cancelled) return;
+      setFontAssetReport(results);
       const rules = results
         .filter((r) => r && r.url)
         .map((r) => `@font-face { font-family: "${r.family}"; src: url("${r.url}"); font-weight: normal; }`)
@@ -335,6 +380,77 @@ function ReaderInner({
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isReady, bodyFontKey]);
+
+  function requestFontDiagnostics() {
+    const opt = BODY_FONT_OPTIONS.find((o) => o.key === bodyFontKey) || BODY_FONT_OPTIONS[0];
+    injectJavascript(`
+      (function() {
+        function post(payload) {
+          var message = JSON.stringify({ type: 'chatbookFontDiagnostics', payload: payload });
+          if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
+            window.ReactNativeWebView.postMessage(message);
+          } else if (typeof reactNativeWebview !== 'undefined' && reactNativeWebview.postMessage) {
+            reactNativeWebview.postMessage(message);
+          }
+        }
+        function summarizeDoc(doc, index, family) {
+          if (!doc) return { index: index, missing: true };
+          var faceId = ${jsStringLiteral(READER_FONT_FACE_STYLE_ID)};
+          var overrideId = ${jsStringLiteral(READER_FONT_STYLE_ID)};
+          var sample = doc.querySelector('p, div, section, article, body');
+          var computed = sample ? doc.defaultView.getComputedStyle(sample) : null;
+          var bodyComputed = doc.body ? doc.defaultView.getComputedStyle(doc.body) : null;
+          var checks = {};
+          ['SourceHanSerifSC', 'SourceHanSansSC', 'LXGWWenKai'].forEach(function(name) {
+            try {
+              checks[name] = !!(doc.fonts && doc.fonts.check && doc.fonts.check('16px "' + name + '"'));
+            } catch (e) {
+              checks[name] = false;
+            }
+          });
+          return {
+            index: index,
+            href: doc.location && doc.location.href,
+            title: doc.title || '',
+            sampleTag: sample && sample.tagName,
+            sampleText: sample && sample.textContent ? sample.textContent.trim().slice(0, 42) : '',
+            computedFontFamily: computed && computed.fontFamily,
+            bodyFontFamily: bodyComputed && bodyComputed.fontFamily,
+            hasFaceStyle: !!doc.getElementById(faceId),
+            faceCssLen: doc.getElementById(faceId) ? doc.getElementById(faceId).innerHTML.length : 0,
+            hasOverrideStyle: !!doc.getElementById(overrideId),
+            overrideCssLen: doc.getElementById(overrideId) ? doc.getElementById(overrideId).innerHTML.length : 0,
+            fontsStatus: doc.fonts ? doc.fonts.status : 'no-fonts-api',
+            selectedCheck: !!(doc.fonts && doc.fonts.check && doc.fonts.check('16px "' + family + '"')),
+            fontChecks: checks
+          };
+        }
+        try {
+          var family = ${jsStringLiteral(opt.family)};
+          var contents = window.rendition && typeof window.rendition.getContents === 'function'
+            ? window.rendition.getContents()
+            : [];
+          post({
+            currentFamily: window.__chatbookReaderFontFamily || family,
+            hasRendition: !!window.rendition,
+            contentsCount: contents.length,
+            outer: summarizeDoc(document, 'outer', family),
+            contents: contents.map(function(contents, idx) {
+              return summarizeDoc(contents && contents.document, idx, family);
+            })
+          });
+        } catch (e) {
+          post({ currentFamily: ${jsStringLiteral(opt.family)}, error: e.message || String(e) });
+        }
+      })();
+      true;
+    `);
+  }
+
+  function handleReaderWebViewMessage(event) {
+    if (event?.type !== 'chatbookFontDiagnostics') return;
+    Alert.alert('字体诊断', formatFontDiagnostics(event.payload, fontAssetReport));
+  }
 
   // 字体选择变化时单独切换生效字体。真机反馈过一次：按钮选中态在变，
   // 但正文看起来完全没变。只调epub.js的changeFontFamily不够稳，因为
@@ -625,6 +741,14 @@ function ReaderInner({
               </TouchableOpacity>
             ))}
           </View>
+          <View style={styles.controlPanelRow}>
+            <TouchableOpacity
+              style={[styles.fontDiagBtn, { borderRadius: uiTheme.radius, borderColor: uiTheme.cardBorder }]}
+              onPress={requestFontDiagnostics}
+            >
+              <Text style={[styles.themeSegmentText, { color: uiTheme.textSecondary }]}>字体诊断</Text>
+            </TouchableOpacity>
+          </View>
         </View>
       )}
 
@@ -703,6 +827,7 @@ function ReaderInner({
           onReady={handleReady}
           onDisplayError={(reason) => Alert.alert('加载失败', String(reason))}
           onLocationChange={handleLocationChange}
+          onWebViewMessage={handleReaderWebViewMessage}
           onSelected={(text, cfiRange) => setSelection({ text, cfiRange })}
           menuItems={[
             {
@@ -923,6 +1048,7 @@ const styles = StyleSheet.create({
   fontSizeValue: { fontSize: 14, fontWeight: '600', minWidth: 40, textAlign: 'center' },
 
   themeSegment: { paddingHorizontal: 16, paddingVertical: 8, borderWidth: 1 },
+  fontDiagBtn: { paddingHorizontal: 16, paddingVertical: 8, borderWidth: 1 },
   themeSegmentText: { fontSize: 13, fontWeight: '600' },
   headerTitle: { flex: 1, textAlign: 'center', fontSize: 16, fontWeight: '700' },
   headerRight: { flexDirection: 'row', alignItems: 'center' },
