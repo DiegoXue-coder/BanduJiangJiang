@@ -36,6 +36,7 @@ const BODY_FONT_OPTIONS = [
     family: 'SourceHanSerifSC',
     asset: FONTS.serifRegular,
     profile: { weight: 400, letterSpacing: '0.02em', fontSize: '1em', lineHeight: '1.75' },
+    previewText: '宋',
   },
   {
     key: 'sans',
@@ -43,13 +44,15 @@ const BODY_FONT_OPTIONS = [
     family: 'SourceHanSansSC',
     asset: FONTS.sansRegular,
     profile: { weight: 500, letterSpacing: '0', fontSize: '1em', lineHeight: '1.68' },
+    previewText: '黑',
   },
   {
     key: 'kai',
     label: '楷体',
     family: 'LXGWWenKai',
     asset: FONTS.kaiRegular,
-    profile: { weight: 400, letterSpacing: '0.07em', fontSize: '1.05em', lineHeight: '1.9' },
+    profile: { weight: 500, letterSpacing: '0.1em', fontSize: '1.08em', lineHeight: '1.95' },
+    previewText: '楷',
   },
 ];
 
@@ -97,8 +100,8 @@ function buildReaderFontOverrideCss(family, profile = {}) {
   const lineHeight = profile.lineHeight || READING_LINE_HEIGHT;
   return [
     `html, body { font-family: "${family}" !important; line-height: ${lineHeight} !important; }`,
-    `body, body * { font-family: "${family}" !important; }`,
-    `p, div, span, section, article, li, blockquote, td, th, a, em, strong { font-weight: ${weight} !important; letter-spacing: ${letterSpacing} !important; font-size: ${fontSize} !important; }`,
+    `body, body *:not(svg):not(path) { font-family: "${family}" !important; }`,
+    `p, div, span, section, article, li, blockquote, td, th, a, em, strong, header, main { font-family: "${family}" !important; font-weight: ${weight} !important; letter-spacing: ${letterSpacing} !important; font-size: ${fontSize} !important; line-height: ${lineHeight} !important; }`,
     `h1, h2, h3, h4, h5, h6, nav h1 { font-family: "${family}" !important; font-weight: 600 !important; letter-spacing: ${letterSpacing} !important; }`,
   ].join(' ');
 }
@@ -781,11 +784,30 @@ function ReaderInner({
               >
                 <Text style={[
                   styles.themeSegmentText,
+                  styles.fontPresetText,
+                  { fontFamily: opt.asset },
+                  opt.key === 'sans' && { fontWeight: '700' },
+                  opt.key === 'kai' && { fontSize: 16, letterSpacing: 1.2 },
                   { color: bodyFontKey === opt.key ? uiTheme.textOnAccent : uiTheme.textSecondary },
                 ]}>
-                  {opt.label}
+                  {opt.previewText} {opt.label}
                 </Text>
               </TouchableOpacity>
+            ))}
+          </View>
+          <View style={styles.fontPreviewRow}>
+            {BODY_FONT_OPTIONS.map((opt) => (
+              <Text
+                key={opt.key}
+                style={[
+                  styles.fontPreviewText,
+                  { color: bodyFontKey === opt.key ? uiTheme.accent : uiTheme.textSecondary, fontFamily: opt.asset },
+                  opt.key === 'sans' && { fontWeight: '700' },
+                  opt.key === 'kai' && { fontSize: 19, letterSpacing: 2 },
+                ]}
+              >
+                {opt.previewText} 子曰学而时习之
+              </Text>
             ))}
           </View>
           <View style={styles.controlPanelRow}>
@@ -1095,6 +1117,9 @@ const styles = StyleSheet.create({
   fontSizeValue: { fontSize: 14, fontWeight: '600', minWidth: 40, textAlign: 'center' },
 
   themeSegment: { paddingHorizontal: 16, paddingVertical: 8, borderWidth: 1 },
+  fontPresetText: { minWidth: 44, textAlign: 'center' },
+  fontPreviewRow: { gap: 4, alignItems: 'center' },
+  fontPreviewText: { fontSize: 16, lineHeight: 24 },
   fontDiagBtn: { paddingHorizontal: 16, paddingVertical: 8, borderWidth: 1 },
   themeSegmentText: { fontSize: 13, fontWeight: '600' },
   headerTitle: { flex: 1, textAlign: 'center', fontSize: 16, fontWeight: '700' },
