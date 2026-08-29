@@ -30,9 +30,27 @@ import BookChatScreen from './BookChatScreen';
 // 声明和changeFontFamily调用保持一致就行，不需要跟字体文件本身的
 // 内部命名一致。
 const BODY_FONT_OPTIONS = [
-  { key: 'serif', label: '宋体', family: 'SourceHanSerifSC', asset: FONTS.serifRegular },
-  { key: 'sans', label: '黑体', family: 'SourceHanSansSC', asset: FONTS.sansRegular },
-  { key: 'kai', label: '楷体', family: 'LXGWWenKai', asset: FONTS.kaiRegular },
+  {
+    key: 'serif',
+    label: '宋体',
+    family: 'SourceHanSerifSC',
+    asset: FONTS.serifRegular,
+    profile: { weight: 400, letterSpacing: '0.02em', fontSize: '1em', lineHeight: '1.75' },
+  },
+  {
+    key: 'sans',
+    label: '黑体',
+    family: 'SourceHanSansSC',
+    asset: FONTS.sansRegular,
+    profile: { weight: 500, letterSpacing: '0', fontSize: '1em', lineHeight: '1.68' },
+  },
+  {
+    key: 'kai',
+    label: '楷体',
+    family: 'LXGWWenKai',
+    asset: FONTS.kaiRegular,
+    profile: { weight: 400, letterSpacing: '0.07em', fontSize: '1.05em', lineHeight: '1.9' },
+  },
 ];
 
 // 阶段十九：外壳视觉延伸（顶部工具栏/字号面板这类UI chrome），不动
@@ -70,6 +88,19 @@ const READER_FONT_FACE_STYLE_ID = 'chatbook-reader-font-face';
 
 function jsStringLiteral(value) {
   return JSON.stringify(String(value ?? ''));
+}
+
+function buildReaderFontOverrideCss(family, profile = {}) {
+  const weight = profile.weight || 400;
+  const letterSpacing = profile.letterSpacing || '0';
+  const fontSize = profile.fontSize || '1em';
+  const lineHeight = profile.lineHeight || READING_LINE_HEIGHT;
+  return [
+    `html, body { font-family: "${family}" !important; line-height: ${lineHeight} !important; }`,
+    `body, body * { font-family: "${family}" !important; }`,
+    `p, div, span, section, article, li, blockquote, td, th, a, em, strong { font-weight: ${weight} !important; letter-spacing: ${letterSpacing} !important; font-size: ${fontSize} !important; }`,
+    `h1, h2, h3, h4, h5, h6, nav h1 { font-family: "${family}" !important; font-weight: 600 !important; letter-spacing: ${letterSpacing} !important; }`,
+  ].join(' ');
 }
 
 function formatFontDiagnostics(payload, assetReport) {
@@ -326,6 +357,7 @@ function ReaderInner({
         .join(' ');
       if (!rules) return; // 全部加载失败就静默保留默认字体，不影响阅读
       const currentOpt = BODY_FONT_OPTIONS.find((o) => o.key === bodyFontKey) || BODY_FONT_OPTIONS[0];
+      const currentCss = buildReaderFontOverrideCss(currentOpt.family, currentOpt.profile);
       injectJavascript(`
         (function() {
           try {
@@ -350,9 +382,7 @@ function ReaderInner({
               installStyle(
                 doc,
                 overrideId,
-                'html, body, p, div, span, section, article, li, blockquote, td, th, a, em, strong {' +
-                  'font-family: "' + family + '" !important;' +
-                '}'
+                window.__chatbookReaderFontCss || ${jsStringLiteral(currentCss)}
               );
             }
             function getReaderRendition() {
@@ -383,6 +413,7 @@ function ReaderInner({
               });
             }
             window.__chatbookReaderFontFamily = ${jsStringLiteral(currentOpt.family)};
+            window.__chatbookReaderFontCss = ${jsStringLiteral(currentCss)};
             window.__chatbookApplyReaderFont(window.__chatbookReaderFontFamily);
           } catch (e) {}
         })();
@@ -476,13 +507,16 @@ function ReaderInner({
   useEffect(() => {
     if (!isReady) return;
     const opt = BODY_FONT_OPTIONS.find((o) => o.key === bodyFontKey) || BODY_FONT_OPTIONS[0];
+    const overrideCss = buildReaderFontOverrideCss(opt.family, opt.profile);
     changeFontFamily(opt.family);
     injectJavascript(`
       (function() {
         try {
           var id = ${jsStringLiteral(READER_FONT_STYLE_ID)};
           var family = ${jsStringLiteral(opt.family)};
+          var overrideCss = ${jsStringLiteral(overrideCss)};
           window.__chatbookReaderFontFamily = family;
+          window.__chatbookReaderFontCss = overrideCss;
           if (typeof window.__chatbookApplyReaderFont === 'function') {
             window.__chatbookApplyReaderFont(family);
           } else {
@@ -492,10 +526,7 @@ function ReaderInner({
               style.id = id;
               document.head.appendChild(style);
             }
-            style.innerHTML =
-              'html, body, p, div, span, section, article, li, blockquote, td, th, a, em, strong {' +
-              'font-family: "' + family + '" !important;' +
-              '}';
+            style.innerHTML = overrideCss;
           }
         } catch (e) {}
       })();
