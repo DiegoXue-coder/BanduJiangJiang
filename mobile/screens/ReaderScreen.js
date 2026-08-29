@@ -66,6 +66,7 @@ const FONT_SIZE_STEP = 2;
 // 进度上报节流：翻页很频繁，没必要每次都请求后端
 const PROGRESS_DEBOUNCE_MS = 2000;
 const READER_FONT_STYLE_ID = 'chatbook-reader-font-override';
+const READER_FONT_FACE_STYLE_ID = 'chatbook-reader-font-face';
 
 function jsStringLiteral(value) {
   return JSON.stringify(String(value ?? ''));
@@ -278,12 +279,54 @@ function ReaderInner({
         .map((r) => `@font-face { font-family: "${r.family}"; src: url("${r.url}"); font-weight: normal; }`)
         .join(' ');
       if (!rules) return; // 全部加载失败就静默保留默认字体，不影响阅读
+      const currentOpt = BODY_FONT_OPTIONS.find((o) => o.key === bodyFontKey) || BODY_FONT_OPTIONS[0];
       injectJavascript(`
         (function() {
           try {
-            var style = document.createElement('style');
-            style.innerHTML = '${rules}';
-            document.head.appendChild(style);
+            var faceId = ${jsStringLiteral(READER_FONT_FACE_STYLE_ID)};
+            var overrideId = ${jsStringLiteral(READER_FONT_STYLE_ID)};
+            var faceCss = ${jsStringLiteral(rules)};
+            function installStyle(doc, id, css) {
+              if (!doc || !doc.head) return;
+              var style = doc.getElementById(id);
+              if (!style) {
+                style = doc.createElement('style');
+                style.id = id;
+                doc.head.appendChild(style);
+              }
+              style.innerHTML = css;
+            }
+            function installFontFace(doc) {
+              installStyle(doc, faceId, faceCss);
+            }
+            function applyFont(doc, family) {
+              installFontFace(doc);
+              installStyle(
+                doc,
+                overrideId,
+                'html, body, p, div, span, section, article, li, blockquote, td, th, a, em, strong {' +
+                  'font-family: "' + family + '" !important;' +
+                '}'
+              );
+            }
+            window.__chatbookApplyReaderFont = function(family) {
+              applyFont(document, family);
+              if (window.rendition && typeof window.rendition.getContents === 'function') {
+                window.rendition.getContents().forEach(function(contents) {
+                  applyFont(contents && contents.document, family);
+                });
+              }
+              console.log('[字体诊断] 已应用正文字体 ' + family);
+            };
+            if (!window.__chatbookFontRenderedHook && window.rendition && typeof window.rendition.on === 'function') {
+              window.__chatbookFontRenderedHook = true;
+              window.rendition.on('rendered', function(section, contents) {
+                var family = window.__chatbookReaderFontFamily || ${jsStringLiteral(currentOpt.family)};
+                applyFont(contents && contents.document, family);
+              });
+            }
+            window.__chatbookReaderFontFamily = ${jsStringLiteral(currentOpt.family)};
+            window.__chatbookApplyReaderFont(window.__chatbookReaderFontFamily);
           } catch (e) {}
         })();
         true;
@@ -291,7 +334,7 @@ function ReaderInner({
     }).catch(() => {});
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isReady]);
+  }, [isReady, bodyFontKey]);
 
   // 字体选择变化时单独切换生效字体。真机反馈过一次：按钮选中态在变，
   // 但正文看起来完全没变。只调epub.js的changeFontFamily不够稳，因为
@@ -306,17 +349,22 @@ function ReaderInner({
       (function() {
         try {
           var id = ${jsStringLiteral(READER_FONT_STYLE_ID)};
-          var style = document.getElementById(id);
-          if (!style) {
-            style = document.createElement('style');
-            style.id = id;
-            document.head.appendChild(style);
-          }
           var family = ${jsStringLiteral(opt.family)};
-          style.innerHTML =
-            'html, body, p, div, span, section, article, li, blockquote {' +
-            'font-family: "' + family + '" !important;' +
-            '}';
+          window.__chatbookReaderFontFamily = family;
+          if (typeof window.__chatbookApplyReaderFont === 'function') {
+            window.__chatbookApplyReaderFont(family);
+          } else {
+            var style = document.getElementById(id);
+            if (!style) {
+              style = document.createElement('style');
+              style.id = id;
+              document.head.appendChild(style);
+            }
+            style.innerHTML =
+              'html, body, p, div, span, section, article, li, blockquote, td, th, a, em, strong {' +
+              'font-family: "' + family + '" !important;' +
+              '}';
+          }
         } catch (e) {}
       })();
       true;

@@ -94,10 +94,14 @@ const AUTO_LISTEN_WINDOW_MS = 4000;
 // 包含"算了"这类词被误判成"继续"指令（比如"算了这段的账目是什么意思"
 // 这种问题不应该被拦截）。
 const CONTINUE_VOICE_PATTERNS = ['继续', '没事', '不问了', '算了', '好了', '行了', '够了', '不用了'];
+const CONTINUE_READING_VOICE_PATTERNS = ['继续读', '继续念', '继续听', '接着读', '接着念', '接着听', '往下读', '往下念', '读下去', '念下去'];
+const FOLLOW_UP_VOICE_PATTERNS = ['继续解释', '继续讲', '继续说', '接着解释', '接着讲', '再讲讲', '展开讲'];
 function isContinueVoiceCommand(text) {
   const t = (text || '').trim();
-  if (!t || t.length > 8) return false;
-  return CONTINUE_VOICE_PATTERNS.some((p) => t.includes(p));
+  if (!t || t.length > 14) return false;
+  if (FOLLOW_UP_VOICE_PATTERNS.some((p) => t.includes(p))) return false;
+  return CONTINUE_VOICE_PATTERNS.some((p) => t.includes(p))
+    || CONTINUE_READING_VOICE_PATTERNS.some((p) => t.includes(p));
 }
 
 // 免提的语义过滤是为了挡电视/旁人闲聊，不应该把用户已经清楚说出来的
@@ -487,6 +491,25 @@ export default function ListenScreen({ route, navigation }) {
   const hfListenTimerRef = useRef(null); // 兜底的硬性超时，防止metering回调异常时无限录下去
   const hfListenResolveRef = useRef(null); // 让cancelHandsFreeTurn能立刻唤醒hfRecordUntilSilence里还在等待的Promise，不用干等到超时才发现被取消了
   const hfAbortRef = useRef(null);
+  const hfReplyInterruptingRef = useRef(false);
+  const hfTimingRef = useRef(null);
+
+  function startHfTiming(reason) {
+    const now = Date.now();
+    hfTimingRef.current = { reason, startedAt: now, lastAt: now };
+    console.log(`[免提计时] ${reason} start`);
+  }
+
+  function markHfTiming(label) {
+    const now = Date.now();
+    const timing = hfTimingRef.current;
+    if (!timing) {
+      console.log(`[免提计时] ${label}`);
+      return;
+    }
+    console.log(`[免提计时] ${label}: +${now - timing.lastAt}ms / total ${now - timing.startedAt}ms`);
+    timing.lastAt = now;
+  }
 
   async function stopSound() {
     if (soundRef.current) {
@@ -528,10 +551,16 @@ export default function ListenScreen({ route, navigation }) {
     soundRef.current = sound;
     onAudioStart?.(); // 真正要出声了才回调——见调用处注释，打断截取的位置要跟这个对齐
     await new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
       sound.setOnPlaybackStatusUpdate((s) => {
-        if (s.didJustFinish) resolve();
+        if (!s.isLoaded || s.didJustFinish) finish();
       });
-      sound.playAsync().catch(() => resolve()); // 播放本身失败也别卡住整个循环，跳过这段
+      sound.playAsync().catch(() => finish()); // 播放本身失败也别卡住整个循环，跳过这段
     });
   }
 
@@ -826,14 +855,20 @@ export default function ListenScreen({ route, navigation }) {
   // 这句话，全程留在朗读字幕视图（phase不变，不跳转），跟手动"打断"那套
   // 聊天气泡流程完全独立。
   function startHandsFreeTurn() {
-    if (phase !== 'playing') return;
+    const interruptingReply = hfActiveRef.current && hfStage === 'replying';
+    if (phase !== 'playing' && !interruptingReply) return;
     if (handsFreeMuted) return;
-    if (hfActiveRef.current) return;
+    if (hfActiveRef.current && !interruptingReply) return;
+    if (interruptingReply) {
+      hfReplyInterruptingRef.current = true;
+    }
     hfActiveRef.current = true;
     epochRef.current += 1;
+    startHfTiming(interruptingReply ? 'AI回复中二次打断' : '正文朗读中免提打断');
     (async () => {
       await stopSound();
       await stopHandsFreeAmbient(); // 等它真的放开麦克风，再开正式录音那一路，两路录音先后而不是同时存在
+      markHfTiming('打断音频并释放环境监听');
       setHfStage('listening');
       setHfText('');
       await hfListenTurnLoop();
@@ -851,6 +886,7 @@ export default function ListenScreen({ route, navigation }) {
   // 语音识别）。
   async function hfRecordUntilSilence() {
     try {
+      markHfTiming('准备正式录音');
       const { status: perm } = await Audio.getPermissionsAsync();
       if (perm !== 'granted') return null;
       await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
@@ -884,6 +920,7 @@ export default function ListenScreen({ route, navigation }) {
       });
       await recording.prepareToRecordAsync({ ...Audio.RecordingOptionsPresets.HIGH_QUALITY, isMeteringEnabled: true });
       await recording.startAsync();
+      markHfTiming('正式录音已开始');
       hfRecordingRef.current = recording;
       // 双保险：万一某些机型metering回调不触发/触发不及时，硬性上限兜底，
       // 不会无限录下去。
@@ -899,12 +936,16 @@ export default function ListenScreen({ route, navigation }) {
       hfRecordingRef.current = null;
       if (!rec) return null;
       await rec.stopAndUnloadAsync();
+      markHfTiming(`端点检测结束 speech=${speechEverDetected} elapsed=${elapsedMs}ms`);
       const uri = rec.getURI();
       await Audio.setAudioModeAsync({ allowsRecordingIOS: false, playsInSilentModeIOS: true });
       if (!speechEverDetected) return null; // 全程没有真的检测到声音，不浪费一次识别请求
+      markHfTiming('开始ASR识别');
       const text = await transcribeAudio(uri, FileSystem.uploadAsync, FileSystem.FileSystemUploadType);
+      markHfTiming(`ASR识别完成 chars=${(text || '').trim().length}`);
       return (text || '').trim();
     } catch (e) {
+      markHfTiming(`录音/ASR失败 ${e.message || e}`);
       return null; // 静默失败——免提是锦上添花的功能，任何一步出错都直接放弃这一轮，不打断听书体验、不弹错误
     }
   }
@@ -918,7 +959,9 @@ export default function ListenScreen({ route, navigation }) {
   async function hfListenTurnLoop() {
     const text = await hfRecordUntilSilence();
     if (!hfActiveRef.current) return;
+    markHfTiming(text ? `识别文本进入判断 chars=${text.length}` : '没有有效识别文本');
     if (!text || isContinueVoiceCommand(text)) {
+      markHfTiming('判定为继续正文');
       finishHandsFreeTurn();
       return;
     }
@@ -927,12 +970,16 @@ export default function ListenScreen({ route, navigation }) {
     const chapter = chaptersRef.current[posRef.current.chapterIdx];
     let relevant = true;
     try {
+      markHfTiming('开始意图分类');
       relevant = await classifyIntent(text, bookTitle, chapter?.title || '');
+      markHfTiming(`意图分类完成 relevant=${relevant}`);
     } catch (e) {
+      markHfTiming(`意图分类失败 ${e.message || e}`);
       relevant = true; // 判断这一步本身失败，保守当成是提问，交给下面真正的问答逻辑处理
     }
     if (!hfActiveRef.current) return;
     if (!relevant && !looksLikeHandsFreeQuestion(text)) {
+      markHfTiming('判定为无关内容，恢复正文');
       finishHandsFreeTurn();
       return;
     }
@@ -946,7 +993,10 @@ export default function ListenScreen({ route, navigation }) {
   // 晾在这里出不来。
   async function askHandsFree(question) {
     if (!hfActiveRef.current) return;
+    hfReplyInterruptingRef.current = false;
+    markHfTiming(`开始AI问答 questionChars=${question.length}`);
     const chapter = chaptersRef.current[posRef.current.chapterIdx];
+    let replyWasInterrupted = false;
     await new Promise((resolve) => {
       hfAbortRef.current = streamAsk(
         {
@@ -963,6 +1013,7 @@ export default function ListenScreen({ route, navigation }) {
           onDelta: () => {},
           onDone: async (answer) => {
             hfAbortRef.current = null;
+            markHfTiming(`AI回复完成 answerChars=${(answer || '').length}`);
             const fakeCfi = `listen:${chapter?.id}:${posRef.current.paragraphIdx}`;
             saveQaHistory({
               bookId, bookTitle, chapterTitle: chapter?.title || '',
@@ -973,24 +1024,42 @@ export default function ListenScreen({ route, navigation }) {
             setHfText(answer);
             const epoch = epochRef.current;
             try {
-              await playOneParagraph(answer, epoch);
+              if (handsFreeEnabled && !handsFreeMuted) {
+                setHandsFreeStatus('AI回复中也在监听');
+                await startHandsFreeAmbient();
+                markHfTiming('AI回复期间环境监听已开启');
+              }
+              await playOneParagraph(answer, epoch, () => markHfTiming('AI回复TTS开始播放'));
             } catch (e) {
+              markHfTiming(`AI回复播放失败/中断 ${e.message || e}`);
               // 回答播放失败不阻塞后续流程，直接进入追问窗口
+            }
+            replyWasInterrupted = epoch !== epochRef.current || hfReplyInterruptingRef.current;
+            if (!replyWasInterrupted) {
+              await stopHandsFreeAmbient();
             }
             if (soundRef.current) {
               soundRef.current.unloadAsync().catch(() => {});
               soundRef.current = null;
             }
+            if (replyWasInterrupted) {
+              markHfTiming('AI回复已被二次打断，交给新一轮录音');
+              resolve();
+              return;
+            }
+            markHfTiming('AI回复播放结束');
             resolve();
           },
           onError: () => {
             hfAbortRef.current = null;
+            markHfTiming('AI问答失败');
             resolve();
           },
         },
       );
     });
     if (!hfActiveRef.current) return;
+    if (replyWasInterrupted) return;
     setHfStage('listening');
     setHfText('');
     await hfListenTurnLoop();
@@ -1001,10 +1070,12 @@ export default function ListenScreen({ route, navigation }) {
   // 静音，重新开一路环境监听录音接回。
   function finishHandsFreeTurn() {
     hfActiveRef.current = false;
+    hfReplyInterruptingRef.current = false;
     setHfStage('');
     setHfText('');
     const { chapterIdx, paragraphIdx } = posRef.current;
     epochRef.current += 1;
+    markHfTiming(`恢复正文 chapter=${chapterIdx} paragraph=${paragraphIdx}`);
     playFrom(chapterIdx, paragraphIdx, epochRef.current);
     if (handsFreeEnabled && !handsFreeMuted) {
       setHandsFreeStatus('免提监听中');
@@ -1018,6 +1089,7 @@ export default function ListenScreen({ route, navigation }) {
   function cancelHandsFreeTurn() {
     if (!hfActiveRef.current) return;
     hfActiveRef.current = false;
+    hfReplyInterruptingRef.current = false;
     if (hfListenTimerRef.current) {
       clearTimeout(hfListenTimerRef.current);
       hfListenTimerRef.current = null;
