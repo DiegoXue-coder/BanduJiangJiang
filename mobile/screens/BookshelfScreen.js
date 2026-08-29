@@ -291,13 +291,20 @@ function confirmDeleteBook(book, onDeleted) {
 // 复杂交互——原型阶段选个文件、等一下、成功或看清楚报错，够用。
 async function pickAndImportFile(setImporting, onDone) {
   const result = await DocumentPicker.getDocumentAsync({
-    type: ['application/pdf', 'text/plain', 'application/epub+zip'],
+    // iOS Files 对某些电子书文件给出的类型不一定是标准MIME；选择器层
+    // 过滤过窄时，真机上容易表现成选完就退回书架、没有进入导入流程。
+    // 这里放开系统选择器，选完后按文件扩展名给出明确的支持/不支持提示。
+    type: '*/*',
     copyToCacheDirectory: true,
   });
   if (result.canceled || !result.assets?.[0]) return;
 
   const asset = result.assets[0];
   const ext = (asset.name || '').toLowerCase().split('.').pop();
+  if (!['epub', 'pdf', 'txt'].includes(ext)) {
+    Alert.alert('暂不支持这个文件', '目前只能导入 EPUB、PDF 或 TXT 文件。');
+    return;
+  }
 
   setImporting(true);
   try {
@@ -493,7 +500,13 @@ export default function BookshelfScreen({ navigation }) {
         onClose={() => setShowImportSheet(false)}
         onConfirm={() => {
           setShowImportSheet(false);
-          pickAndImportFile(setImporting, () => load());
+          // iOS上如果在关闭RN Modal的同一帧立刻拉起系统文件选择器，偶尔会
+          // 出现选择器刚出现/刚选完就被上一层Modal dismiss吞掉，表现成
+          // "点从文件里选一本后直接回到书架、没有任何反应"。等关闭动画
+          // 走完再打开DocumentPicker，避免两个系统弹层抢同一轮present。
+          setTimeout(() => {
+            pickAndImportFile(setImporting, () => load());
+          }, 350);
         }}
       />
 

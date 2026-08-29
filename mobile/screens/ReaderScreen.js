@@ -65,6 +65,11 @@ const FONT_SIZE_STEP = 2;
 
 // 进度上报节流：翻页很频繁，没必要每次都请求后端
 const PROGRESS_DEBOUNCE_MS = 2000;
+const READER_FONT_STYLE_ID = 'chatbook-reader-font-override';
+
+function jsStringLiteral(value) {
+  return JSON.stringify(String(value ?? ''));
+}
 
 // 目录树递归节点：不管epub.js给的toc有几层（章/节/小节，深度不固定），
 // 都能正确展开/收起——上一版写死只渲染一层subitems，这次改成组件自己
@@ -288,13 +293,34 @@ function ReaderInner({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isReady]);
 
-  // 字体选择变化时单独切换生效字体——跟上面"注入全部@font-face声明"这个
-  // effect分开，切换字体不用重新走一次asset下载，只是换一下已经注入好的
-  // 样式表里选用哪个font-family。
+  // 字体选择变化时单独切换生效字体。真机反馈过一次：按钮选中态在变，
+  // 但正文看起来完全没变。只调epub.js的changeFontFamily不够稳，因为
+  // 原书HTML/CSS经常自己写了font-family，优先级会盖过主题设置。这里
+  // 再往WebView里放一条带!important的覆盖样式，强制正文常见元素跟随
+  // 当前选择；保留changeFontFamily作为epub.js主题层的同步设置。
   useEffect(() => {
     if (!isReady) return;
     const opt = BODY_FONT_OPTIONS.find((o) => o.key === bodyFontKey) || BODY_FONT_OPTIONS[0];
     changeFontFamily(opt.family);
+    injectJavascript(`
+      (function() {
+        try {
+          var id = ${jsStringLiteral(READER_FONT_STYLE_ID)};
+          var style = document.getElementById(id);
+          if (!style) {
+            style = document.createElement('style');
+            style.id = id;
+            document.head.appendChild(style);
+          }
+          var family = ${jsStringLiteral(opt.family)};
+          style.innerHTML =
+            'html, body, p, div, span, section, article, li, blockquote {' +
+            'font-family: "' + family + '" !important;' +
+            '}';
+        } catch (e) {}
+      })();
+      true;
+    `);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isReady, bodyFontKey]);
 

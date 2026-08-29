@@ -100,6 +100,29 @@ function isContinueVoiceCommand(text) {
   return CONTINUE_VOICE_PATTERNS.some((p) => t.includes(p));
 }
 
+// 免提的语义过滤是为了挡电视/旁人闲聊，不应该把用户已经清楚说出来的
+// 问句吞掉。DeepSeek二分类偶尔偏保守时，先用本地的显式问句特征兜底。
+const QUESTION_VOICE_PATTERNS = [
+  '什么', '为什么', '怎么', '如何', '哪里', '哪儿', '吗', '呢',
+  '意思', '解释', '讲一下', '讲讲', '说一下', '?', '？',
+];
+function looksLikeHandsFreeQuestion(text) {
+  const t = (text || '').trim();
+  if (!t || t.length > 80) return false;
+  return QUESTION_VOICE_PATTERNS.some((p) => t.includes(p));
+}
+
+function restorePlaybackAudioMode() {
+  return Audio.setAudioModeAsync({
+    allowsRecordingIOS: false,
+    playsInSilentModeIOS: true,
+    staysActiveInBackground: true,
+    interruptionModeIOS: InterruptionModeIOS.DoNotMix,
+    interruptionModeAndroid: InterruptionModeAndroid.DoNotMix,
+    shouldDuckAndroid: false,
+  });
+}
+
 // 2026-08-10方案B第三版重写：前两版（react-native-webrtc读audioLevel）
 // 暴露出两个根子问题，用户明确要求这次从架构上解决，不是再打补丁：
 // ①react-native-webrtc的audioLevel在不同设备上量级完全不统一（真机1.0
@@ -411,6 +434,7 @@ export default function ListenScreen({ route, navigation }) {
   // "下一句开始播放就用新设置"，不用整个重启听书。
   const rateRef = useRef(rate);
   const voiceRef = useRef(voice);
+  const chapterJumpingRef = useRef(false);
   useEffect(() => { rateRef.current = rate; }, [rate]);
   useEffect(() => { voiceRef.current = voice; }, [voice]);
 
@@ -664,13 +688,7 @@ export default function ListenScreen({ route, navigation }) {
     // 官方提供的后台播放开关，不是自己发明机制。iOS这个参数在Expo Go里
     // 不生效（官方文档原文："不适用于Expo Go的iOS，仅在独立应用中有效"），
     // 需要走eas build出真机包才能验证，这点已经如实记入开发进度记录。
-    Audio.setAudioModeAsync({
-      playsInSilentModeIOS: true,
-      staysActiveInBackground: true,
-      interruptionModeIOS: InterruptionModeIOS.DoNotMix,
-      interruptionModeAndroid: InterruptionModeAndroid.DoNotMix,
-      shouldDuckAndroid: false,
-    }).catch(() => {});
+    restorePlaybackAudioMode().catch(() => {});
     getBookContext(bookId).then((ctx) => {
       if (cancelled) return;
       const filtered = (ctx.chapters || []).filter((c) => !isTocChapter(c.title));
@@ -792,11 +810,14 @@ export default function ListenScreen({ route, navigation }) {
   // 一致（chaptersRef是扁平的宏观章节列表，idx就是数组下标）。
   function handleJumpToChapter(idx) {
     if (idx < 0 || idx >= chaptersRef.current.length) return;
+    if (chapterJumpingRef.current) return;
+    chapterJumpingRef.current = true;
     epochRef.current += 1;
     (async () => {
       await stopSound();
       setShowChapterPicker(false);
       playFrom(idx, 0, epochRef.current);
+      setTimeout(() => { chapterJumpingRef.current = false; }, 900);
     })();
   }
 
@@ -911,7 +932,7 @@ export default function ListenScreen({ route, navigation }) {
       relevant = true; // 判断这一步本身失败，保守当成是提问，交给下面真正的问答逻辑处理
     }
     if (!hfActiveRef.current) return;
-    if (!relevant) {
+    if (!relevant && !looksLikeHandsFreeQuestion(text)) {
       finishHandsFreeTurn();
       return;
     }
@@ -1312,6 +1333,10 @@ export default function ListenScreen({ route, navigation }) {
     if (rec) {
       await rec.stopAndUnloadAsync().catch(() => {});
     }
+    // iOS上allowsRecordingIOS=true时系统可能把音频路由切到更适合录音的
+    // 模式，用户真机反馈"取消监听后朗读音量明显变小"。停止环境监听后
+    // 立刻恢复播放模式，避免继续留在录音路由里。
+    await restorePlaybackAudioMode().catch(() => {});
     setHandsFreeStatus('');
   }
 
