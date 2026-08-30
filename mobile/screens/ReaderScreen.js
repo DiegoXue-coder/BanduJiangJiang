@@ -35,7 +35,7 @@ const BODY_FONT_OPTIONS = [
     key: 'serif',
     label: '宋体',
     family: 'SourceHanSerifSC',
-    cssFamily: '"Songti SC", "SourceHanSerifSC", STSong, serif',
+    cssFamily: '"SourceHanSerifSC", "Songti SC", STSong, serif',
     previewFamily: Platform.select({ ios: 'Songti SC', android: FONTS.serifRegular, default: FONTS.serifRegular }),
     checkFamilies: ['Songti SC', 'SourceHanSerifSC'],
     asset: FONTS.serifRegular,
@@ -46,7 +46,7 @@ const BODY_FONT_OPTIONS = [
     key: 'sans',
     label: '黑体',
     family: 'SourceHanSansSCBold',
-    cssFamily: '"PingFang SC", "Heiti SC", "SourceHanSansSCBold", sans-serif',
+    cssFamily: '"SourceHanSansSCBold", "PingFang SC", "Heiti SC", sans-serif',
     previewFamily: Platform.select({ ios: 'PingFang SC', android: FONTS.sansBold, default: FONTS.sansBold }),
     checkFamilies: ['PingFang SC', 'Heiti SC', 'SourceHanSansSCBold'],
     asset: FONTS.sansBold,
@@ -57,7 +57,7 @@ const BODY_FONT_OPTIONS = [
     key: 'kai',
     label: '楷体',
     family: 'LXGWWenKai',
-    cssFamily: '"Kaiti SC", STKaiti, KaiTi, "LXGWWenKai", cursive',
+    cssFamily: '"LXGWWenKai", "Kaiti SC", STKaiti, KaiTi, cursive',
     previewFamily: Platform.select({ ios: 'Kaiti SC', android: FONTS.kaiRegular, default: FONTS.kaiRegular }),
     checkFamilies: ['Kaiti SC', 'STKaiti', 'LXGWWenKai'],
     asset: FONTS.kaiRegular,
@@ -127,7 +127,8 @@ function formatFontDiagnostics(payload, assetReport) {
     lines.push('');
     lines.push('RN字体资源：');
     assetReport.forEach((item) => {
-      lines.push(`- ${item.family}: ${item.ok ? 'OK' : 'FAIL'} ${item.url || item.error || ''}`);
+      const sizeInfo = item.byteLength ? ` ${Math.round(item.byteLength / 1024)}KB` : '';
+      lines.push(`- ${item.family}: ${item.ok ? 'OK' : 'FAIL'}${sizeInfo} ${item.url || item.error || ''}`);
     });
   }
   const docs = [payload?.outer, ...(payload?.contents || [])].filter(Boolean);
@@ -368,41 +369,41 @@ function ReaderInner({
     }
   }
 
-  // 正文字体：往WebView文档头部插入三份@font-face声明（宋体/黑体/楷体
-  // 一次性全注入，不是切换的时候才现下载现注入——避免每次切换字体都要
-  // 等一次asset下载+WebView脚本执行的闪烁感），再用changeFontFamily把
-  // 其中一个设成当前生效的正文字体。字体文件是expo静态资源，
-  // Asset.fromModule().uri开发模式下是Metro的本地HTTP地址、生产包里是
-  // 打包后的本地路径，两种情况WebView都能按URL正常发起请求加载。
+  // 正文字体：真机多轮诊断后确认，单纯把Expo资产的file://路径写进
+  // WKWebView里的@font-face不够可靠，computed font-family可能显示成
+  // 目标family，但真实字形仍静默回退。这里改成只读取"当前选中的字体"，
+  // 以内嵌data URL的方式注入到EPUB正文document，先保证字形确实可见。
   useEffect(() => {
     if (!isReady) return;
     let cancelled = false;
-    Promise.all(
-      BODY_FONT_OPTIONS.map((opt) =>
-        Asset.fromModule(FONT_ASSETS[opt.asset]).downloadAsync()
-          .then((asset) => ({
-            family: opt.family,
-            url: asset.localUri || asset.uri,
-            localUri: asset.localUri,
-            uri: asset.uri,
-            ok: true,
-          }))
-          .catch((e) => ({
-            family: opt.family,
-            url: '',
-            ok: false,
-            error: e.message || String(e),
-          })),
-      ),
-    ).then((results) => {
+    const currentOpt = BODY_FONT_OPTIONS.find((o) => o.key === bodyFontKey) || BODY_FONT_OPTIONS[0];
+    Asset.fromModule(FONT_ASSETS[currentOpt.asset]).downloadAsync()
+      .then(async (asset) => {
+        const url = asset.localUri || asset.uri;
+        const base64 = await FileSystem.readAsStringAsync(url, {
+          encoding: FileSystem.EncodingType.Base64,
+        });
+        return {
+          family: currentOpt.family,
+          url,
+          localUri: asset.localUri,
+          uri: asset.uri,
+          byteLength: Math.round(base64.length * 0.75),
+          base64,
+          ok: true,
+        };
+      })
+      .catch((e) => ({
+        family: currentOpt.family,
+        url: '',
+        ok: false,
+        error: e.message || String(e),
+      }))
+      .then((result) => {
       if (cancelled) return;
-      setFontAssetReport(results);
-      const rules = results
-        .filter((r) => r && r.url)
-        .map((r) => `@font-face { font-family: "${r.family}"; src: url("${r.url}"); font-weight: normal; }`)
-        .join(' ');
-      if (!rules) return; // 全部加载失败就静默保留默认字体，不影响阅读
-      const currentOpt = BODY_FONT_OPTIONS.find((o) => o.key === bodyFontKey) || BODY_FONT_OPTIONS[0];
+      setFontAssetReport([result]);
+      if (!result.ok || !result.base64) return;
+      const rules = `@font-face { font-family: "${currentOpt.family}"; src: url("data:font/truetype;charset=utf-8;base64,${result.base64}") format("truetype"); font-weight: ${currentOpt.profile.weight || 400}; font-style: normal; }`;
       const currentCss = buildReaderFontOverrideCss(currentOpt.cssFamily, currentOpt.profile);
       injectJavascript(`
         (function() {
@@ -465,7 +466,7 @@ function ReaderInner({
         })();
         true;
       `);
-    }).catch(() => {});
+    });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isReady, bodyFontKey]);
