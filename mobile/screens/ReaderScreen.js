@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View, Text, TouchableOpacity, StyleSheet, ActivityIndicator, Alert,
-  Modal, FlatList, PanResponder, Platform,
+  Modal, FlatList, PanResponder, Platform, ScrollView,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Reader, useReader } from '@epubjs-react-native/core';
@@ -12,7 +12,7 @@ import { Asset } from 'expo-asset';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as SecureStore from 'expo-secure-store';
 import {
-  getBookContext, getBookFileUrl, getHighlights, saveHighlight, updateProgress, isLoggedIn,
+  getBookContext, getBookFileUrl, getHighlights, saveHighlight, updateProgress, isLoggedIn, getChapterText,
 } from '../lib/api';
 import { useTheme, setThemeMode } from '../theme';
 import { FONT_ASSETS, FONTS } from '../fonts';
@@ -101,6 +101,8 @@ const PROGRESS_DEBOUNCE_MS = 2000;
 const READER_FONT_STYLE_ID = 'chatbook-reader-font-override';
 const READER_FONT_FACE_STYLE_ID = 'chatbook-reader-font-face';
 const READER_SETTINGS_KEY = 'chatbook_reader_typography_settings_v1';
+const READER_MODE_ORDER = ['epub', 'standard'];
+const READER_MODE_LABEL = { epub: '原版', standard: '标准' };
 
 function jsStringLiteral(value) {
   return JSON.stringify(String(value ?? ''));
@@ -203,7 +205,7 @@ function TocNode({ item, depth, pathKey, expandedToc, toggleTocExpanded, onSelec
 
 function ReaderInner({
   bookId, bookTitle, author, initialLocation, initialAnnotations, navigation,
-  jumpToCfi, jumpNonce, epubSrc,
+  jumpToCfi, jumpNonce, epubSrc, epubError, chapters,
 }) {
   // 1号任务诊断打点：这里挂载即代表epubUri（Base64字符串）已经通过RN桥
   // 传给了<Reader>，接下来是epub.js在WebView内部解压+解析的阶段——跟
@@ -303,6 +305,10 @@ function ReaderInner({
   const [showFontSizePanel, setShowFontSizePanel] = useState(false);
   const [fontSizePt, setFontSizePt] = useState(FONT_SIZE_DEFAULT);
   const [bodyFontKey, setBodyFontKey] = useState('serif');
+  const [readerMode, setReaderMode] = useState('epub');
+  const [standardChapterIndex, setStandardChapterIndex] = useState(0);
+  const [standardChapterText, setStandardChapterText] = useState(null);
+  const [standardChapterError, setStandardChapterError] = useState('');
   const [readerSettingsLoaded, setReaderSettingsLoaded] = useState(false);
   const [fontAssetReport, setFontAssetReport] = useState([]);
   // 长按原生菜单（menuItems）在拖动选区手柄调整范围后不会重新弹出——这是
@@ -324,6 +330,9 @@ function ReaderInner({
         if (BODY_FONT_KEYS.includes(saved.bodyFontKey)) {
           setBodyFontKey(saved.bodyFontKey);
         }
+        if (READER_MODE_ORDER.includes(saved.readerMode)) {
+          setReaderMode(saved.readerMode);
+        }
         if (
           Number.isFinite(saved.fontSizePt) &&
           saved.fontSizePt >= FONT_SIZE_MIN &&
@@ -341,9 +350,35 @@ function ReaderInner({
 
   useEffect(() => {
     if (!readerSettingsLoaded) return;
-    SecureStore.setItemAsync(READER_SETTINGS_KEY, JSON.stringify({ bodyFontKey, fontSizePt }))
+    SecureStore.setItemAsync(READER_SETTINGS_KEY, JSON.stringify({ bodyFontKey, fontSizePt, readerMode }))
       .catch((e) => console.warn('[阅读器设置] 保存失败', e.message || e));
-  }, [readerSettingsLoaded, bodyFontKey, fontSizePt]);
+  }, [readerSettingsLoaded, bodyFontKey, fontSizePt, readerMode]);
+
+  useEffect(() => {
+    if (readerMode !== 'standard') return;
+    const chapter = chapters?.[standardChapterIndex];
+    if (!chapter) {
+      setStandardChapterText({ title: '', paragraphs: [] });
+      return;
+    }
+    let cancelled = false;
+    setStandardChapterError('');
+    setStandardChapterText(null);
+    setCurrentSectionTitle(chapter.title || '');
+    getChapterText(bookId, chapter.id)
+      .then((data) => {
+        if (cancelled) return;
+        setStandardChapterText({
+          title: data?.title || chapter.title || '',
+          paragraphs: Array.isArray(data?.paragraphs) ? data.paragraphs : [],
+        });
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setStandardChapterError(e.message || '章节加载失败');
+      });
+    return () => { cancelled = true; };
+  }, [readerMode, chapters, standardChapterIndex, bookId]);
 
   // initialAnnotations 要等 Reader 的 onReady 触发（book 真正渲染完成）才能加，
   // 提前调用 addAnnotation 会静默失效，所以不能放进 mount 时的 effect 里。
@@ -713,7 +748,9 @@ function ReaderInner({
     if (!requireAuth('ai')) return false;
     try {
       const saved = await saveHighlight(bookId, { cfiLocation: cfiRange, highlightedText: text });
-      addAnnotation('highlight', cfiRange, { id: saved.id }, { color: '#ffd54f' });
+      if (readerMode === 'epub' && cfiRange?.startsWith('epubcfi(')) {
+        addAnnotation('highlight', cfiRange, { id: saved.id }, { color: '#ffd54f' });
+      }
     } catch (e) {
       Alert.alert('划线保存失败', e.message || '请稍后重试');
     }
@@ -763,6 +800,27 @@ function ReaderInner({
     setBodyFontKey(key);
   }
 
+  function selectReaderMode(mode) {
+    if (!READER_MODE_ORDER.includes(mode)) return;
+    setShowToc(false);
+    setReaderMode(mode);
+  }
+
+  function selectStandardChapter(index) {
+    setStandardChapterIndex(index);
+    setShowToc(false);
+  }
+
+  function makeStandardCfi(paragraphIndex) {
+    const chapter = chapters?.[standardChapterIndex];
+    return `standard:${chapter?.id || 'unknown'}:${paragraphIndex}`;
+  }
+
+  const bodyFont = BODY_FONT_OPTIONS.find((o) => o.key === bodyFontKey) || BODY_FONT_OPTIONS[0];
+  const standardFontFamily = bodyFont.asset;
+  const standardFontSize = Math.round(fontSizePt * 1.35);
+  const standardLineHeight = Math.round(standardFontSize * Number(READING_LINE_HEIGHT));
+
   return (
     <SafeAreaView edges={['bottom', 'left', 'right']} style={[styles.safe, { backgroundColor: THEMES[themeName].body.background }]}>
       <View style={[styles.header, { backgroundColor: uiTheme.accent, paddingTop: insets.top + 10 }]}>
@@ -789,13 +847,15 @@ function ReaderInner({
               // 换算成一个0~1的比例，传给听书页面，听书页面再按这个比例
               // 换算成"该从章节正文数组的第几段开始"——不是精确到字，是
               // "大致在你翻到的位置附近开始"，比"永远从头开始"好很多。
-              const displayed = currentLocation?.start?.displayed;
+              const displayed = readerMode === 'standard' ? null : currentLocation?.start?.displayed;
               const startFraction = displayed && displayed.total > 1
                 ? Math.max(0, Math.min(1, (displayed.page - 1) / displayed.total))
                 : 0;
               navigation.navigate('Listen', {
                 bookId, bookTitle, author,
-                initialChapterTitle: currentSectionTitle,
+                initialChapterTitle: readerMode === 'standard'
+                  ? chapters?.[standardChapterIndex]?.title
+                  : currentSectionTitle,
                 startFraction,
               });
             }}
@@ -830,6 +890,26 @@ function ReaderInner({
             >
               <Text style={[styles.fontSizeBtnText, { color: uiTheme.text, fontSize: 20 }]}>A+</Text>
             </TouchableOpacity>
+          </View>
+          <View style={styles.controlPanelRow}>
+            {READER_MODE_ORDER.map((mode) => (
+              <TouchableOpacity
+                key={mode}
+                style={[
+                  styles.themeSegment,
+                  { borderRadius: uiTheme.radius, borderColor: uiTheme.cardBorder },
+                  readerMode === mode && { backgroundColor: uiTheme.accent, borderColor: uiTheme.accent },
+                ]}
+                onPress={() => selectReaderMode(mode)}
+              >
+                <Text style={[
+                  styles.themeSegmentText,
+                  { color: readerMode === mode ? uiTheme.textOnAccent : uiTheme.textSecondary },
+                ]}>
+                  {READER_MODE_LABEL[mode]}
+                </Text>
+              </TouchableOpacity>
+            ))}
           </View>
           {/* 阶段十九：字体选择器（宋体/黑体/楷体三选一），跟字号调节放
               在同一个面板里——都是排版控制，没必要单独占一个头部图标。 */}
@@ -924,63 +1004,148 @@ function ReaderInner({
               自己的树形结构分组（章/节/小节可能有好几层，不是固定两层），
               这里配合改成真正递归的TocNode组件，不管数据有几层都能正确
               展开/收起，不是只写死渲染一层subitems。 */}
-          <FlatList
-            data={toc}
-            keyExtractor={(item, idx) => item.id || String(idx)}
-            contentContainerStyle={styles.tocListContent}
-            renderItem={({ item, index }) => (
-              <View style={[styles.tocCard, { backgroundColor: uiTheme.cardBg, borderColor: uiTheme.cardBorder, borderRadius: uiTheme.radius }]}>
-                <TocNode
-                  item={item}
-                  depth={0}
-                  pathKey={item.id || String(index)}
-                  expandedToc={expandedToc}
-                  toggleTocExpanded={toggleTocExpanded}
-                  onSelect={(href) => { goToTocItem(href); setShowToc(false); }}
-                  theme={uiTheme}
-                />
-              </View>
-            )}
-          />
+          {readerMode === 'standard' ? (
+            <FlatList
+              data={chapters || []}
+              keyExtractor={(item, idx) => String(item.id || idx)}
+              contentContainerStyle={styles.tocListContent}
+              renderItem={({ item, index }) => (
+                <TouchableOpacity
+                  style={[
+                    styles.tocCard,
+                    styles.standardTocItem,
+                    { backgroundColor: uiTheme.cardBg, borderColor: uiTheme.cardBorder, borderRadius: uiTheme.radius },
+                    standardChapterIndex === index && { borderColor: uiTheme.accent },
+                  ]}
+                  onPress={() => selectStandardChapter(index)}
+                >
+                  <Text style={[styles.tocItemText, { color: standardChapterIndex === index ? uiTheme.accent : uiTheme.text }]} numberOfLines={2}>
+                    {item.title || `第${index + 1}章`}
+                  </Text>
+                </TouchableOpacity>
+              )}
+            />
+          ) : (
+            <FlatList
+              data={toc}
+              keyExtractor={(item, idx) => item.id || String(idx)}
+              contentContainerStyle={styles.tocListContent}
+              renderItem={({ item, index }) => (
+                <View style={[styles.tocCard, { backgroundColor: uiTheme.cardBg, borderColor: uiTheme.cardBorder, borderRadius: uiTheme.radius }]}>
+                  <TocNode
+                    item={item}
+                    depth={0}
+                    pathKey={item.id || String(index)}
+                    expandedToc={expandedToc}
+                    toggleTocExpanded={toggleTocExpanded}
+                    onSelect={(href) => { goToTocItem(href); setShowToc(false); }}
+                    theme={uiTheme}
+                  />
+                </View>
+              )}
+            />
+          )}
         </SafeAreaView>
       </Modal>
 
       <View style={styles.readerBody}>
-        <Reader
-          src={epubSrc}
-          fileSystem={useFileSystem}
-          width="100%"
-          height="100%"
-          defaultTheme={THEMES.light}
-          initialLocation={initialLocation || undefined}
-          onReady={handleReady}
-          onDisplayError={(reason) => Alert.alert('加载失败', String(reason))}
-          onLocationChange={handleLocationChange}
-          onWebViewMessage={handleReaderWebViewMessage}
-          onSelected={(text, cfiRange) => setSelection({ text, cfiRange })}
-          menuItems={[
-            {
-              label: '划线',
-              action: (cfiRange, text) => {
-                handleHighlight(cfiRange, text);
-                return false;
+        {readerMode === 'standard' ? (
+          <ScrollView
+            style={[styles.standardReader, { backgroundColor: THEMES[themeName].body.background }]}
+            contentContainerStyle={styles.standardReaderContent}
+          >
+            {standardChapterError ? (
+              <View style={styles.centerBox}>
+                <Text style={[styles.errorText, { color: uiTheme.danger }]}>章节加载失败：{standardChapterError}</Text>
+              </View>
+            ) : !standardChapterText ? (
+              <View style={styles.centerBox}>
+                <ActivityIndicator size="large" color={uiTheme.accent} />
+                <Text style={[styles.loadingText, { color: uiTheme.textSecondary }]}>正在整理标准模式正文…</Text>
+              </View>
+            ) : (
+              <>
+                <Text
+                  style={[
+                    styles.standardChapterTitle,
+                    { color: THEMES[themeName].body.color, fontFamily: standardFontFamily },
+                    bodyFont.key === 'sans' && { fontWeight: '700' },
+                  ]}
+                >
+                  {standardChapterText.title || chapters?.[standardChapterIndex]?.title || bookTitle}
+                </Text>
+                {standardChapterText.paragraphs.map((paragraph, index) => (
+                  <TouchableOpacity
+                    key={`${standardChapterIndex}-${index}`}
+                    activeOpacity={0.75}
+                    onLongPress={() => setSelection({ text: paragraph, cfiRange: makeStandardCfi(index) })}
+                  >
+                    <Text
+                      selectable
+                      style={[
+                        styles.standardParagraph,
+                        {
+                          color: THEMES[themeName].body.color,
+                          fontFamily: standardFontFamily,
+                          fontSize: standardFontSize,
+                          lineHeight: standardLineHeight,
+                        },
+                        bodyFont.key === 'sans' && { fontWeight: '700' },
+                      ]}
+                    >
+                      {paragraph}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </>
+            )}
+          </ScrollView>
+        ) : epubError ? (
+          <View style={styles.centerBox}>
+            <Text style={[styles.errorText, { color: uiTheme.danger }]}>原版 EPUB 加载失败：{epubError}</Text>
+          </View>
+        ) : !epubSrc ? (
+          <View style={styles.centerBox}>
+            <ActivityIndicator size="large" color={uiTheme.accent} />
+            <Text style={[styles.loadingText, { color: uiTheme.textSecondary }]}>正在准备原版 EPUB…</Text>
+          </View>
+        ) : (
+          <Reader
+            src={epubSrc}
+            fileSystem={useFileSystem}
+            width="100%"
+            height="100%"
+            defaultTheme={THEMES.light}
+            initialLocation={initialLocation || undefined}
+            onReady={handleReady}
+            onDisplayError={(reason) => Alert.alert('加载失败', String(reason))}
+            onLocationChange={handleLocationChange}
+            onWebViewMessage={handleReaderWebViewMessage}
+            onSelected={(text, cfiRange) => setSelection({ text, cfiRange })}
+            menuItems={[
+              {
+                label: '划线',
+                action: (cfiRange, text) => {
+                  handleHighlight(cfiRange, text);
+                  return false;
+                },
               },
-            },
-            {
-              label: '问AI',
-              action: (cfiRange, text) => {
-                openChat(text, cfiRange);
-                return false;
+              {
+                label: '问AI',
+                action: (cfiRange, text) => {
+                  openChat(text, cfiRange);
+                  return false;
+                },
               },
-            },
-          ]}
-          renderLoadingFileComponent={() => (
-            <View style={styles.centerBox}>
-              <ActivityIndicator size="large" color={uiTheme.accent} />
-              <Text style={[styles.loadingText, { color: uiTheme.textSecondary }]}>正在下载书本…</Text>
-            </View>
-          )}
-        />
+            ]}
+            renderLoadingFileComponent={() => (
+              <View style={styles.centerBox}>
+                <ActivityIndicator size="large" color={uiTheme.accent} />
+                <Text style={[styles.loadingText, { color: uiTheme.textSecondary }]}>正在下载书本…</Text>
+              </View>
+            )}
+          />
+        )}
       </View>
 
       {!!selection && (
@@ -1052,6 +1217,7 @@ export default function ReaderScreen({ route, navigation }) {
   const [ctx, setCtx] = useState(null);
   const [highlights, setHighlights] = useState(null);
   const [epubUri, setEpubUri] = useState(null);
+  const [epubError, setEpubError] = useState('');
   const [error, setError] = useState('');
 
   // 安卓真机+模拟器排查过"打开卡死在Opening、RN层无报错"的问题——真根因是
@@ -1087,6 +1253,9 @@ export default function ReaderScreen({ route, navigation }) {
     const tStart = Date.now();
     console.log(`[打开诊断] 开始加载 bookId=${bookId}`);
     try {
+      setError('');
+      setEpubError('');
+      setEpubUri(null);
       // 续二十三访客模式：访客没有账号，getHighlights后端仍然要求登录
       // （划线本来就是账号相关数据），会401。之前这三个请求捆在同一个
       // Promise.all里，getHighlights这一个401会让整个all()连带拒绝，
@@ -1094,15 +1263,19 @@ export default function ReaderScreen({ route, navigation }) {
       // 后端已经对访客放开了，不应该被这个账号相关的子请求拖累。改成
       // 访客直接跳过这次请求，给个空数组（访客本来也没有已保存的划线），
       // 不是"请求失败兜底"，是"压根不该发这个请求"。
-      const [c, h, uri] = await Promise.all([
+      loadEpub()
+        .then((uri) => {
+          setEpubUri(uri);
+          console.log(`[打开诊断] EPUB文件就绪 累计耗时=${Date.now() - tStart}ms`);
+        })
+        .catch((e) => setEpubError(e.message || '加载失败'));
+      const [c, h] = await Promise.all([
         getBookContext(bookId),
         isLoggedIn() ? getHighlights(bookId) : Promise.resolve([]),
-        loadEpub(),
       ]);
-      console.log(`[打开诊断] context+highlights+EPUB文件全部就绪 累计耗时=${Date.now() - tStart}ms（此时epub.js还没开始在WebView里解析）`);
+      console.log(`[打开诊断] context+highlights就绪 累计耗时=${Date.now() - tStart}ms`);
       setCtx(c);
       setHighlights(h);
-      setEpubUri(uri);
     } catch (e) {
       setError(e.message || '加载失败');
     }
@@ -1123,7 +1296,7 @@ export default function ReaderScreen({ route, navigation }) {
     );
   }
 
-  if (!ctx || !highlights || !epubUri) {
+  if (!ctx || !highlights) {
     return (
       <SafeAreaView style={[styles.safe, { backgroundColor: theme.bg }]}>
         <View style={styles.centerBox}>
@@ -1144,6 +1317,8 @@ export default function ReaderScreen({ route, navigation }) {
       initialAnnotations={highlights}
       navigation={navigation}
       epubSrc={epubUri}
+      epubError={epubError}
+      chapters={ctx.chapters}
     />
   );
 }
@@ -1158,6 +1333,10 @@ const styles = StyleSheet.create({
   headerBtnText: { fontSize: 15, fontWeight: '600' },
 
   readerBody: { flex: 1, position: 'relative' },
+  standardReader: { flex: 1 },
+  standardReaderContent: { paddingHorizontal: 22, paddingTop: 22, paddingBottom: 80 },
+  standardChapterTitle: { fontSize: 24, lineHeight: 34, fontWeight: '700', marginBottom: 22 },
+  standardParagraph: { marginBottom: 18 },
 
   controlPanel: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
@@ -1216,6 +1395,7 @@ const styles = StyleSheet.create({
   tocCloseBtnText: { fontSize: 14, fontWeight: '600' },
   tocListContent: { padding: 12, gap: 10 },
   tocCard: { borderWidth: 1, overflow: 'hidden' },
+  standardTocItem: { paddingHorizontal: 16, paddingVertical: 14 },
   tocRow: { flexDirection: 'row', alignItems: 'center' },
   tocRowMain: { flex: 1, paddingRight: 8, paddingVertical: 14 },
   tocItemText: { fontSize: 15 },
