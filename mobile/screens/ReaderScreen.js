@@ -35,6 +35,9 @@ const BODY_FONT_OPTIONS = [
     key: 'serif',
     label: '宋体',
     family: 'SourceHanSerifSC',
+    cssFamily: '"Songti SC", "SourceHanSerifSC", STSong, serif',
+    previewFamily: Platform.select({ ios: 'Songti SC', android: FONTS.serifRegular, default: FONTS.serifRegular }),
+    checkFamilies: ['Songti SC', 'SourceHanSerifSC'],
     asset: FONTS.serifRegular,
     profile: { weight: 400 },
     previewText: '宋',
@@ -43,14 +46,20 @@ const BODY_FONT_OPTIONS = [
     key: 'sans',
     label: '黑体',
     family: 'SourceHanSansSCBold',
+    cssFamily: '"PingFang SC", "Heiti SC", "SourceHanSansSCBold", sans-serif',
+    previewFamily: Platform.select({ ios: 'PingFang SC', android: FONTS.sansBold, default: FONTS.sansBold }),
+    checkFamilies: ['PingFang SC', 'Heiti SC', 'SourceHanSansSCBold'],
     asset: FONTS.sansBold,
-    profile: { weight: 400 },
+    profile: { weight: 700 },
     previewText: '黑',
   },
   {
     key: 'kai',
     label: '楷体',
     family: 'LXGWWenKai',
+    cssFamily: '"Kaiti SC", STKaiti, KaiTi, "LXGWWenKai", cursive',
+    previewFamily: Platform.select({ ios: 'Kaiti SC', android: FONTS.kaiRegular, default: FONTS.kaiRegular }),
+    checkFamilies: ['Kaiti SC', 'STKaiti', 'LXGWWenKai'],
     asset: FONTS.kaiRegular,
     profile: { weight: 400 },
     previewText: '楷',
@@ -85,7 +94,7 @@ const FONT_SIZE_MIN = 12;
 const FONT_SIZE_MAX = 28;
 const FONT_SIZE_STEP = 2;
 const BODY_FONT_KEYS = BODY_FONT_OPTIONS.map((opt) => opt.key);
-const BODY_FONT_FAMILIES = BODY_FONT_OPTIONS.map((opt) => opt.family);
+const BODY_FONT_CHECK_FAMILIES = BODY_FONT_OPTIONS.flatMap((opt) => opt.checkFamilies);
 
 // 进度上报节流：翻页很频繁，没必要每次都请求后端
 const PROGRESS_DEBOUNCE_MS = 2000;
@@ -97,19 +106,20 @@ function jsStringLiteral(value) {
   return JSON.stringify(String(value ?? ''));
 }
 
-function buildReaderFontOverrideCss(family, profile = {}) {
+function buildReaderFontOverrideCss(cssFamily, profile = {}) {
   const weight = profile.weight || 400;
   return [
-    `html, body { font-family: "${family}" !important; line-height: ${READING_LINE_HEIGHT} !important; }`,
-    `body, body *:not(svg):not(path) { font-family: "${family}" !important; }`,
-    `p, div, span, section, article, li, blockquote, td, th, a, em, strong, header, main { font-family: "${family}" !important; font-weight: ${weight} !important; line-height: ${READING_LINE_HEIGHT} !important; }`,
-    `h1, h2, h3, h4, h5, h6, nav h1 { font-family: "${family}" !important; font-weight: 600 !important; }`,
+    `html, body { font-family: ${cssFamily} !important; line-height: ${READING_LINE_HEIGHT} !important; }`,
+    `body, body *:not(svg):not(path) { font-family: ${cssFamily} !important; }`,
+    `p, div, span, section, article, li, blockquote, td, th, a, em, strong, header, main { font-family: ${cssFamily} !important; font-weight: ${weight} !important; line-height: ${READING_LINE_HEIGHT} !important; }`,
+    `h1, h2, h3, h4, h5, h6, nav h1 { font-family: ${cssFamily} !important; font-weight: 600 !important; }`,
   ].join(' ');
 }
 
 function formatFontDiagnostics(payload, assetReport) {
   const lines = [];
-  lines.push(`当前选择：${payload?.currentFamily || '未知'}`);
+  lines.push(`当前档位：${payload?.currentLabel || payload?.currentKey || '未知'}`);
+  lines.push(`当前字体栈：${payload?.currentFamily || '未知'}`);
   lines.push(`rendition：${payload?.hasRendition ? '存在' : '不存在'}`);
   lines.push(`window.rendition：${payload?.hasWindowRendition ? '存在' : '不存在'}`);
   lines.push(`contents数量：${payload?.contentsCount ?? '未知'}`);
@@ -393,7 +403,7 @@ function ReaderInner({
         .join(' ');
       if (!rules) return; // 全部加载失败就静默保留默认字体，不影响阅读
       const currentOpt = BODY_FONT_OPTIONS.find((o) => o.key === bodyFontKey) || BODY_FONT_OPTIONS[0];
-      const currentCss = buildReaderFontOverrideCss(currentOpt.family, currentOpt.profile);
+      const currentCss = buildReaderFontOverrideCss(currentOpt.cssFamily, currentOpt.profile);
       injectJavascript(`
         (function() {
           try {
@@ -426,21 +436,21 @@ function ReaderInner({
               if (window.rendition) return window.rendition;
               return null;
             }
-            window.__chatbookApplyReaderFont = function(family) {
-              applyFont(document, family);
+            window.__chatbookApplyReaderFont = function(cssFamily) {
+              applyFont(document, cssFamily);
               var r = getReaderRendition();
               if (r && typeof r.getContents === 'function') {
                 r.getContents().forEach(function(contents) {
-                  applyFont(contents && contents.document, family);
+                  applyFont(contents && contents.document, cssFamily);
                 });
               }
-              console.log('[字体诊断] 已应用正文字体 ' + family);
+              console.log('[字体诊断] 已应用正文字体 ' + cssFamily);
             };
             var readerRendition = getReaderRendition();
             if (!window.__chatbookFontRenderedHook && readerRendition && typeof readerRendition.on === 'function') {
               window.__chatbookFontRenderedHook = true;
               readerRendition.on('rendered', function(section, contents) {
-                var family = window.__chatbookReaderFontFamily || ${jsStringLiteral(currentOpt.family)};
+                var family = window.__chatbookReaderFontFamily || ${jsStringLiteral(currentOpt.cssFamily)};
                 if (contents && contents.document) {
                   applyFont(contents.document, family);
                 } else {
@@ -448,7 +458,7 @@ function ReaderInner({
                 }
               });
             }
-            window.__chatbookReaderFontFamily = ${jsStringLiteral(currentOpt.family)};
+            window.__chatbookReaderFontFamily = ${jsStringLiteral(currentOpt.cssFamily)};
             window.__chatbookReaderFontCss = ${jsStringLiteral(currentCss)};
             window.__chatbookApplyReaderFont(window.__chatbookReaderFontFamily);
           } catch (e) {}
@@ -480,7 +490,7 @@ function ReaderInner({
           var computed = sample ? doc.defaultView.getComputedStyle(sample) : null;
           var bodyComputed = doc.body ? doc.defaultView.getComputedStyle(doc.body) : null;
           var checks = {};
-          ${jsStringLiteral(BODY_FONT_FAMILIES.join('|'))}.split('|').forEach(function(name) {
+          ${jsStringLiteral(BODY_FONT_CHECK_FAMILIES.join('|'))}.split('|').forEach(function(name) {
             try {
               checks[name] = !!(doc.fonts && doc.fonts.check && doc.fonts.check('16px "' + name + '"'));
             } catch (e) {
@@ -505,7 +515,7 @@ function ReaderInner({
           };
         }
         try {
-          var family = ${jsStringLiteral(opt.family)};
+          var family = ${jsStringLiteral(opt.cssFamily)};
           var readerRendition = null;
           if (typeof rendition !== 'undefined' && rendition) readerRendition = rendition;
           else if (window.rendition) readerRendition = window.rendition;
@@ -513,6 +523,8 @@ function ReaderInner({
             ? readerRendition.getContents()
             : [];
           post({
+            currentKey: ${jsStringLiteral(opt.key)},
+            currentLabel: ${jsStringLiteral(opt.label)},
             currentFamily: window.__chatbookReaderFontFamily || family,
             hasRendition: !!readerRendition,
             hasWindowRendition: !!window.rendition,
@@ -523,7 +535,12 @@ function ReaderInner({
             })
           });
         } catch (e) {
-          post({ currentFamily: ${jsStringLiteral(opt.family)}, error: e.message || String(e) });
+          post({
+            currentKey: ${jsStringLiteral(opt.key)},
+            currentLabel: ${jsStringLiteral(opt.label)},
+            currentFamily: ${jsStringLiteral(opt.cssFamily)},
+            error: e.message || String(e)
+          });
         }
       })();
       true;
@@ -543,13 +560,13 @@ function ReaderInner({
   useEffect(() => {
     if (!isReady) return;
     const opt = BODY_FONT_OPTIONS.find((o) => o.key === bodyFontKey) || BODY_FONT_OPTIONS[0];
-    const overrideCss = buildReaderFontOverrideCss(opt.family, opt.profile);
-    changeFontFamily(opt.family);
+    const overrideCss = buildReaderFontOverrideCss(opt.cssFamily, opt.profile);
+    changeFontFamily(opt.cssFamily);
     injectJavascript(`
       (function() {
         try {
           var id = ${jsStringLiteral(READER_FONT_STYLE_ID)};
-          var family = ${jsStringLiteral(opt.family)};
+          var family = ${jsStringLiteral(opt.cssFamily)};
           var overrideCss = ${jsStringLiteral(overrideCss)};
           window.__chatbookReaderFontFamily = family;
           window.__chatbookReaderFontCss = overrideCss;
@@ -829,7 +846,8 @@ function ReaderInner({
                 <Text style={[
                   styles.themeSegmentText,
                   styles.fontPresetText,
-                  { fontFamily: opt.asset },
+                  { fontFamily: opt.previewFamily },
+                  opt.key === 'sans' && { fontWeight: '700' },
                   { color: bodyFontKey === opt.key ? uiTheme.textOnAccent : uiTheme.textSecondary },
                 ]}>
                   {opt.previewText} {opt.label}
@@ -843,7 +861,8 @@ function ReaderInner({
                 key={opt.key}
                 style={[
                   styles.fontPreviewText,
-                  { color: bodyFontKey === opt.key ? uiTheme.accent : uiTheme.textSecondary, fontFamily: opt.asset },
+                  { color: bodyFontKey === opt.key ? uiTheme.accent : uiTheme.textSecondary, fontFamily: opt.previewFamily },
+                  opt.key === 'sans' && { fontWeight: '700' },
                 ]}
               >
                 {opt.previewText} 子曰学而时习之
