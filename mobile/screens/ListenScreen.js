@@ -124,6 +124,19 @@ function restorePlaybackAudioMode() {
     interruptionModeIOS: InterruptionModeIOS.DoNotMix,
     interruptionModeAndroid: InterruptionModeAndroid.DoNotMix,
     shouldDuckAndroid: false,
+    playThroughEarpieceAndroid: false,
+  });
+}
+
+function enableRecordingAudioMode() {
+  return Audio.setAudioModeAsync({
+    allowsRecordingIOS: true,
+    playsInSilentModeIOS: true,
+    staysActiveInBackground: true,
+    interruptionModeIOS: InterruptionModeIOS.DoNotMix,
+    interruptionModeAndroid: InterruptionModeAndroid.DoNotMix,
+    shouldDuckAndroid: false,
+    playThroughEarpieceAndroid: false,
   });
 }
 
@@ -534,6 +547,9 @@ export default function ListenScreen({ route, navigation }) {
   async function playOneParagraph(text, epoch, onAudioStart, presetSoundPromise) {
     let sound = null;
     const t0 = Date.now();
+    if (!hfAmbientRecordingRef.current && !hfRecordingRef.current && !recordingRef.current) {
+      await restorePlaybackAudioMode().catch(() => {});
+    }
     if (presetSoundPromise) {
       try {
         sound = await presetSoundPromise;
@@ -895,7 +911,7 @@ export default function ListenScreen({ route, navigation }) {
       markHfTiming('准备正式录音');
       const { status: perm } = await Audio.getPermissionsAsync();
       if (perm !== 'granted') return null;
-      await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
+      await enableRecordingAudioMode();
       const recording = new Audio.Recording();
       let speechEverDetected = false;
       let silenceMs = 0;
@@ -944,7 +960,7 @@ export default function ListenScreen({ route, navigation }) {
       await rec.stopAndUnloadAsync();
       markHfTiming(`端点检测结束 speech=${speechEverDetected} elapsed=${elapsedMs}ms`);
       const uri = rec.getURI();
-      await Audio.setAudioModeAsync({ allowsRecordingIOS: false, playsInSilentModeIOS: true });
+      await restorePlaybackAudioMode();
       if (!speechEverDetected) return null; // 全程没有真的检测到声音，不浪费一次识别请求
       markHfTiming('开始ASR识别');
       const text = await transcribeAudio(uri, FileSystem.uploadAsync, FileSystem.FileSystemUploadType);
@@ -1116,7 +1132,7 @@ export default function ListenScreen({ route, navigation }) {
     hfRecordingRef.current = null;
     if (rec) {
       rec.stopAndUnloadAsync().catch(() => {});
-      Audio.setAudioModeAsync({ allowsRecordingIOS: false, playsInSilentModeIOS: true }).catch(() => {});
+      restorePlaybackAudioMode().catch(() => {});
     }
     setHfStage('');
     setHfText('');
@@ -1221,7 +1237,7 @@ export default function ListenScreen({ route, navigation }) {
       setRecordingStatus('');
       if (rec) {
         rec.stopAndUnloadAsync().catch(() => {});
-        Audio.setAudioModeAsync({ allowsRecordingIOS: false, playsInSilentModeIOS: true }).catch(() => {});
+        restorePlaybackAudioMode().catch(() => {});
       }
     }
     setConversation([]); // 回到听书主线，这一轮打断的对话线结束
@@ -1268,7 +1284,7 @@ export default function ListenScreen({ route, navigation }) {
       await rec.stopAndUnloadAsync();
       const uri = rec.getURI();
       recordingRef.current = null;
-      await Audio.setAudioModeAsync({ allowsRecordingIOS: false, playsInSilentModeIOS: true });
+      await restorePlaybackAudioMode();
       const text = await transcribeAudio(uri, FileSystem.uploadAsync, FileSystem.FileSystemUploadType);
       // epoch变了（比如识别这几秒里用户又打断了别的地方）说明这轮监听已经
       // 过期，识别结果不再适用，直接丢弃不生效。注意这里不检查phase状态——
@@ -1318,7 +1334,7 @@ export default function ListenScreen({ route, navigation }) {
         return;
       }
       setRecordingStatus('准备麦克风…');
-      await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
+      await enableRecordingAudioMode();
       const recording = new Audio.Recording();
       await recording.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
       await recording.startAsync();
@@ -1345,7 +1361,7 @@ export default function ListenScreen({ route, navigation }) {
     try {
       const { status: perm } = await Audio.getPermissionsAsync();
       if (perm !== 'granted') return; // 静默放弃，不主动弹权限请求打断听书体验
-      await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
+      await enableRecordingAudioMode();
       const recording = new Audio.Recording();
       await recording.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
       await recording.startAsync();
@@ -1410,7 +1426,7 @@ export default function ListenScreen({ route, navigation }) {
         setHandsFreeEnabled(false);
         return;
       }
-      await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
+      await enableRecordingAudioMode();
       const recording = new Audio.Recording();
       hfAmbientSustainCountRef.current = 0;
       hfAmbientSpeakingRef.current = false;
