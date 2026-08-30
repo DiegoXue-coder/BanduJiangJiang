@@ -10,6 +10,7 @@ import { BottomSheetModal, BottomSheetBackdrop } from '@gorhom/bottom-sheet';
 import { IconList, IconMessageCircle, IconBrightness, IconTextSize, IconHeadphones } from '@tabler/icons-react-native';
 import { Asset } from 'expo-asset';
 import * as FileSystem from 'expo-file-system/legacy';
+import * as SecureStore from 'expo-secure-store';
 import {
   getBookContext, getBookFileUrl, getHighlights, saveHighlight, updateProgress, isLoggedIn,
 } from '../lib/api';
@@ -35,15 +36,15 @@ const BODY_FONT_OPTIONS = [
     label: '宋体',
     family: 'SourceHanSerifSC',
     asset: FONTS.serifRegular,
-    profile: { weight: 400, letterSpacing: '0.02em', fontSize: '1em', lineHeight: '1.75' },
+    profile: { weight: 400 },
     previewText: '宋',
   },
   {
     key: 'sans',
     label: '黑体',
-    family: 'SourceHanSansSC',
-    asset: FONTS.sansRegular,
-    profile: { weight: 500, letterSpacing: '0', fontSize: '1em', lineHeight: '1.68' },
+    family: 'SourceHanSansSCBold',
+    asset: FONTS.sansBold,
+    profile: { weight: 400 },
     previewText: '黑',
   },
   {
@@ -51,7 +52,7 @@ const BODY_FONT_OPTIONS = [
     label: '楷体',
     family: 'LXGWWenKai',
     asset: FONTS.kaiRegular,
-    profile: { weight: 500, letterSpacing: '0.1em', fontSize: '1.08em', lineHeight: '1.95' },
+    profile: { weight: 400 },
     previewText: '楷',
   },
 ];
@@ -83,11 +84,14 @@ const FONT_SIZE_DEFAULT = 16;
 const FONT_SIZE_MIN = 12;
 const FONT_SIZE_MAX = 28;
 const FONT_SIZE_STEP = 2;
+const BODY_FONT_KEYS = BODY_FONT_OPTIONS.map((opt) => opt.key);
+const BODY_FONT_FAMILIES = BODY_FONT_OPTIONS.map((opt) => opt.family);
 
 // 进度上报节流：翻页很频繁，没必要每次都请求后端
 const PROGRESS_DEBOUNCE_MS = 2000;
 const READER_FONT_STYLE_ID = 'chatbook-reader-font-override';
 const READER_FONT_FACE_STYLE_ID = 'chatbook-reader-font-face';
+const READER_SETTINGS_KEY = 'chatbook_reader_typography_settings_v1';
 
 function jsStringLiteral(value) {
   return JSON.stringify(String(value ?? ''));
@@ -95,14 +99,11 @@ function jsStringLiteral(value) {
 
 function buildReaderFontOverrideCss(family, profile = {}) {
   const weight = profile.weight || 400;
-  const letterSpacing = profile.letterSpacing || '0';
-  const fontSize = profile.fontSize || '1em';
-  const lineHeight = profile.lineHeight || READING_LINE_HEIGHT;
   return [
-    `html, body { font-family: "${family}" !important; line-height: ${lineHeight} !important; }`,
+    `html, body { font-family: "${family}" !important; line-height: ${READING_LINE_HEIGHT} !important; }`,
     `body, body *:not(svg):not(path) { font-family: "${family}" !important; }`,
-    `p, div, span, section, article, li, blockquote, td, th, a, em, strong, header, main { font-family: "${family}" !important; font-weight: ${weight} !important; letter-spacing: ${letterSpacing} !important; font-size: ${fontSize} !important; line-height: ${lineHeight} !important; }`,
-    `h1, h2, h3, h4, h5, h6, nav h1 { font-family: "${family}" !important; font-weight: 600 !important; letter-spacing: ${letterSpacing} !important; }`,
+    `p, div, span, section, article, li, blockquote, td, th, a, em, strong, header, main { font-family: "${family}" !important; font-weight: ${weight} !important; line-height: ${READING_LINE_HEIGHT} !important; }`,
+    `h1, h2, h3, h4, h5, h6, nav h1 { font-family: "${family}" !important; font-weight: 600 !important; }`,
   ].join(' ');
 }
 
@@ -291,6 +292,7 @@ function ReaderInner({
   const [showFontSizePanel, setShowFontSizePanel] = useState(false);
   const [fontSizePt, setFontSizePt] = useState(FONT_SIZE_DEFAULT);
   const [bodyFontKey, setBodyFontKey] = useState('serif');
+  const [readerSettingsLoaded, setReaderSettingsLoaded] = useState(false);
   const [fontAssetReport, setFontAssetReport] = useState([]);
   // 长按原生菜单（menuItems）在拖动选区手柄调整范围后不会重新弹出——这是
   // react-native-webview 自身的已知限制，不是我们代码能修的。改用这个悬浮条
@@ -300,6 +302,37 @@ function ReaderInner({
   const progressTimer = useRef(null);
   const annotationsRestored = useRef(false);
   const skippedInitialNav = useRef(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    SecureStore.getItemAsync(READER_SETTINGS_KEY)
+      .then((raw) => {
+        if (cancelled) return;
+        if (!raw) return;
+        const saved = JSON.parse(raw);
+        if (BODY_FONT_KEYS.includes(saved.bodyFontKey)) {
+          setBodyFontKey(saved.bodyFontKey);
+        }
+        if (
+          Number.isFinite(saved.fontSizePt) &&
+          saved.fontSizePt >= FONT_SIZE_MIN &&
+          saved.fontSizePt <= FONT_SIZE_MAX
+        ) {
+          setFontSizePt(saved.fontSizePt);
+        }
+      })
+      .catch((e) => console.warn('[阅读器设置] 读取失败', e.message || e))
+      .finally(() => {
+        if (!cancelled) setReaderSettingsLoaded(true);
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    if (!readerSettingsLoaded) return;
+    SecureStore.setItemAsync(READER_SETTINGS_KEY, JSON.stringify({ bodyFontKey, fontSizePt }))
+      .catch((e) => console.warn('[阅读器设置] 保存失败', e.message || e));
+  }, [readerSettingsLoaded, bodyFontKey, fontSizePt]);
 
   // initialAnnotations 要等 Reader 的 onReady 触发（book 真正渲染完成）才能加，
   // 提前调用 addAnnotation 会静默失效，所以不能放进 mount 时的 effect 里。
@@ -447,7 +480,7 @@ function ReaderInner({
           var computed = sample ? doc.defaultView.getComputedStyle(sample) : null;
           var bodyComputed = doc.body ? doc.defaultView.getComputedStyle(doc.body) : null;
           var checks = {};
-          ['SourceHanSerifSC', 'SourceHanSansSC', 'LXGWWenKai'].forEach(function(name) {
+          ${jsStringLiteral(BODY_FONT_FAMILIES.join('|'))}.split('|').forEach(function(name) {
             try {
               checks[name] = !!(doc.fonts && doc.fonts.check && doc.fonts.check('16px "' + name + '"'));
             } catch (e) {
@@ -537,6 +570,12 @@ function ReaderInner({
     `);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isReady, bodyFontKey]);
+
+  useEffect(() => {
+    if (!isReady || !readerSettingsLoaded) return;
+    changeFontSize(`${fontSizePt}pt`);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isReady, readerSettingsLoaded, fontSizePt]);
 
   // 阶段十四：epub.js自带的目录导航页（章节列表那一页，见上面"首次打开
   // 跳过"那个effect的注释）虽然已经不再是首次打开的默认落脚点了，但书本
@@ -701,6 +740,11 @@ function ReaderInner({
     });
   }
 
+  function selectBodyFont(key) {
+    if (!BODY_FONT_KEYS.includes(key)) return;
+    setBodyFontKey(key);
+  }
+
   return (
     <SafeAreaView edges={['bottom', 'left', 'right']} style={[styles.safe, { backgroundColor: THEMES[themeName].body.background }]}>
       <View style={[styles.header, { backgroundColor: uiTheme.accent, paddingTop: insets.top + 10 }]}>
@@ -780,14 +824,12 @@ function ReaderInner({
                   { borderRadius: uiTheme.radius, borderColor: uiTheme.cardBorder },
                   bodyFontKey === opt.key && { backgroundColor: uiTheme.accent, borderColor: uiTheme.accent },
                 ]}
-                onPress={() => setBodyFontKey(opt.key)}
+                onPress={() => selectBodyFont(opt.key)}
               >
                 <Text style={[
                   styles.themeSegmentText,
                   styles.fontPresetText,
                   { fontFamily: opt.asset },
-                  opt.key === 'sans' && { fontWeight: '700' },
-                  opt.key === 'kai' && { fontSize: 16, letterSpacing: 1.2 },
                   { color: bodyFontKey === opt.key ? uiTheme.textOnAccent : uiTheme.textSecondary },
                 ]}>
                   {opt.previewText} {opt.label}
@@ -802,8 +844,6 @@ function ReaderInner({
                 style={[
                   styles.fontPreviewText,
                   { color: bodyFontKey === opt.key ? uiTheme.accent : uiTheme.textSecondary, fontFamily: opt.asset },
-                  opt.key === 'sans' && { fontWeight: '700' },
-                  opt.key === 'kai' && { fontSize: 19, letterSpacing: 2 },
                 ]}
               >
                 {opt.previewText} 子曰学而时习之
