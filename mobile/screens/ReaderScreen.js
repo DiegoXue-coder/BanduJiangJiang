@@ -104,8 +104,8 @@ const READER_SETTINGS_KEY = 'chatbook_reader_typography_settings_v1';
 const READER_MODE_ORDER = ['epub', 'standard'];
 const READER_MODE_LABEL = { epub: '原版', standard: '标准' };
 const STANDARD_PAGE_MIN_CHARS = 80;
-const STANDARD_PAGE_MAX_CHARS = 340;
-const STANDARD_READING_LINE_HEIGHT = 1.62;
+const STANDARD_PAGE_MAX_CHARS = 430;
+const STANDARD_READING_LINE_HEIGHT = 1.56;
 
 function jsStringLiteral(value) {
   return JSON.stringify(String(value ?? ''));
@@ -130,12 +130,23 @@ function normalizeStandardBlocks(data) {
   return (data?.paragraphs || []).map((text, index) => ({ type: 'text', text, sourceIndex: index }));
 }
 
+function findStandardPageBreak(text, target) {
+  if (text.length <= target) return text.length;
+  const min = Math.max(24, Math.floor(target * 0.72));
+  const max = Math.min(text.length, Math.floor(target * 1.08));
+  const preferred = '。！？；：，、,.!?;:';
+  for (let i = Math.min(max, text.length - 1); i >= min; i -= 1) {
+    if (preferred.includes(text[i])) return i + 1;
+  }
+  return Math.max(min, Math.min(target, text.length));
+}
+
 function paginateStandardBlocks(blocks, fontSizePt, pageWidth, pageHeight) {
   const fontPx = Math.round(fontSizePt * 1.35);
-  const usableWidth = Math.max(220, Number(pageWidth || 0) - 44);
-  const usableHeight = Math.max(280, Number(pageHeight || 0) - 208);
-  const estimatedLines = Math.max(8, Math.min(20, Math.floor(usableHeight / (fontPx * STANDARD_READING_LINE_HEIGHT))));
-  const estimatedCharsPerLine = Math.max(8, Math.min(18, Math.floor(usableWidth / fontPx)));
+  const usableWidth = Math.max(220, Number(pageWidth || 0) - 40);
+  const usableHeight = Math.max(320, Number(pageHeight || 0) - 186);
+  const estimatedLines = Math.max(9, Math.min(24, Math.floor(usableHeight / (fontPx * STANDARD_READING_LINE_HEIGHT))));
+  const estimatedCharsPerLine = Math.max(9, Math.min(20, Math.floor(usableWidth / fontPx)));
   const pageBudget = Math.max(
     STANDARD_PAGE_MIN_CHARS,
     Math.min(STANDARD_PAGE_MAX_CHARS, estimatedLines * estimatedCharsPerLine),
@@ -145,14 +156,14 @@ function paginateStandardBlocks(blocks, fontSizePt, pageWidth, pageHeight) {
   let count = 0;
   function blockWeight(block) {
     if (!block) return 0;
-    if (block.type === 'image') return Math.floor(pageBudget * 0.72);
+    if (block.type === 'image') return Math.floor(pageBudget * 0.62);
     if (block.type === 'table') {
       const rows = Array.isArray(block.rows) ? block.rows.length : 3;
-      return Math.min(pageBudget, Math.max(Math.floor(pageBudget * 0.52), rows * 24));
+      return Math.min(pageBudget, Math.max(Math.floor(pageBudget * 0.45), rows * 22));
     }
     const text = String(block.text || '').trim();
     if (!text) return 0;
-    if (block.type === 'heading') return Math.max(28, Math.min(70, text.length + 28));
+    if (block.type === 'heading') return Math.max(20, Math.min(52, text.length + 18));
     return text.length;
   }
   function flush() {
@@ -179,21 +190,44 @@ function paginateStandardBlocks(blocks, fontSizePt, pageWidth, pageHeight) {
     if (!text) return;
     const paragraphIndex = Number.isFinite(block?.sourceIndex) ? block.sourceIndex : blockIndex;
     const isHeading = type === 'heading';
-    const budget = isHeading ? pageBudget : pageBudget;
+    const budget = pageBudget;
     const textBlock = { ...block, type, text, paragraphIndex, blockIndex };
-    if (text.length > pageBudget) {
+    if (isHeading && current.length && count + blockWeight(textBlock) > Math.floor(pageBudget * 0.92)) {
       flush();
-      for (let start = 0; start < text.length; start += budget) {
-        pages.push([{ ...textBlock, text: text.slice(start, start + budget) }]);
-      }
+    }
+    if (isHeading) {
+      current.push(textBlock);
+      count += blockWeight(textBlock);
       return;
     }
-    const weight = blockWeight(textBlock);
-    if (current.length && count + weight > budget) {
+    let rest = text;
+    while (rest.length) {
+      const remaining = budget - count;
+      if (current.length && remaining < Math.max(36, Math.floor(budget * 0.16))) {
+        flush();
+        continue;
+      }
+      if (rest.length <= remaining || !current.length) {
+        const limit = current.length ? remaining : budget;
+        if (rest.length <= limit) {
+          current.push({ ...textBlock, text: rest });
+          count += rest.length;
+          rest = '';
+        } else {
+          const cut = findStandardPageBreak(rest, limit);
+          current.push({ ...textBlock, text: rest.slice(0, cut) });
+          count += cut;
+          rest = rest.slice(cut).trimStart();
+          flush();
+        }
+        continue;
+      }
+      const cut = findStandardPageBreak(rest, remaining);
+      current.push({ ...textBlock, text: rest.slice(0, cut) });
+      count += cut;
+      rest = rest.slice(cut).trimStart();
       flush();
     }
-    current.push(textBlock);
-    count += weight;
   });
   flush();
   return pages.length ? pages : [[]];
@@ -1562,13 +1596,13 @@ const styles = StyleSheet.create({
   },
   standardReader: { flex: 1, position: 'relative' },
   standardReaderPage: { flex: 1, position: 'relative', overflow: 'hidden' },
-  standardReaderContent: { flex: 1, paddingHorizontal: 20, paddingTop: 16, paddingBottom: 12, overflow: 'hidden' },
+  standardReaderContent: { flex: 1, paddingHorizontal: 20, paddingTop: 12, paddingBottom: 8, overflow: 'hidden' },
   standardChapterTitle: { fontSize: 24, lineHeight: 34, fontWeight: '700', marginBottom: 22 },
-  standardParagraph: { marginBottom: 9 },
-  standardInlineHeading: { fontSize: 17, lineHeight: 25, fontWeight: '700', marginBottom: 8 },
-  standardMediaBlock: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 6 },
+  standardParagraph: { marginBottom: 6 },
+  standardInlineHeading: { fontSize: 17, lineHeight: 24, fontWeight: '700', marginBottom: 6 },
+  standardMediaBlock: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 2 },
   standardImage: { width: '100%', height: '100%' },
-  standardTable: { borderWidth: StyleSheet.hairlineWidth, marginVertical: 6 },
+  standardTable: { borderWidth: StyleSheet.hairlineWidth, marginVertical: 4 },
   standardTableRow: { flexDirection: 'row', borderBottomWidth: StyleSheet.hairlineWidth },
   standardTableCell: {
     flex: 1,
