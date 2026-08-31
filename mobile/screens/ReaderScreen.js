@@ -104,7 +104,8 @@ const READER_SETTINGS_KEY = 'chatbook_reader_typography_settings_v1';
 const READER_MODE_ORDER = ['epub', 'standard'];
 const READER_MODE_LABEL = { epub: '原版', standard: '标准' };
 const STANDARD_PAGE_MIN_CHARS = 80;
-const STANDARD_PAGE_MAX_CHARS = 280;
+const STANDARD_PAGE_MAX_CHARS = 340;
+const STANDARD_READING_LINE_HEIGHT = 1.62;
 
 function jsStringLiteral(value) {
   return JSON.stringify(String(value ?? ''));
@@ -132,8 +133,8 @@ function normalizeStandardBlocks(data) {
 function paginateStandardBlocks(blocks, fontSizePt, pageWidth, pageHeight) {
   const fontPx = Math.round(fontSizePt * 1.35);
   const usableWidth = Math.max(220, Number(pageWidth || 0) - 44);
-  const usableHeight = Math.max(260, Number(pageHeight || 0) - 230);
-  const estimatedLines = Math.max(7, Math.min(18, Math.floor(usableHeight / (fontPx * Number(READING_LINE_HEIGHT)))));
+  const usableHeight = Math.max(280, Number(pageHeight || 0) - 208);
+  const estimatedLines = Math.max(8, Math.min(20, Math.floor(usableHeight / (fontPx * STANDARD_READING_LINE_HEIGHT))));
   const estimatedCharsPerLine = Math.max(8, Math.min(18, Math.floor(usableWidth / fontPx)));
   const pageBudget = Math.max(
     STANDARD_PAGE_MIN_CHARS,
@@ -142,6 +143,18 @@ function paginateStandardBlocks(blocks, fontSizePt, pageWidth, pageHeight) {
   const pages = [];
   let current = [];
   let count = 0;
+  function blockWeight(block) {
+    if (!block) return 0;
+    if (block.type === 'image') return Math.floor(pageBudget * 0.72);
+    if (block.type === 'table') {
+      const rows = Array.isArray(block.rows) ? block.rows.length : 3;
+      return Math.min(pageBudget, Math.max(Math.floor(pageBudget * 0.52), rows * 24));
+    }
+    const text = String(block.text || '').trim();
+    if (!text) return 0;
+    if (block.type === 'heading') return Math.max(28, Math.min(70, text.length + 28));
+    return text.length;
+  }
   function flush() {
     if (!current.length) return;
     pages.push(current);
@@ -151,15 +164,22 @@ function paginateStandardBlocks(blocks, fontSizePt, pageWidth, pageHeight) {
   (blocks || []).forEach((block, blockIndex) => {
     const type = block?.type || 'text';
     if (type === 'image' || type === 'table') {
-      flush();
-      pages.push([{ ...block, blockIndex }]);
+      const mediaBlock = { ...block, blockIndex };
+      const weight = blockWeight(mediaBlock);
+      if (current.length && count <= Math.floor(pageBudget * 0.32) && count + weight <= Math.floor(pageBudget * 1.05)) {
+        current.push(mediaBlock);
+        flush();
+      } else {
+        flush();
+        pages.push([mediaBlock]);
+      }
       return;
     }
     const text = String(block?.text || '').trim();
     if (!text) return;
     const paragraphIndex = Number.isFinite(block?.sourceIndex) ? block.sourceIndex : blockIndex;
     const isHeading = type === 'heading';
-    const budget = isHeading ? Math.max(40, Math.floor(pageBudget * 0.45)) : pageBudget;
+    const budget = isHeading ? pageBudget : pageBudget;
     const textBlock = { ...block, type, text, paragraphIndex, blockIndex };
     if (text.length > pageBudget) {
       flush();
@@ -168,11 +188,12 @@ function paginateStandardBlocks(blocks, fontSizePt, pageWidth, pageHeight) {
       }
       return;
     }
-    if (current.length && count + text.length > budget) {
+    const weight = blockWeight(textBlock);
+    if (current.length && count + weight > budget) {
       flush();
     }
     current.push(textBlock);
-    count += text.length;
+    count += weight;
   });
   flush();
   return pages.length ? pages : [[]];
@@ -884,7 +905,7 @@ function ReaderInner({
   const bodyFont = BODY_FONT_OPTIONS.find((o) => o.key === bodyFontKey) || BODY_FONT_OPTIONS[0];
   const standardFontFamily = bodyFont.asset;
   const standardFontSize = Math.round(fontSizePt * 1.35);
-  const standardLineHeight = Math.round(standardFontSize * Number(READING_LINE_HEIGHT));
+  const standardLineHeight = Math.round(standardFontSize * STANDARD_READING_LINE_HEIGHT);
   const standardPages = useMemo(
     () => paginateStandardBlocks(
       standardChapterText?.blocks || normalizeStandardBlocks(standardChapterText),
@@ -1541,13 +1562,13 @@ const styles = StyleSheet.create({
   },
   standardReader: { flex: 1, position: 'relative' },
   standardReaderPage: { flex: 1, position: 'relative', overflow: 'hidden' },
-  standardReaderContent: { flex: 1, paddingHorizontal: 22, paddingTop: 22, paddingBottom: 18, overflow: 'hidden' },
+  standardReaderContent: { flex: 1, paddingHorizontal: 20, paddingTop: 16, paddingBottom: 12, overflow: 'hidden' },
   standardChapterTitle: { fontSize: 24, lineHeight: 34, fontWeight: '700', marginBottom: 22 },
-  standardParagraph: { marginBottom: 14 },
-  standardInlineHeading: { fontSize: 18, lineHeight: 28, fontWeight: '700', marginBottom: 12 },
-  standardMediaBlock: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 12 },
+  standardParagraph: { marginBottom: 9 },
+  standardInlineHeading: { fontSize: 17, lineHeight: 25, fontWeight: '700', marginBottom: 8 },
+  standardMediaBlock: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 6 },
   standardImage: { width: '100%', height: '100%' },
-  standardTable: { borderWidth: StyleSheet.hairlineWidth, marginVertical: 12 },
+  standardTable: { borderWidth: StyleSheet.hairlineWidth, marginVertical: 6 },
   standardTableRow: { flexDirection: 'row', borderBottomWidth: StyleSheet.hairlineWidth },
   standardTableCell: {
     flex: 1,
