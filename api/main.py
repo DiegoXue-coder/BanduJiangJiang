@@ -3097,7 +3097,7 @@ async def app_get_book_context(book_id: int, user_id: int | None = OptionalUser)
     )
 
 @app.get("/app/books/{book_id}/chapters/{chapter_id}/text")
-async def app_get_chapter_text(book_id: int, chapter_id: int, user_id: int | None = OptionalUser):
+async def app_get_chapter_text(book_id: int, chapter_id: int, include_blocks: bool = False, user_id: int | None = OptionalUser):
     """阶段十七听书功能：把一章的正文按段落文字返回给手机端逐段TTS朗读。
     书本内容只存在EPUB文件本身，没有单独的文字表——复用阶段十八/EPUB清洗
     那套 _epub_doc_to_marker_paragraphs 解析逻辑。能这样做是因为本项目
@@ -3126,7 +3126,7 @@ async def app_get_chapter_text(book_id: int, chapter_id: int, user_id: int | Non
         raise HTTPException(status_code=404, detail="书本文件不存在")
     _assert_book_readable(book_row, user_id)
 
-    def _extract() -> list[str]:
+    def _extract() -> tuple[list[str], list[dict]]:
         book = epub.read_epub(book_row["file_path"])
         doc_items = [
             item for item in (book.get_item_with_id(idref) for idref, _ in book.spine)
@@ -3135,7 +3135,7 @@ async def app_get_chapter_text(book_id: int, chapter_id: int, user_id: int | Non
         ]
         idx = chapter["order_index"]
         if idx < 0 or idx >= len(doc_items):
-            return []
+            return [], []
         item = doc_items[idx]
         html_content = item.get_content().decode("utf-8", errors="replace")
         soup = BeautifulSoup(html_content, "html.parser")
@@ -3143,19 +3143,55 @@ async def app_get_chapter_text(book_id: int, chapter_id: int, user_id: int | Non
             tag.decompose()
         raw_paragraphs = _epub_doc_to_marker_paragraphs(book, item, soup)
         result = []
+        blocks = []
         for p in raw_paragraphs:
-            if p.startswith(_TABLE_MARKER) or p.startswith(_IMAGE_MARKER):
+            if p.startswith(_TABLE_MARKER):
+                if include_blocks:
+                    table_html = p[len(_TABLE_MARKER):]
+                    table_soup = BeautifulSoup(table_html, "html.parser")
+                    rows = []
+                    for tr in table_soup.find_all("tr"):
+                        cells = [c.get_text(strip=True) for c in tr.find_all(["td", "th"])]
+                        if cells:
+                            rows.append(cells)
+                    if rows:
+                        blocks.append({"type": "table", "rows": rows})
+                continue
+            if p.startswith(_IMAGE_MARKER):
+                if include_blocks:
+                    try:
+                        payload = p[len(_IMAGE_MARKER):]
+                        ext, b64data = payload.split(":", 1)
+                        media_type = _IMAGE_EXT_MEDIA_TYPE.get(ext, "image/jpeg")
+                        blocks.append({
+                            "type": "image",
+                            "ext": ext,
+                            "uri": f"data:{media_type};base64,{b64data}",
+                        })
+                    except Exception:
+                        pass
                 continue
             if p.startswith(_HEADING_MARKER):
-                _, text = p[len(_HEADING_MARKER):].split("\x00", 1)
+                level_str, text = p[len(_HEADING_MARKER):].split("\x00", 1)
                 if text:
                     result.append(text)
+                    if include_blocks:
+                        try:
+                            level = min(max(int(level_str), 1), 6)
+                        except Exception:
+                            level = 2
+                        blocks.append({"type": "heading", "level": level, "text": text})
                 continue
             result.append(p)
-        return result
+            if include_blocks:
+                blocks.append({"type": "text", "text": p})
+        return result, blocks
 
-    paragraphs = await asyncio.to_thread(_extract)
-    return {"title": chapter["title"], "paragraphs": paragraphs}
+    paragraphs, blocks = await asyncio.to_thread(_extract)
+    payload = {"title": chapter["title"], "paragraphs": paragraphs}
+    if include_blocks:
+        payload["blocks"] = blocks
+    return payload
 
 @app.get("/app/books/{book_id}/file.epub")
 async def app_get_book_file(book_id: int, user_id: int | None = OptionalUser):

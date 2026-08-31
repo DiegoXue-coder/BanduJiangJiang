@@ -146,8 +146,9 @@ export async function getBookContext(bookId) {
 
 // 阶段十七：听书功能用，按章节拿逐段正文文字（不是epub文件本身，是后端
 // 解析好的纯文字段落数组），给ListenScreen逐段过TTS朗读。
-export async function getChapterText(bookId, chapterId) {
-  return appFetch(`/app/books/${bookId}/chapters/${chapterId}/text`);
+export async function getChapterText(bookId, chapterId, options = {}) {
+  const qs = options.includeBlocks ? '?include_blocks=1' : '';
+  return appFetch(`/app/books/${bookId}/chapters/${chapterId}/text${qs}`);
 }
 
 // ── 阶段十五：PDF/TXT导入原型（内部原型，不对外部用户开放）──────────

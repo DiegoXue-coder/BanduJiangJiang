@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View, Text, TouchableOpacity, StyleSheet, ActivityIndicator, Alert,
-  Modal, FlatList, PanResponder, Platform, useWindowDimensions,
+  Modal, FlatList, PanResponder, Platform, useWindowDimensions, Image,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Reader, useReader } from '@epubjs-react-native/core';
@@ -120,7 +120,16 @@ function buildReaderFontOverrideCss(cssFamily, profile = {}) {
   ].join(' ');
 }
 
-function paginateParagraphs(paragraphs, fontSizePt, pageWidth, pageHeight) {
+function normalizeStandardBlocks(data) {
+  if (Array.isArray(data?.blocks) && data.blocks.length) {
+    return data.blocks
+      .map((block, index) => ({ ...block, sourceIndex: index }))
+      .filter((block) => block.type === 'image' || block.type === 'table' || block.text || block.rows?.length);
+  }
+  return (data?.paragraphs || []).map((text, index) => ({ type: 'text', text, sourceIndex: index }));
+}
+
+function paginateStandardBlocks(blocks, fontSizePt, pageWidth, pageHeight) {
   const fontPx = Math.round(fontSizePt * 1.35);
   const usableWidth = Math.max(220, Number(pageWidth || 0) - 44);
   const usableHeight = Math.max(260, Number(pageHeight || 0) - 230);
@@ -133,29 +142,39 @@ function paginateParagraphs(paragraphs, fontSizePt, pageWidth, pageHeight) {
   const pages = [];
   let current = [];
   let count = 0;
-  (paragraphs || []).forEach((paragraph, paragraphIndex) => {
-    const text = String(paragraph || '').trim();
+  function flush() {
+    if (!current.length) return;
+    pages.push(current);
+    current = [];
+    count = 0;
+  }
+  (blocks || []).forEach((block, blockIndex) => {
+    const type = block?.type || 'text';
+    if (type === 'image' || type === 'table') {
+      flush();
+      pages.push([{ ...block, blockIndex }]);
+      return;
+    }
+    const text = String(block?.text || '').trim();
     if (!text) return;
+    const paragraphIndex = Number.isFinite(block?.sourceIndex) ? block.sourceIndex : blockIndex;
+    const isHeading = type === 'heading';
+    const budget = isHeading ? Math.max(40, Math.floor(pageBudget * 0.45)) : pageBudget;
+    const textBlock = { ...block, type, text, paragraphIndex, blockIndex };
     if (text.length > pageBudget) {
-      if (current.length) {
-        pages.push(current);
-        current = [];
-        count = 0;
-      }
-      for (let start = 0; start < text.length; start += pageBudget) {
-        pages.push([{ text: text.slice(start, start + pageBudget), paragraphIndex }]);
+      flush();
+      for (let start = 0; start < text.length; start += budget) {
+        pages.push([{ ...textBlock, text: text.slice(start, start + budget) }]);
       }
       return;
     }
-    if (current.length && count + text.length > pageBudget) {
-      pages.push(current);
-      current = [];
-      count = 0;
+    if (current.length && count + text.length > budget) {
+      flush();
     }
-    current.push({ text, paragraphIndex });
+    current.push(textBlock);
     count += text.length;
   });
-  if (current.length) pages.push(current);
+  flush();
   return pages.length ? pages : [[]];
 }
 
@@ -401,7 +420,7 @@ function ReaderInner({
     if (readerMode !== 'standard') return;
     const chapter = chapters?.[standardChapterIndex];
     if (!chapter) {
-      setStandardChapterText({ title: '', paragraphs: [] });
+      setStandardChapterText({ title: '', paragraphs: [], blocks: [] });
       return;
     }
     let cancelled = false;
@@ -409,12 +428,13 @@ function ReaderInner({
     setStandardChapterText(null);
     setStandardPageIndex(0);
     setCurrentSectionTitle(chapter.title || '');
-    getChapterText(bookId, chapter.id)
+    getChapterText(bookId, chapter.id, { includeBlocks: true })
       .then((data) => {
         if (cancelled) return;
         setStandardChapterText({
           title: data?.title || chapter.title || '',
           paragraphs: Array.isArray(data?.paragraphs) ? data.paragraphs : [],
+          blocks: normalizeStandardBlocks(data),
         });
       })
       .catch((e) => {
@@ -866,8 +886,8 @@ function ReaderInner({
   const standardFontSize = Math.round(fontSizePt * 1.35);
   const standardLineHeight = Math.round(standardFontSize * Number(READING_LINE_HEIGHT));
   const standardPages = useMemo(
-    () => paginateParagraphs(
-      standardChapterText?.paragraphs || [],
+    () => paginateStandardBlocks(
+      standardChapterText?.blocks || normalizeStandardBlocks(standardChapterText),
       fontSizePt,
       windowSize.width,
       windowSize.height,
@@ -876,6 +896,9 @@ function ReaderInner({
   );
   const standardPage = standardPages[Math.min(standardPageIndex, standardPages.length - 1)] || [];
   const standardPageNo = Math.min(standardPageIndex + 1, standardPages.length);
+  const visibleChapterTitle = readerMode === 'standard'
+    ? (standardChapterText?.title || chapters?.[standardChapterIndex]?.title || bookTitle)
+    : (currentSectionTitle || bookTitle);
 
   useEffect(() => {
     setStandardPageIndex((prev) => Math.min(prev, Math.max(0, standardPages.length - 1)));
@@ -914,13 +937,31 @@ function ReaderInner({
     }
   }
 
+  const standardPagePanResponder = useMemo(() => PanResponder.create({
+    onMoveShouldSetPanResponder: (_, gesture) =>
+      readerMode === 'standard' &&
+      Math.abs(gesture.dx) > 18 &&
+      Math.abs(gesture.dx) > Math.abs(gesture.dy) * 1.25,
+    onPanResponderRelease: (_, gesture) => {
+      if (readerPanelOpen) {
+        closeReaderPanels();
+        return;
+      }
+      if (gesture.dx < -48) {
+        goStandardNext();
+      } else if (gesture.dx > 48) {
+        goStandardPrev();
+      }
+    },
+  }), [readerMode, readerPanelOpen, standardPageIndex, standardPages.length, standardChapterIndex, chapters]);
+
   return (
     <SafeAreaView edges={['bottom', 'left', 'right']} style={[styles.safe, { backgroundColor: THEMES[themeName].body.background }]}>
       <View style={[styles.header, { backgroundColor: uiTheme.accent, paddingTop: insets.top + 10 }]}>
         <TouchableOpacity onPress={() => navigation.goBack()} style={styles.headerBtn}>
           <Text style={[styles.headerBtnText, { color: uiTheme.textOnAccent }]}>‹ 书架</Text>
         </TouchableOpacity>
-        <Text style={[styles.headerTitle, { color: uiTheme.textOnAccent }]} numberOfLines={1}>{bookTitle}</Text>
+        <Text style={[styles.headerTitle, { color: uiTheme.textOnAccent }]} numberOfLines={1}>{visibleChapterTitle}</Text>
         <View style={styles.headerRight}>
           <TouchableOpacity onPress={toggleFontSizePanel} style={styles.headerBtn}>
             <IconTextSize color={uiTheme.textOnAccent} size={22} strokeWidth={1.75} />
@@ -1155,43 +1196,78 @@ function ReaderInner({
               </View>
             ) : (
               <>
-                <View style={styles.standardReaderPage}>
+                <View style={styles.standardReaderPage} {...standardPagePanResponder.panHandlers}>
                   <View style={styles.standardReaderContent}>
-                    {standardPageIndex === 0 && (
-                      <Text
-                        style={[
-                          styles.standardChapterTitle,
-                          { color: THEMES[themeName].body.color, fontFamily: standardFontFamily },
-                          bodyFont.key === 'sans' && { fontWeight: '700' },
-                        ]}
-                        numberOfLines={2}
-                      >
-                        {standardChapterText.title || chapters?.[standardChapterIndex]?.title || bookTitle}
-                      </Text>
-                    )}
-                    {standardPage.map(({ text, paragraphIndex }, pageItemIndex) => (
-                      <TouchableOpacity
-                        key={`${standardChapterIndex}-${standardPageIndex}-${paragraphIndex}-${pageItemIndex}`}
-                        activeOpacity={0.75}
-                        onLongPress={() => setSelection({ text, cfiRange: makeStandardCfi(paragraphIndex) })}
-                      >
-                        <Text
-                          selectable
-                          style={[
-                            styles.standardParagraph,
-                            {
-                              color: THEMES[themeName].body.color,
-                              fontFamily: standardFontFamily,
-                              fontSize: standardFontSize,
-                              lineHeight: standardLineHeight,
-                            },
-                            bodyFont.key === 'sans' && { fontWeight: '700' },
-                          ]}
+                    {standardPage.map((block, pageItemIndex) => {
+                      const key = `${standardChapterIndex}-${standardPageIndex}-${block.blockIndex ?? block.paragraphIndex}-${pageItemIndex}`;
+                      if (block.type === 'image') {
+                        return (
+                          <View key={key} style={styles.standardMediaBlock}>
+                            <Image source={{ uri: block.uri }} style={styles.standardImage} resizeMode="contain" />
+                          </View>
+                        );
+                      }
+                      if (block.type === 'table') {
+                        return (
+                          <View key={key} style={[styles.standardTable, { borderColor: uiTheme.cardBorder }]}>
+                            {(block.rows || []).slice(0, 12).map((row, rowIndex) => (
+                              <View key={`${key}-r${rowIndex}`} style={[styles.standardTableRow, { borderBottomColor: uiTheme.cardBorder }]}>
+                                {row.map((cell, cellIndex) => (
+                                  <Text
+                                    key={`${key}-c${rowIndex}-${cellIndex}`}
+                                    style={[
+                                      styles.standardTableCell,
+                                      { color: THEMES[themeName].body.color, borderRightColor: uiTheme.cardBorder },
+                                    ]}
+                                    numberOfLines={3}
+                                  >
+                                    {cell}
+                                  </Text>
+                                ))}
+                              </View>
+                            ))}
+                          </View>
+                        );
+                      }
+                      if (block.type === 'heading') {
+                        return (
+                          <Text
+                            key={key}
+                            style={[
+                              styles.standardInlineHeading,
+                              { color: uiTheme.accent, fontFamily: standardFontFamily },
+                              bodyFont.key === 'sans' && { fontWeight: '700' },
+                            ]}
+                            numberOfLines={2}
+                          >
+                            {block.text}
+                          </Text>
+                        );
+                      }
+                      return (
+                        <TouchableOpacity
+                          key={key}
+                          activeOpacity={0.75}
+                          onLongPress={() => setSelection({ text: block.text, cfiRange: makeStandardCfi(block.paragraphIndex) })}
                         >
-                          {text}
-                        </Text>
-                      </TouchableOpacity>
-                    ))}
+                          <Text
+                            selectable
+                            style={[
+                              styles.standardParagraph,
+                              {
+                                color: THEMES[themeName].body.color,
+                                fontFamily: standardFontFamily,
+                                fontSize: standardFontSize,
+                                lineHeight: standardLineHeight,
+                              },
+                              bodyFont.key === 'sans' && { fontWeight: '700' },
+                            ]}
+                          >
+                            {block.text}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
                   </View>
                   <TouchableOpacity activeOpacity={1} style={styles.standardTapLeft} onPress={goStandardPrev} />
                   <TouchableOpacity activeOpacity={1} style={styles.standardTapRight} onPress={goStandardNext} />
@@ -1468,6 +1544,20 @@ const styles = StyleSheet.create({
   standardReaderContent: { flex: 1, paddingHorizontal: 22, paddingTop: 22, paddingBottom: 18, overflow: 'hidden' },
   standardChapterTitle: { fontSize: 24, lineHeight: 34, fontWeight: '700', marginBottom: 22 },
   standardParagraph: { marginBottom: 14 },
+  standardInlineHeading: { fontSize: 18, lineHeight: 28, fontWeight: '700', marginBottom: 12 },
+  standardMediaBlock: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 12 },
+  standardImage: { width: '100%', height: '100%' },
+  standardTable: { borderWidth: StyleSheet.hairlineWidth, marginVertical: 12 },
+  standardTableRow: { flexDirection: 'row', borderBottomWidth: StyleSheet.hairlineWidth },
+  standardTableCell: {
+    flex: 1,
+    minHeight: 34,
+    borderRightWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: 6,
+    paddingVertical: 6,
+    fontSize: 11,
+    lineHeight: 16,
+  },
   standardTapLeft: { position: 'absolute', left: 0, top: 0, bottom: 0, width: '24%', zIndex: 8, elevation: 8 },
   standardTapRight: { position: 'absolute', right: 0, top: 0, bottom: 0, width: '24%', zIndex: 8, elevation: 8 },
   standardPager: {
