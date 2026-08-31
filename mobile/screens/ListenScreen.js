@@ -1093,6 +1093,11 @@ export default function ListenScreen({ route, navigation }) {
     });
     if (!hfActiveRef.current) return;
     if (replyWasInterrupted) return;
+    if (IOS_EXTERNAL_PLAYBACK_HANDS_FREE) {
+      markHfTiming('iOS外放优先：回答结束后关闭麦克风并恢复正文');
+      finishHandsFreeTurn();
+      return;
+    }
     setHfStage('listening');
     setHfText('');
     await hfListenTurnLoop();
@@ -1502,6 +1507,17 @@ export default function ListenScreen({ route, navigation }) {
   const inConversation = phase === 'paused' || phase === 'thinking' || phase === 'answering';
   const inNarrating = phase === 'playing' || phase === 'loading-chapter';
   const segFraction = currentSegCount.total > 1 ? currentSegCount.idx / (currentSegCount.total - 1) : 0;
+  const iosManualHandsFree = handsFreeEnabled && IOS_EXTERNAL_PLAYBACK_HANDS_FREE;
+  const iosManualAskDisabled = iosManualHandsFree && (hfStage === 'listening' || hfStage === 'thinking');
+  const iosManualAskLabel = !iosManualHandsFree
+    ? '打断，我想问问'
+    : hfStage === 'replying'
+      ? '打断追问'
+      : hfStage === 'listening'
+        ? '正在听你说'
+        : hfStage === 'thinking'
+          ? '正在思考…'
+          : '开始提问';
 
   return (
     <View style={styles.stage}>
@@ -1682,14 +1698,13 @@ export default function ListenScreen({ route, navigation }) {
 
                 {inNarrating ? (
                   <View style={styles.askZone}>
-                    {!handsFreeEnabled || (handsFreeEnabled && IOS_EXTERNAL_PLAYBACK_HANDS_FREE) ? (
+                    {!handsFreeEnabled || iosManualHandsFree ? (
                       <TouchableOpacity
-                        style={styles.interruptBtnEl}
-                        onPress={handsFreeEnabled && IOS_EXTERNAL_PLAYBACK_HANDS_FREE ? startHandsFreeTurn : handleInterrupt}
+                        style={[styles.interruptBtnEl, iosManualAskDisabled && styles.interruptBtnElDisabled]}
+                        onPress={iosManualHandsFree ? startHandsFreeTurn : handleInterrupt}
+                        disabled={iosManualAskDisabled}
                       >
-                        <Text style={styles.interruptBtnElText}>
-                          {handsFreeEnabled && IOS_EXTERNAL_PLAYBACK_HANDS_FREE ? '点一下提问' : '打断，我想问问'}
-                        </Text>
+                        <Text style={styles.interruptBtnElText}>{iosManualAskLabel}</Text>
                       </TouchableOpacity>
                     ) : (
                       <View style={styles.hfLive}>
@@ -1934,6 +1949,7 @@ const styles = StyleSheet.create({
   interruptBtnEl: {
     backgroundColor: EMBER.ember, borderRadius: 999, paddingHorizontal: 30, paddingVertical: 12,
   },
+  interruptBtnElDisabled: { opacity: 0.62 },
   interruptBtnElText: { fontSize: 14, color: EMBER.ink, fontWeight: '600' },
   hfLive: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   listeningTag: { fontSize: 11.5, color: EMBER.emberBright, letterSpacing: 0.3 },
