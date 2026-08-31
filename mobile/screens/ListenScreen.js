@@ -183,6 +183,11 @@ const HF_NO_SPEECH_TIMEOUT_MS = 4000;
 // 安全上限：防止识别一直不停（比如背景持续有人在说话），录到这个时长
 // 强制截止，不会无限录下去。
 const HF_MAX_UTTERANCE_MS = 25000;
+// iOS真机复测确认：正文TTS播放期间只要常驻Audio.Recording做免提环境
+// 监听，系统音频会话就会明显压低外放音量。Expo AV没有iOS端"边录边播
+// 同时强制扬声器"的稳定JS参数，所以iOS先走外放优先：播放正文时不常驻
+// 开麦，用户点一下进入提问录音；Android仍保留原来的持续监听。
+const IOS_EXTERNAL_PLAYBACK_HANDS_FREE = Platform.OS === 'ios';
 
 // 免提这条交互线始终完全独立于手动"打断"那套聊天气泡流程，不共用
 // handleInterrupt/startAutoListen/conversation这些状态，也不跳出朗读
@@ -1051,7 +1056,7 @@ export default function ListenScreen({ route, navigation }) {
                 // 只在AI回答已经真正出声之后开启二次打断监听。上一版在
                 // 回答加载/TTS加载阶段就开环境监听，轻微杂音会把尚未完成
                 // 的第一轮回答打断，导致用户的问题没有任何回复。
-                if (handsFreeEnabled && !handsFreeMuted) {
+                if (handsFreeEnabled && !handsFreeMuted && !IOS_EXTERNAL_PLAYBACK_HANDS_FREE) {
                   setHandsFreeStatus('AI回复中也在监听');
                   startHandsFreeAmbient()
                     .then(() => markHfTiming('AI回复期间环境监听已开启'))
@@ -1105,7 +1110,7 @@ export default function ListenScreen({ route, navigation }) {
     epochRef.current += 1;
     markHfTiming(`恢复正文 chapter=${chapterIdx} paragraph=${paragraphIdx}`);
     playFrom(chapterIdx, paragraphIdx, epochRef.current);
-    if (handsFreeEnabled && !handsFreeMuted) {
+    if (handsFreeEnabled && !handsFreeMuted && !IOS_EXTERNAL_PLAYBACK_HANDS_FREE) {
       setHandsFreeStatus('免提监听中');
       startHandsFreeAmbient();
     }
@@ -1248,7 +1253,7 @@ export default function ListenScreen({ route, navigation }) {
     // 这层判断的话，理论上不会有正在运行的环境监听（只有handleInterrupt
     // 会停它，进这里之前必然经过那一步），但多一层判断防止万一重复触发
     // 造成两路环境监听同时存在。
-    if (handsFreeEnabled && !handsFreeMuted && !hfAmbientRecordingRef.current) {
+    if (handsFreeEnabled && !handsFreeMuted && !IOS_EXTERNAL_PLAYBACK_HANDS_FREE && !hfAmbientRecordingRef.current) {
       setHandsFreeStatus('免提监听中');
       startHandsFreeAmbient();
     }
@@ -1420,6 +1425,11 @@ export default function ListenScreen({ route, navigation }) {
   // 也应该能用（跟手动打断那条录音路径用的是同一个底层能力）。
   async function startHandsFreeAmbient() {
     try {
+      if (IOS_EXTERNAL_PLAYBACK_HANDS_FREE) {
+        await restorePlaybackAudioMode().catch(() => {});
+        setHandsFreeStatus('外放优先 · 点一下提问');
+        return;
+      }
       const { status: perm } = await Audio.requestPermissionsAsync();
       if (perm !== 'granted') {
         setHandsFreeStatus('麦克风权限被拒绝，免提打断无法开启');
@@ -1461,7 +1471,7 @@ export default function ListenScreen({ route, navigation }) {
   // 要确保断开，不能让这路环境监听录音在离开听书页之后还占着麦克风。
   useEffect(() => {
     if (handsFreeEnabled) {
-      setHandsFreeStatus('连接中…');
+      setHandsFreeStatus(IOS_EXTERNAL_PLAYBACK_HANDS_FREE ? '外放优先 · 点一下提问' : '连接中…');
       startHandsFreeAmbient();
     }
     // 所有收尾逻辑都放进cleanup，不要在效果体的else分支里重复一遍——React
@@ -1672,9 +1682,14 @@ export default function ListenScreen({ route, navigation }) {
 
                 {inNarrating ? (
                   <View style={styles.askZone}>
-                    {!handsFreeEnabled ? (
-                      <TouchableOpacity style={styles.interruptBtnEl} onPress={handleInterrupt}>
-                        <Text style={styles.interruptBtnElText}>打断，我想问问</Text>
+                    {!handsFreeEnabled || (handsFreeEnabled && IOS_EXTERNAL_PLAYBACK_HANDS_FREE) ? (
+                      <TouchableOpacity
+                        style={styles.interruptBtnEl}
+                        onPress={handsFreeEnabled && IOS_EXTERNAL_PLAYBACK_HANDS_FREE ? startHandsFreeTurn : handleInterrupt}
+                      >
+                        <Text style={styles.interruptBtnElText}>
+                          {handsFreeEnabled && IOS_EXTERNAL_PLAYBACK_HANDS_FREE ? '点一下提问' : '打断，我想问问'}
+                        </Text>
                       </TouchableOpacity>
                     ) : (
                       <View style={styles.hfLive}>
@@ -1760,7 +1775,7 @@ export default function ListenScreen({ route, navigation }) {
                         用户还没看清楚之前就被"点击开始提问"这句默认文案盖掉，
                         看不出到底出了什么问题。 */}
                     <Text style={styles.micLabelText}>
-                      {handsFreeStatus || (handsFreeEnabled ? '免提已开启，随时说话' : '点击开始提问')}
+                      {handsFreeStatus || (handsFreeEnabled ? (IOS_EXTERNAL_PLAYBACK_HANDS_FREE ? '外放优先 · 点一下提问' : '免提已开启，随时说话') : '点击开始提问')}
                     </Text>
                   </>
                 )}
