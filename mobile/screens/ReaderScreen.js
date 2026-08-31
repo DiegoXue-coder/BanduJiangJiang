@@ -103,6 +103,8 @@ const READER_FONT_FACE_STYLE_ID = 'chatbook-reader-font-face';
 const READER_SETTINGS_KEY = 'chatbook_reader_typography_settings_v1';
 const READER_MODE_ORDER = ['epub', 'standard'];
 const READER_MODE_LABEL = { epub: '原版', standard: '标准' };
+const STANDARD_PAGE_MIN_CHARS = 180;
+const STANDARD_PAGE_MAX_CHARS = 520;
 
 function jsStringLiteral(value) {
   return JSON.stringify(String(value ?? ''));
@@ -116,6 +118,43 @@ function buildReaderFontOverrideCss(cssFamily, profile = {}) {
     `p, div, span, section, article, li, blockquote, td, th, a, em, strong, header, main { font-family: ${cssFamily} !important; font-weight: ${weight} !important; line-height: ${READING_LINE_HEIGHT} !important; }`,
     `h1, h2, h3, h4, h5, h6, nav h1 { font-family: ${cssFamily} !important; font-weight: 600 !important; }`,
   ].join(' ');
+}
+
+function paginateParagraphs(paragraphs, fontSizePt) {
+  const fontPx = Math.round(fontSizePt * 1.35);
+  const estimatedLines = Math.max(12, Math.min(24, Math.floor(420 / (fontPx * Number(READING_LINE_HEIGHT)))));
+  const estimatedCharsPerLine = Math.max(10, Math.min(22, Math.floor(310 / fontPx)));
+  const pageBudget = Math.max(
+    STANDARD_PAGE_MIN_CHARS,
+    Math.min(STANDARD_PAGE_MAX_CHARS, estimatedLines * estimatedCharsPerLine),
+  );
+  const pages = [];
+  let current = [];
+  let count = 0;
+  (paragraphs || []).forEach((paragraph, paragraphIndex) => {
+    const text = String(paragraph || '').trim();
+    if (!text) return;
+    if (text.length > pageBudget) {
+      if (current.length) {
+        pages.push(current);
+        current = [];
+        count = 0;
+      }
+      for (let start = 0; start < text.length; start += pageBudget) {
+        pages.push([{ text: text.slice(start, start + pageBudget), paragraphIndex }]);
+      }
+      return;
+    }
+    if (current.length && count + text.length > pageBudget) {
+      pages.push(current);
+      current = [];
+      count = 0;
+    }
+    current.push({ text, paragraphIndex });
+    count += text.length;
+  });
+  if (current.length) pages.push(current);
+  return pages.length ? pages : [[]];
 }
 
 function formatFontDiagnostics(payload, assetReport) {
@@ -307,6 +346,7 @@ function ReaderInner({
   const [bodyFontKey, setBodyFontKey] = useState('serif');
   const [readerMode, setReaderMode] = useState('epub');
   const [standardChapterIndex, setStandardChapterIndex] = useState(0);
+  const [standardPageIndex, setStandardPageIndex] = useState(0);
   const [standardChapterText, setStandardChapterText] = useState(null);
   const [standardChapterError, setStandardChapterError] = useState('');
   const [readerSettingsLoaded, setReaderSettingsLoaded] = useState(false);
@@ -364,6 +404,7 @@ function ReaderInner({
     let cancelled = false;
     setStandardChapterError('');
     setStandardChapterText(null);
+    setStandardPageIndex(0);
     setCurrentSectionTitle(chapter.title || '');
     getChapterText(bookId, chapter.id)
       .then((data) => {
@@ -808,6 +849,7 @@ function ReaderInner({
 
   function selectStandardChapter(index) {
     setStandardChapterIndex(index);
+    setStandardPageIndex(0);
     setShowToc(false);
   }
 
@@ -820,6 +862,49 @@ function ReaderInner({
   const standardFontFamily = bodyFont.asset;
   const standardFontSize = Math.round(fontSizePt * 1.35);
   const standardLineHeight = Math.round(standardFontSize * Number(READING_LINE_HEIGHT));
+  const standardPages = useMemo(
+    () => paginateParagraphs(standardChapterText?.paragraphs || [], fontSizePt),
+    [standardChapterText, fontSizePt],
+  );
+  const standardPage = standardPages[Math.min(standardPageIndex, standardPages.length - 1)] || [];
+  const standardPageNo = Math.min(standardPageIndex + 1, standardPages.length);
+
+  useEffect(() => {
+    setStandardPageIndex((prev) => Math.min(prev, Math.max(0, standardPages.length - 1)));
+  }, [standardPages.length]);
+
+  const readerPanelOpen = showFontSizePanel || showThemePanel;
+
+  function closeReaderPanels() {
+    if (!readerPanelOpen) return false;
+    setShowFontSizePanel(false);
+    setShowThemePanel(false);
+    return true;
+  }
+
+  function goStandardPrev() {
+    if (closeReaderPanels()) return;
+    if (standardPageIndex > 0) {
+      setStandardPageIndex((prev) => Math.max(0, prev - 1));
+      return;
+    }
+    if (standardChapterIndex > 0) {
+      setStandardChapterIndex((prev) => Math.max(0, prev - 1));
+      setStandardPageIndex(0);
+    }
+  }
+
+  function goStandardNext() {
+    if (closeReaderPanels()) return;
+    if (standardPageIndex < standardPages.length - 1) {
+      setStandardPageIndex((prev) => Math.min(standardPages.length - 1, prev + 1));
+      return;
+    }
+    if (standardChapterIndex < (chapters?.length || 0) - 1) {
+      setStandardChapterIndex((prev) => Math.min((chapters?.length || 1) - 1, prev + 1));
+      setStandardPageIndex(0);
+    }
+  }
 
   return (
     <SafeAreaView edges={['bottom', 'left', 'right']} style={[styles.safe, { backgroundColor: THEMES[themeName].body.background }]}>
@@ -1049,11 +1134,15 @@ function ReaderInner({
       </Modal>
 
       <View style={styles.readerBody}>
+        {readerPanelOpen && (
+          <TouchableOpacity
+            activeOpacity={1}
+            style={styles.readerPanelDismissLayer}
+            onPress={closeReaderPanels}
+          />
+        )}
         {readerMode === 'standard' ? (
-          <ScrollView
-            style={[styles.standardReader, { backgroundColor: THEMES[themeName].body.background }]}
-            contentContainerStyle={styles.standardReaderContent}
-          >
+          <View style={[styles.standardReader, { backgroundColor: THEMES[themeName].body.background }]}>
             {standardChapterError ? (
               <View style={styles.centerBox}>
                 <Text style={[styles.errorText, { color: uiTheme.danger }]}>章节加载失败：{standardChapterError}</Text>
@@ -1065,41 +1154,69 @@ function ReaderInner({
               </View>
             ) : (
               <>
-                <Text
-                  style={[
-                    styles.standardChapterTitle,
-                    { color: THEMES[themeName].body.color, fontFamily: standardFontFamily },
-                    bodyFont.key === 'sans' && { fontWeight: '700' },
-                  ]}
+                <ScrollView
+                  style={styles.standardReaderPage}
+                  contentContainerStyle={styles.standardReaderContent}
+                  showsVerticalScrollIndicator={false}
                 >
-                  {standardChapterText.title || chapters?.[standardChapterIndex]?.title || bookTitle}
-                </Text>
-                {standardChapterText.paragraphs.map((paragraph, index) => (
-                  <TouchableOpacity
-                    key={`${standardChapterIndex}-${index}`}
-                    activeOpacity={0.75}
-                    onLongPress={() => setSelection({ text: paragraph, cfiRange: makeStandardCfi(index) })}
+                  <Text
+                    style={[
+                      styles.standardChapterTitle,
+                      { color: THEMES[themeName].body.color, fontFamily: standardFontFamily },
+                      bodyFont.key === 'sans' && { fontWeight: '700' },
+                    ]}
+                    numberOfLines={2}
                   >
-                    <Text
-                      selectable
-                      style={[
-                        styles.standardParagraph,
-                        {
-                          color: THEMES[themeName].body.color,
-                          fontFamily: standardFontFamily,
-                          fontSize: standardFontSize,
-                          lineHeight: standardLineHeight,
-                        },
-                        bodyFont.key === 'sans' && { fontWeight: '700' },
-                      ]}
+                    {standardChapterText.title || chapters?.[standardChapterIndex]?.title || bookTitle}
+                  </Text>
+                  {standardPage.map(({ text, paragraphIndex }) => (
+                    <TouchableOpacity
+                      key={`${standardChapterIndex}-${paragraphIndex}`}
+                      activeOpacity={0.75}
+                      onLongPress={() => setSelection({ text, cfiRange: makeStandardCfi(paragraphIndex) })}
                     >
-                      {paragraph}
-                    </Text>
+                      <Text
+                        selectable
+                        style={[
+                          styles.standardParagraph,
+                          {
+                            color: THEMES[themeName].body.color,
+                            fontFamily: standardFontFamily,
+                            fontSize: standardFontSize,
+                            lineHeight: standardLineHeight,
+                          },
+                          bodyFont.key === 'sans' && { fontWeight: '700' },
+                        ]}
+                      >
+                        {text}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+                <TouchableOpacity style={styles.standardTapLeft} onPress={goStandardPrev} />
+                <TouchableOpacity style={styles.standardTapRight} onPress={goStandardNext} />
+                <View style={[styles.standardPager, { borderTopColor: uiTheme.cardBorder, backgroundColor: THEMES[themeName].body.background }]}>
+                  <TouchableOpacity
+                    style={[styles.standardPagerBtn, { borderColor: uiTheme.cardBorder, borderRadius: uiTheme.radius }]}
+                    onPress={goStandardPrev}
+                    disabled={standardChapterIndex === 0 && standardPageIndex === 0}
+                  >
+                    <Text style={[styles.standardPagerBtnText, { color: uiTheme.textSecondary }]}>上一页</Text>
                   </TouchableOpacity>
-                ))}
+                  <Text style={[styles.standardPagerMeta, { color: uiTheme.textSecondary, fontFamily: MONO_FONT }]}>
+                    {standardChapterIndex + 1}/{chapters?.length || 0} · {standardPageNo}/{standardPages.length}
+                  </Text>
+                  <TouchableOpacity
+                    style={[styles.standardPagerBtn, { borderColor: uiTheme.cardBorder, borderRadius: uiTheme.radius }]}
+                    onPress={goStandardNext}
+                    disabled={standardChapterIndex >= (chapters?.length || 1) - 1 && standardPageIndex >= standardPages.length - 1}
+                  >
+                    <Text style={[styles.standardPagerBtnText, { color: uiTheme.textSecondary }]}>下一页</Text>
+                  </TouchableOpacity>
+                </View>
               </>
             )}
-          </ScrollView>
+          </View>
         ) : epubError ? (
           <View style={styles.centerBox}>
             <Text style={[styles.errorText, { color: uiTheme.danger }]}>原版 EPUB 加载失败：{epubError}</Text>
@@ -1333,10 +1450,27 @@ const styles = StyleSheet.create({
   headerBtnText: { fontSize: 15, fontWeight: '600' },
 
   readerBody: { flex: 1, position: 'relative' },
+  readerPanelDismissLayer: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 20,
+  },
   standardReader: { flex: 1 },
-  standardReaderContent: { paddingHorizontal: 22, paddingTop: 22, paddingBottom: 80 },
+  standardReaderPage: { flex: 1 },
+  standardReaderContent: { paddingHorizontal: 22, paddingTop: 22, paddingBottom: 86 },
   standardChapterTitle: { fontSize: 24, lineHeight: 34, fontWeight: '700', marginBottom: 22 },
   standardParagraph: { marginBottom: 18 },
+  standardTapLeft: { position: 'absolute', left: 0, top: 0, bottom: 62, width: '22%', zIndex: 4 },
+  standardTapRight: { position: 'absolute', right: 0, top: 0, bottom: 62, width: '22%', zIndex: 4 },
+  standardPager: {
+    position: 'absolute', left: 0, right: 0, bottom: 0,
+    height: 62, borderTopWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: 18, flexDirection: 'row',
+    alignItems: 'center', justifyContent: 'space-between',
+    zIndex: 5,
+  },
+  standardPagerBtn: { borderWidth: 1, paddingHorizontal: 14, paddingVertical: 8 },
+  standardPagerBtnText: { fontSize: 13, fontWeight: '600' },
+  standardPagerMeta: { fontSize: 12, fontWeight: '600' },
 
   controlPanel: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
