@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View, Text, TouchableOpacity, StyleSheet, ActivityIndicator, Alert,
-  Modal, FlatList, PanResponder, Platform, ScrollView,
+  Modal, FlatList, PanResponder, Platform, useWindowDimensions,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Reader, useReader } from '@epubjs-react-native/core';
@@ -103,8 +103,8 @@ const READER_FONT_FACE_STYLE_ID = 'chatbook-reader-font-face';
 const READER_SETTINGS_KEY = 'chatbook_reader_typography_settings_v1';
 const READER_MODE_ORDER = ['epub', 'standard'];
 const READER_MODE_LABEL = { epub: '原版', standard: '标准' };
-const STANDARD_PAGE_MIN_CHARS = 180;
-const STANDARD_PAGE_MAX_CHARS = 520;
+const STANDARD_PAGE_MIN_CHARS = 80;
+const STANDARD_PAGE_MAX_CHARS = 280;
 
 function jsStringLiteral(value) {
   return JSON.stringify(String(value ?? ''));
@@ -120,10 +120,12 @@ function buildReaderFontOverrideCss(cssFamily, profile = {}) {
   ].join(' ');
 }
 
-function paginateParagraphs(paragraphs, fontSizePt) {
+function paginateParagraphs(paragraphs, fontSizePt, pageWidth, pageHeight) {
   const fontPx = Math.round(fontSizePt * 1.35);
-  const estimatedLines = Math.max(12, Math.min(24, Math.floor(420 / (fontPx * Number(READING_LINE_HEIGHT)))));
-  const estimatedCharsPerLine = Math.max(10, Math.min(22, Math.floor(310 / fontPx)));
+  const usableWidth = Math.max(220, Number(pageWidth || 0) - 44);
+  const usableHeight = Math.max(260, Number(pageHeight || 0) - 230);
+  const estimatedLines = Math.max(7, Math.min(18, Math.floor(usableHeight / (fontPx * Number(READING_LINE_HEIGHT)))));
+  const estimatedCharsPerLine = Math.max(8, Math.min(18, Math.floor(usableWidth / fontPx)));
   const pageBudget = Math.max(
     STANDARD_PAGE_MIN_CHARS,
     Math.min(STANDARD_PAGE_MAX_CHARS, estimatedLines * estimatedCharsPerLine),
@@ -246,6 +248,7 @@ function ReaderInner({
   bookId, bookTitle, author, initialLocation, initialAnnotations, navigation,
   jumpToCfi, jumpNonce, epubSrc, epubError, chapters,
 }) {
+  const windowSize = useWindowDimensions();
   // 1号任务诊断打点：这里挂载即代表epubUri（Base64字符串）已经通过RN桥
   // 传给了<Reader>，接下来是epub.js在WebView内部解压+解析的阶段——跟
   // handleReady里的打点配对，算出来的差值就是"WebView内部到底花了多久"，
@@ -863,8 +866,13 @@ function ReaderInner({
   const standardFontSize = Math.round(fontSizePt * 1.35);
   const standardLineHeight = Math.round(standardFontSize * Number(READING_LINE_HEIGHT));
   const standardPages = useMemo(
-    () => paginateParagraphs(standardChapterText?.paragraphs || [], fontSizePt),
-    [standardChapterText, fontSizePt],
+    () => paginateParagraphs(
+      standardChapterText?.paragraphs || [],
+      fontSizePt,
+      windowSize.width,
+      windowSize.height,
+    ),
+    [standardChapterText, fontSizePt, windowSize.width, windowSize.height],
   );
   const standardPage = standardPages[Math.min(standardPageIndex, standardPages.length - 1)] || [];
   const standardPageNo = Math.min(standardPageIndex + 1, standardPages.length);
@@ -1134,13 +1142,6 @@ function ReaderInner({
       </Modal>
 
       <View style={styles.readerBody}>
-        {readerPanelOpen && (
-          <TouchableOpacity
-            activeOpacity={1}
-            style={styles.readerPanelDismissLayer}
-            onPress={closeReaderPanels}
-          />
-        )}
         {readerMode === 'standard' ? (
           <View style={[styles.standardReader, { backgroundColor: THEMES[themeName].body.background }]}>
             {standardChapterError ? (
@@ -1154,47 +1155,47 @@ function ReaderInner({
               </View>
             ) : (
               <>
-                <ScrollView
-                  style={styles.standardReaderPage}
-                  contentContainerStyle={styles.standardReaderContent}
-                  showsVerticalScrollIndicator={false}
-                >
-                  <Text
-                    style={[
-                      styles.standardChapterTitle,
-                      { color: THEMES[themeName].body.color, fontFamily: standardFontFamily },
-                      bodyFont.key === 'sans' && { fontWeight: '700' },
-                    ]}
-                    numberOfLines={2}
-                  >
-                    {standardChapterText.title || chapters?.[standardChapterIndex]?.title || bookTitle}
-                  </Text>
-                  {standardPage.map(({ text, paragraphIndex }) => (
-                    <TouchableOpacity
-                      key={`${standardChapterIndex}-${paragraphIndex}`}
-                      activeOpacity={0.75}
-                      onLongPress={() => setSelection({ text, cfiRange: makeStandardCfi(paragraphIndex) })}
-                    >
+                <View style={styles.standardReaderPage}>
+                  <View style={styles.standardReaderContent}>
+                    {standardPageIndex === 0 && (
                       <Text
-                        selectable
                         style={[
-                          styles.standardParagraph,
-                          {
-                            color: THEMES[themeName].body.color,
-                            fontFamily: standardFontFamily,
-                            fontSize: standardFontSize,
-                            lineHeight: standardLineHeight,
-                          },
+                          styles.standardChapterTitle,
+                          { color: THEMES[themeName].body.color, fontFamily: standardFontFamily },
                           bodyFont.key === 'sans' && { fontWeight: '700' },
                         ]}
+                        numberOfLines={2}
                       >
-                        {text}
+                        {standardChapterText.title || chapters?.[standardChapterIndex]?.title || bookTitle}
                       </Text>
-                    </TouchableOpacity>
-                  ))}
-                </ScrollView>
-                <TouchableOpacity style={styles.standardTapLeft} onPress={goStandardPrev} />
-                <TouchableOpacity style={styles.standardTapRight} onPress={goStandardNext} />
+                    )}
+                    {standardPage.map(({ text, paragraphIndex }, pageItemIndex) => (
+                      <TouchableOpacity
+                        key={`${standardChapterIndex}-${standardPageIndex}-${paragraphIndex}-${pageItemIndex}`}
+                        activeOpacity={0.75}
+                        onLongPress={() => setSelection({ text, cfiRange: makeStandardCfi(paragraphIndex) })}
+                      >
+                        <Text
+                          selectable
+                          style={[
+                            styles.standardParagraph,
+                            {
+                              color: THEMES[themeName].body.color,
+                              fontFamily: standardFontFamily,
+                              fontSize: standardFontSize,
+                              lineHeight: standardLineHeight,
+                            },
+                            bodyFont.key === 'sans' && { fontWeight: '700' },
+                          ]}
+                        >
+                          {text}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                  <TouchableOpacity activeOpacity={1} style={styles.standardTapLeft} onPress={goStandardPrev} />
+                  <TouchableOpacity activeOpacity={1} style={styles.standardTapRight} onPress={goStandardNext} />
+                </View>
                 <View style={[styles.standardPager, { borderTopColor: uiTheme.cardBorder, backgroundColor: THEMES[themeName].body.background }]}>
                   <TouchableOpacity
                     style={[styles.standardPagerBtn, { borderColor: uiTheme.cardBorder, borderRadius: uiTheme.radius }]}
@@ -1261,6 +1262,13 @@ function ReaderInner({
                 <Text style={[styles.loadingText, { color: uiTheme.textSecondary }]}>正在下载书本…</Text>
               </View>
             )}
+          />
+        )}
+        {readerPanelOpen && (
+          <TouchableOpacity
+            activeOpacity={1}
+            style={styles.readerPanelDismissLayer}
+            onPress={closeReaderPanels}
           />
         )}
       </View>
@@ -1452,21 +1460,21 @@ const styles = StyleSheet.create({
   readerBody: { flex: 1, position: 'relative' },
   readerPanelDismissLayer: {
     ...StyleSheet.absoluteFillObject,
-    zIndex: 20,
+    zIndex: 50,
+    elevation: 50,
   },
-  standardReader: { flex: 1 },
-  standardReaderPage: { flex: 1 },
-  standardReaderContent: { paddingHorizontal: 22, paddingTop: 22, paddingBottom: 86 },
+  standardReader: { flex: 1, position: 'relative' },
+  standardReaderPage: { flex: 1, position: 'relative', overflow: 'hidden' },
+  standardReaderContent: { flex: 1, paddingHorizontal: 22, paddingTop: 22, paddingBottom: 18, overflow: 'hidden' },
   standardChapterTitle: { fontSize: 24, lineHeight: 34, fontWeight: '700', marginBottom: 22 },
-  standardParagraph: { marginBottom: 18 },
-  standardTapLeft: { position: 'absolute', left: 0, top: 0, bottom: 62, width: '22%', zIndex: 4 },
-  standardTapRight: { position: 'absolute', right: 0, top: 0, bottom: 62, width: '22%', zIndex: 4 },
+  standardParagraph: { marginBottom: 14 },
+  standardTapLeft: { position: 'absolute', left: 0, top: 0, bottom: 0, width: '24%', zIndex: 8, elevation: 8 },
+  standardTapRight: { position: 'absolute', right: 0, top: 0, bottom: 0, width: '24%', zIndex: 8, elevation: 8 },
   standardPager: {
-    position: 'absolute', left: 0, right: 0, bottom: 0,
-    height: 62, borderTopWidth: StyleSheet.hairlineWidth,
+    height: 58, borderTopWidth: StyleSheet.hairlineWidth,
     paddingHorizontal: 18, flexDirection: 'row',
     alignItems: 'center', justifyContent: 'space-between',
-    zIndex: 5,
+    flexShrink: 0, zIndex: 9, elevation: 9,
   },
   standardPagerBtn: { borderWidth: 1, paddingHorizontal: 14, paddingVertical: 8 },
   standardPagerBtnText: { fontSize: 13, fontWeight: '600' },
