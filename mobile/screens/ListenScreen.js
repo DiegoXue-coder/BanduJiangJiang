@@ -515,6 +515,7 @@ export default function ListenScreen({ route, navigation }) {
   const hfRecordingRef = useRef(null); // 正式录这一句话内容的录音（区别于上面的环境监听录音）
   const hfListenTimerRef = useRef(null); // 兜底的硬性超时，防止metering回调异常时无限录下去
   const hfListenResolveRef = useRef(null); // 让cancelHandsFreeTurn能立刻唤醒hfRecordUntilSilence里还在等待的Promise，不用干等到超时才发现被取消了
+  const voiceHoldActiveRef = useRef(false);
   const hfAbortRef = useRef(null);
   const hfReplyInterruptingRef = useRef(false);
   const hfTimingRef = useRef(null);
@@ -882,10 +883,10 @@ export default function ListenScreen({ route, navigation }) {
   // 录音（内容不要，只是刚才拿来测音量），马上开一路全新的录音正式捕捉
   // 这句话，全程留在朗读字幕视图（phase不变，不跳转），跟手动"打断"那套
   // 聊天气泡流程完全独立。
-  function startHandsFreeTurn() {
+  function startHandsFreeTurn(forceMic = false) {
     const interruptingReply = hfActiveRef.current && hfStage === 'replying';
     if (phase !== 'playing' && !interruptingReply) return;
-    if (handsFreeMuted) return;
+    if (handsFreeMuted && !forceMic) return;
     if (hfActiveRef.current && !interruptingReply) return;
     if (interruptingReply) {
       hfReplyInterruptingRef.current = true;
@@ -950,10 +951,14 @@ export default function ListenScreen({ route, navigation }) {
       await recording.startAsync();
       markHfTiming('正式录音已开始');
       hfRecordingRef.current = recording;
+      if (IOS_EXTERNAL_PLAYBACK_HANDS_FREE && !voiceHoldActiveRef.current) {
+        setTimeout(() => { hfListenResolveRef.current?.(); }, 0);
+      }
       // 双保险：万一某些机型metering回调不触发/触发不及时，硬性上限兜底，
       // 不会无限录下去。
       hfListenTimerRef.current = setTimeout(() => { hfListenResolveRef.current?.(); }, HF_MAX_UTTERANCE_MS + 1500);
       await donePromise;
+      voiceHoldActiveRef.current = false;
       if (hfListenTimerRef.current) {
         clearTimeout(hfListenTimerRef.current);
         hfListenTimerRef.current = null;
@@ -1147,6 +1152,39 @@ export default function ListenScreen({ route, navigation }) {
     }
     setHfStage('');
     setHfText('');
+  }
+
+  function handleVoiceModeMicPressIn() {
+    if (IOS_EXTERNAL_PLAYBACK_HANDS_FREE) {
+      if (hfStage === 'listening' || hfStage === 'thinking') return;
+      voiceHoldActiveRef.current = true;
+      if (hfStage === 'replying') {
+        setHandsFreeMuted(false);
+        startHandsFreeTurn(true);
+        return;
+      }
+      if (handsFreeMuted) {
+        setHandsFreeMuted(false);
+        startHandsFreeTurn(true);
+      }
+      return;
+    }
+    setHandsFreeMuted((v) => !v);
+  }
+
+  function handleVoiceModeMicPressOut() {
+    if (!IOS_EXTERNAL_PLAYBACK_HANDS_FREE) return;
+    voiceHoldActiveRef.current = false;
+    setHandsFreeMuted(true);
+    hfListenResolveRef.current?.();
+  }
+
+  function handleVoiceModeStatusPress() {
+    if (IOS_EXTERNAL_PLAYBACK_HANDS_FREE && hfStage === 'replying') {
+      voiceHoldActiveRef.current = true;
+      setHandsFreeMuted(false);
+      startHandsFreeTurn(true);
+    }
   }
 
   // 决策层这轮派发：连续追问改成"对话式"UI——之前点"继续追问"会跳回
@@ -1509,7 +1547,6 @@ export default function ListenScreen({ route, navigation }) {
   const inNarrating = phase === 'playing' || phase === 'loading-chapter';
   const segFraction = currentSegCount.total > 1 ? currentSegCount.idx / (currentSegCount.total - 1) : 0;
   const iosManualHandsFree = handsFreeEnabled && IOS_EXTERNAL_PLAYBACK_HANDS_FREE;
-  const iosManualAskDisabled = iosManualHandsFree && (hfStage === 'listening' || hfStage === 'thinking');
   const iosManualAskLabel = !iosManualHandsFree
     ? '打断，我想问问'
     : hfStage === 'replying'
@@ -1520,11 +1557,11 @@ export default function ListenScreen({ route, navigation }) {
           ? '正在思考…'
           : '开始提问';
   const voiceModeStatus = hfStage
-    ? (hfStage === 'listening' ? '正在听你说…' : hfStage === 'thinking' ? '正在识别和思考…' : 'AI正在回答')
+    ? (hfStage === 'listening' ? '松开后发送问题' : hfStage === 'thinking' ? '正在识别和思考…' : '按住麦克风打断追问')
     : handsFreeMuted
-      ? '已静音 · 继续讲书'
+      ? (IOS_EXTERNAL_PLAYBACK_HANDS_FREE ? '按住麦克风说话' : '已静音 · 继续讲书')
       : IOS_EXTERNAL_PLAYBACK_HANDS_FREE
-        ? '点麦克风开始说话'
+        ? '松开后发送问题'
         : '正在听 · 你可以直接说话';
 
   return (
@@ -1580,11 +1617,11 @@ export default function ListenScreen({ route, navigation }) {
 
           {(inNarrating || inConversation) && (
             <>
-              <View style={styles.mainStage}>
+              <View style={[styles.mainStage, handsFreeEnabled && styles.mainStageVoiceMode]}>
                 {inNarrating ? (
                   <>
-                    <ListenOrb stage={hfStage} />
-                    <View style={styles.captionZone}>
+                    {!handsFreeEnabled && <ListenOrb stage={hfStage} />}
+                    <View style={[styles.captionZone, handsFreeEnabled && styles.captionZoneVoiceMode]}>
                       {phase === 'loading-chapter' ? (
                         <ActivityIndicator color={EMBER.emberBright} />
                       ) : hfStage ? (
@@ -1661,7 +1698,7 @@ export default function ListenScreen({ route, navigation }) {
               {/* 设计稿："其余部分（进度条、播放控制）原地不动"——不管是朗读中
                   还是打断对话中，controls这部分都渲染在同一个位置，只有上面
                   main-stage的内容跟着phase切换。 */}
-              <View style={styles.controls}>
+              <View style={[styles.controls, handsFreeEnabled && styles.controlsVoiceMode]}>
                 <View style={styles.progress}>
                   <Slider
                     style={styles.progressSlider}
@@ -1707,27 +1744,32 @@ export default function ListenScreen({ route, navigation }) {
                 {inNarrating ? (
                   handsFreeEnabled ? (
                     <View style={styles.voiceModePanel}>
-                      <View style={[styles.voiceModeDots, hfStage === 'replying' && styles.voiceModeDotsStop]}>
-                        <View style={hfStage === 'replying' ? styles.voiceModeStopDot : styles.voiceModeDot} />
-                        {hfStage !== 'replying' && <View style={styles.voiceModeDot} />}
-                        {hfStage !== 'replying' && <View style={styles.voiceModeDot} />}
-                      </View>
-                      <Text style={styles.voiceModeStatusText}>{voiceModeStatus}</Text>
+                      <TouchableOpacity
+                        style={styles.voiceModeStatusButton}
+                        onPress={handleVoiceModeStatusPress}
+                        disabled={!(IOS_EXTERNAL_PLAYBACK_HANDS_FREE && hfStage === 'replying')}
+                        accessibilityLabel={voiceModeStatus}
+                      >
+                        <View style={[styles.voiceModeDots, hfStage === 'replying' && styles.voiceModeDotsStop]}>
+                          <View style={hfStage === 'replying' ? styles.voiceModeStopDot : styles.voiceModeDot} />
+                          {hfStage !== 'replying' && <View style={styles.voiceModeDot} />}
+                          {hfStage !== 'replying' && <View style={styles.voiceModeDot} />}
+                        </View>
+                        <Text style={styles.voiceModeStatusText}>{voiceModeStatus}</Text>
+                      </TouchableOpacity>
                       <View style={styles.voiceModeActions}>
                         <TouchableOpacity
-                          style={[styles.voiceModeRoundBtn, styles.voiceModeMicBtn, handsFreeMuted && styles.voiceModeRoundBtnMuted, iosManualAskDisabled && styles.voiceModeRoundBtnDisabled]}
-                          onPress={() => {
-                            if (iosManualHandsFree) {
-                              if (!iosManualAskDisabled) startHandsFreeTurn();
-                              return;
-                            }
-                            setHandsFreeMuted((v) => !v);
-                          }}
-                          disabled={iosManualAskDisabled}
+                          style={[
+                            styles.voiceModeRoundBtn,
+                            !handsFreeMuted && styles.voiceModeMicBtnActive,
+                            handsFreeMuted && styles.voiceModeMicBtnMuted,
+                          ]}
+                          onPressIn={handleVoiceModeMicPressIn}
+                          onPressOut={handleVoiceModeMicPressOut}
                           accessibilityLabel={iosManualAskLabel}
                         >
                           {handsFreeMuted
-                            ? <IconMicrophoneOff color={EMBER.ink} size={28} strokeWidth={2.2} />
+                            ? <IconMicrophoneOff color={EMBER.paperDim} size={28} strokeWidth={2.2} />
                             : <IconMicrophone color={EMBER.ink} size={30} strokeWidth={2.2} />}
                         </TouchableOpacity>
                         <TouchableOpacity
@@ -1745,6 +1787,7 @@ export default function ListenScreen({ route, navigation }) {
                         style={styles.interruptBtnEl}
                         onPress={() => {
                           if (!requireAuth('ai')) return;
+                          setHandsFreeMuted(true);
                           setHandsFreeEnabled(true);
                         }}
                       >
@@ -1898,10 +1941,12 @@ const styles = StyleSheet.create({
   doneText: { fontSize: 17, color: EMBER.paper, fontWeight: '600' },
 
   mainStage: { flex: 1 },
+  mainStageVoiceMode: { justifyContent: 'center' },
   captionZone: {
     paddingHorizontal: 30, paddingBottom: 8, minHeight: 90,
     alignItems: 'center', justifyContent: 'flex-start',
   },
+  captionZoneVoiceMode: { flex: 1, justifyContent: 'center', paddingTop: 18, paddingBottom: 18 },
   captionTextEl: { fontSize: 17, lineHeight: 27, textAlign: 'center', color: EMBER.paper },
   captionCountText: { fontSize: 10.5, color: EMBER.inkSoft, marginTop: 8, letterSpacing: 0.5 },
   hfStageLabel: { fontSize: 12.5, color: EMBER.emberBright, letterSpacing: 0.3, marginBottom: 10 },
@@ -1939,6 +1984,7 @@ const styles = StyleSheet.create({
   resumeBtnText: { fontSize: 14, color: EMBER.ink, fontWeight: '700' },
 
   controls: { paddingHorizontal: 22, paddingTop: 6, paddingBottom: 22, gap: 14 },
+  controlsVoiceMode: { gap: 18, paddingBottom: 18 },
   progress: { gap: 5 },
   progressSlider: { width: '100%', height: 28 },
   progressTimes: { flexDirection: 'row', justifyContent: 'space-between' },
@@ -1959,21 +2005,23 @@ const styles = StyleSheet.create({
   },
   interruptBtnElDisabled: { opacity: 0.62 },
   interruptBtnElText: { fontSize: 14, color: EMBER.ink, fontWeight: '600' },
-  voiceModePanel: { alignItems: 'center', gap: 12, marginTop: -4 },
+  voiceModePanel: { alignItems: 'center', gap: 14, paddingTop: 8 },
+  voiceModeStatusButton: { alignItems: 'center', justifyContent: 'center', gap: 9, paddingHorizontal: 16, paddingVertical: 3 },
   voiceModeDots: { flexDirection: 'row', gap: 7, alignItems: 'center', justifyContent: 'center', minHeight: 16 },
   voiceModeDotsStop: { gap: 0 },
   voiceModeDot: { width: 11, height: 11, borderRadius: 5.5, backgroundColor: EMBER.inkSoft },
   voiceModeStopDot: { width: 16, height: 16, borderRadius: 5, backgroundColor: EMBER.inkSoft },
   voiceModeStatusText: { fontSize: 12.5, color: EMBER.inkSoft, textAlign: 'center', letterSpacing: 0.2 },
-  voiceModeActions: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 34 },
+  voiceModeActions: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 46, marginTop: 2 },
   voiceModeRoundBtn: {
-    width: 72, height: 72, borderRadius: 36, alignItems: 'center', justifyContent: 'center',
-    backgroundColor: 'rgba(242,230,210,0.78)',
+    width: 74, height: 74, borderRadius: 37, alignItems: 'center', justifyContent: 'center',
   },
-  voiceModeMicBtn: { shadowColor: EMBER.emberBright, shadowOpacity: 0.22, shadowRadius: 16, shadowOffset: { width: 0, height: 6 } },
+  voiceModeMicBtnActive: {
+    backgroundColor: 'rgba(242,230,210,0.9)',
+    shadowColor: EMBER.emberBright, shadowOpacity: 0.22, shadowRadius: 16, shadowOffset: { width: 0, height: 6 },
+  },
+  voiceModeMicBtnMuted: { backgroundColor: 'rgba(255,255,255,0.08)', borderWidth: 0.5, borderColor: 'rgba(255,255,255,0.12)' },
   voiceModeExitBtn: { backgroundColor: 'rgba(255,255,255,0.12)' },
-  voiceModeRoundBtnMuted: { opacity: 0.58 },
-  voiceModeRoundBtnDisabled: { opacity: 0.48 },
   hfLive: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   listeningTag: { fontSize: 11.5, color: EMBER.emberBright, letterSpacing: 0.3 },
   muteIconBtn: {
