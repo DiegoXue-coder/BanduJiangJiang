@@ -207,9 +207,19 @@ function isTocChapter(title) {
 }
 
 const LIST_MARKER_PAUSE_MS = 350; // 念到编号开头的段落前，额外停顿这么久
+const RESUME_CHAR_BACKTRACK = 12; // 段内恢复时回退少量字，避免从半个词中间接上
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getResumeSlice(text, charOffset) {
+  const offset = Math.max(0, Math.min(text.length - 1, charOffset || 0));
+  const startOffset = Math.max(0, offset - RESUME_CHAR_BACKTRACK);
+  return {
+    text: text.slice(startOffset).trimStart() || text,
+    startOffset,
+  };
 }
 
 // 真机反馈：有些书的<p>标签切得很碎，逐段单独发一次TTS请求，段与段之间
@@ -476,6 +486,7 @@ export default function ListenScreen({ route, navigation }) {
   // 位置或设置对不上就整个丢弃重新现场加载，不会把过期音频当成当前段播。
   const preparedRef = useRef(null); // { ci, pi, voice, rate, promise }
   const posRef = useRef({ chapterIdx: 0, paragraphIdx: 0 }); // 当前/暂停时的位置
+  const paragraphProgressRef = useRef({ chapterIdx: 0, paragraphIdx: 0, charOffset: 0 });
   const abortAskRef = useRef(null);
   // 决策层这轮派发：连续追问的交互改成"对话式"，不是每次都跳回一个空白
   // 提问页——之前用ref存这一轮的问答历史只是为了喂给streamAsk当上下文，
@@ -551,7 +562,7 @@ export default function ListenScreen({ route, navigation }) {
     }
   }
 
-  async function playOneParagraph(text, epoch, onAudioStart, presetSoundPromise) {
+  async function playOneParagraph(text, epoch, onAudioStart, presetSoundPromise, progressMeta = null) {
     let sound = null;
     const t0 = Date.now();
     if (!hfAmbientRecordingRef.current && !hfRecordingRef.current && !recordingRef.current) {
@@ -587,6 +598,19 @@ export default function ListenScreen({ route, navigation }) {
         resolve();
       };
       sound.setOnPlaybackStatusUpdate((s) => {
+        if (s.isLoaded && progressMeta && s.durationMillis > 0 && s.positionMillis >= 0) {
+          const ratio = Math.max(0, Math.min(1, s.positionMillis / s.durationMillis));
+          const baseOffset = progressMeta.baseOffset || 0;
+          const playTextLength = progressMeta.playTextLength || progressMeta.sourceLength || 0;
+          paragraphProgressRef.current = {
+            chapterIdx: progressMeta.chapterIdx,
+            paragraphIdx: progressMeta.paragraphIdx,
+            charOffset: Math.min(
+              progressMeta.sourceLength,
+              baseOffset + Math.floor(playTextLength * ratio),
+            ),
+          };
+        }
         if (!s.isLoaded || s.didJustFinish) finish();
       });
       sound.playAsync().catch(() => finish()); // 播放本身失败也别卡住整个循环，跳过这段
@@ -594,8 +618,8 @@ export default function ListenScreen({ route, navigation }) {
   }
 
   // 从指定位置开始顺序朗读，直到打断（epoch变化）或全书听完。
-  // 打断的粒度是"段落"——不做音频内细粒度进度记录，暂停即重播该段
-  // （不是从头也不是丢段，是这次没有更细粒度可用时最合理的中间选择）。
+  // 录音/问答打断后会按当前音频播放比例估一个段内字位，恢复时从该字位
+  // 前面少量回退继续读，避免每次都从合并段落开头重读。
   const playFrom = useCallback(async (startChapterIdx, startParagraphIdx, epoch) => {
     const chapters = chaptersRef.current;
     let ci = startChapterIdx;
@@ -656,9 +680,22 @@ export default function ListenScreen({ route, navigation }) {
           preparedRef.current = null;
         }
 
-        console.log(`[听书诊断] 开始加载 章节="${chapter.title}" 第${pi + 1}/${paragraphs.length}段 预取命中=${!!presetPromise}`);
+        const resumeProgress = paragraphProgressRef.current;
+        const shouldResumeWithinParagraph = resumeProgress.chapterIdx === ci
+          && resumeProgress.paragraphIdx === pi
+          && resumeProgress.charOffset > RESUME_CHAR_BACKTRACK
+          && resumeProgress.charOffset < paragraphs[pi].length - RESUME_CHAR_BACKTRACK;
+        const resumeSlice = shouldResumeWithinParagraph
+          ? getResumeSlice(paragraphs[pi], resumeProgress.charOffset)
+          : { text: paragraphs[pi], startOffset: 0 };
+        const textToPlay = resumeSlice.text;
+        if (shouldResumeWithinParagraph) {
+          presetPromise = null; // 段内恢复文本已经变短，不能复用原整段预取音频
+        }
+
+        console.log(`[听书诊断] 开始加载 章节="${chapter.title}" 第${pi + 1}/${paragraphs.length}段 段内恢复=${shouldResumeWithinParagraph} 预取命中=${!!presetPromise}`);
         try {
-          await playOneParagraph(paragraphs[pi], epoch, () => {
+          await playOneParagraph(textToPlay, epoch, () => {
             // 真机反馈过"打断时截取的是刚讲到那段的后面一段，不是刚讲到
             // 的那段"——根因是原来在"这段还没开始出声、还在等TTS合成"
             // 这个加载阶段，就把posRef改成了这一段，用户如果在这段真正
@@ -666,8 +703,11 @@ export default function ListenScreen({ route, navigation }) {
             // 截取到的就是用户实际上根本没听到的下一段。改成真正开始
             // 出声这一刻才更新posRef，跟用户耳朵听到的内容对齐。
             posRef.current = { chapterIdx: ci, paragraphIdx: pi };
+            if (!shouldResumeWithinParagraph) {
+              paragraphProgressRef.current = { chapterIdx: ci, paragraphIdx: pi, charOffset: 0 };
+            }
             setProgressLabel(`第${pi + 1}/${paragraphs.length}段`);
-            setCurrentCaption(paragraphs[pi]);
+            setCurrentCaption(textToPlay);
             setCurrentSegCount({ idx: pi, total: paragraphs.length });
             console.log(`[听书诊断] 开始出声 章节="${chapter.title}" 第${pi + 1}/${paragraphs.length}段`);
             // 这段刚出声，立刻在后台把下一段的TTS请求发出去（不等待），
@@ -687,8 +727,15 @@ export default function ListenScreen({ route, navigation }) {
               });
               preparedRef.current = { ci, pi: nextPi, voice: v, rate: r, promise };
             }
-          }, presetPromise);
+          }, presetPromise, {
+            chapterIdx: ci,
+            paragraphIdx: pi,
+            sourceLength: paragraphs[pi].length,
+            baseOffset: resumeSlice.startOffset,
+            playTextLength: textToPlay.length,
+          });
           console.log(`[听书诊断] 播放完成 章节="${chapter.title}" 第${pi + 1}/${paragraphs.length}段`);
+          paragraphProgressRef.current = { chapterIdx: ci, paragraphIdx: pi, charOffset: 0 };
         } catch (e) {
           console.log(`[听书诊断] 播放出错，跳过这段：${e.message}`);
         }
@@ -858,6 +905,7 @@ export default function ListenScreen({ route, navigation }) {
     const targetPi = Math.min(Math.max(Math.round(fraction * (total - 1)), 0), total - 1);
     const { chapterIdx } = posRef.current;
     epochRef.current += 1;
+    paragraphProgressRef.current = { chapterIdx, paragraphIdx: targetPi, charOffset: 0 };
     (async () => {
       await stopSound();
       playFrom(chapterIdx, targetPi, epochRef.current);
@@ -871,6 +919,7 @@ export default function ListenScreen({ route, navigation }) {
     if (chapterJumpingRef.current) return;
     chapterJumpingRef.current = true;
     epochRef.current += 1;
+    paragraphProgressRef.current = { chapterIdx: idx, paragraphIdx: 0, charOffset: 0 };
     (async () => {
       await stopSound();
       setShowChapterPicker(false);
