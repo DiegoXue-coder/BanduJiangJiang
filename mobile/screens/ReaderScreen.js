@@ -141,6 +141,24 @@ function findStandardPageBreak(text, target) {
   return Math.max(min, Math.min(target, text.length));
 }
 
+function splitStandardSelectionChunks(text) {
+  const value = String(text || '').trim();
+  if (!value) return [];
+  const chunks = [];
+  let buffer = '';
+  const hardMax = 34;
+  for (const char of value) {
+    buffer += char;
+    const shouldBreak = /[。！？；：，、,.!?;:]/.test(char) && buffer.length >= 8;
+    if (shouldBreak || buffer.length >= hardMax) {
+      chunks.push(buffer);
+      buffer = '';
+    }
+  }
+  if (buffer) chunks.push(buffer);
+  return chunks;
+}
+
 function paginateStandardBlocks(blocks, fontSizePt, pageWidth, pageHeight) {
   const fontPx = Math.round(fontSizePt * 1.35);
   const usableWidth = Math.max(220, Number(pageWidth || 0) - 40);
@@ -992,10 +1010,11 @@ function ReaderInner({
   }
 
   const standardPagePanResponder = useMemo(() => PanResponder.create({
+    onStartShouldSetPanResponder: () => false,
     onMoveShouldSetPanResponder: (_, gesture) =>
       readerMode === 'standard' &&
-      Math.abs(gesture.dx) > 18 &&
-      Math.abs(gesture.dx) > Math.abs(gesture.dy) * 1.25,
+      Math.abs(gesture.dx) > 34 &&
+      Math.abs(gesture.dx) > Math.abs(gesture.dy) * 1.6,
     onPanResponderRelease: (_, gesture) => {
       if (readerPanelOpen) {
         closeReaderPanels();
@@ -1301,8 +1320,6 @@ function ReaderInner({
                       return (
                         <Text
                           key={key}
-                          selectable
-                          onLongPress={() => setSelection({ text: block.text, cfiRange: makeStandardCfi(block.paragraphIndex) })}
                           style={[
                             styles.standardParagraph,
                             {
@@ -1314,7 +1331,15 @@ function ReaderInner({
                             bodyFont.key === 'sans' && { fontWeight: '700' },
                           ]}
                         >
-                          {block.text}
+                          {splitStandardSelectionChunks(block.text).map((chunk, chunkIndex) => (
+                            <Text
+                              key={`${key}-chunk-${chunkIndex}`}
+                              suppressHighlighting={false}
+                              onLongPress={() => setSelection({ text: chunk.trim(), cfiRange: makeStandardCfi(block.paragraphIndex) })}
+                            >
+                              {chunk}
+                            </Text>
+                          ))}
                         </Text>
                       );
                     })}
