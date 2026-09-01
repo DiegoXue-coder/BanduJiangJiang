@@ -21,6 +21,7 @@ import {
   IconPlayerTrackPrevFilled, IconPlayerTrackNextFilled,
   IconPlayerPlayFilled, IconPlayerPauseFilled,
   IconMicrophone, IconMicrophoneOff, IconSend, IconDropletFilled,
+  IconX,
 } from '@tabler/icons-react-native';
 import {
   getBookContext, getChapterText, getTtsPlayUrl, transcribeAudio,
@@ -1518,6 +1519,13 @@ export default function ListenScreen({ route, navigation }) {
         : hfStage === 'thinking'
           ? '正在思考…'
           : '开始提问';
+  const voiceModeStatus = hfStage
+    ? (hfStage === 'listening' ? '正在听你说…' : hfStage === 'thinking' ? '正在识别和思考…' : 'AI正在回答')
+    : handsFreeMuted
+      ? '已静音 · 继续讲书'
+      : IOS_EXTERNAL_PLAYBACK_HANDS_FREE
+        ? '点麦克风开始说话'
+        : '正在听 · 你可以直接说话';
 
   return (
     <View style={styles.stage}>
@@ -1697,31 +1705,54 @@ export default function ListenScreen({ route, navigation }) {
                 </View>
 
                 {inNarrating ? (
-                  <View style={styles.askZone}>
-                    {!handsFreeEnabled || iosManualHandsFree ? (
-                      <TouchableOpacity
-                        style={[styles.interruptBtnEl, iosManualAskDisabled && styles.interruptBtnElDisabled]}
-                        onPress={iosManualHandsFree ? startHandsFreeTurn : handleInterrupt}
-                        disabled={iosManualAskDisabled}
-                      >
-                        <Text style={styles.interruptBtnElText}>{iosManualAskLabel}</Text>
-                      </TouchableOpacity>
-                    ) : (
-                      <View style={styles.hfLive}>
-                        <Text style={styles.listeningTag}>
-                          {hfStage
-                            ? (hfStage === 'listening' ? '正在聆听你的问题' : hfStage === 'thinking' ? 'AI正在思考…' : 'AI正在回答')
-                            : (handsFreeMuted ? '已静音 · 朗读继续' : '正在聆听 · 随时开口')}
-                        </Text>
+                  handsFreeEnabled ? (
+                    <View style={styles.voiceModePanel}>
+                      <View style={[styles.voiceModeDots, hfStage === 'replying' && styles.voiceModeDotsStop]}>
+                        <View style={hfStage === 'replying' ? styles.voiceModeStopDot : styles.voiceModeDot} />
+                        {hfStage !== 'replying' && <View style={styles.voiceModeDot} />}
+                        {hfStage !== 'replying' && <View style={styles.voiceModeDot} />}
+                      </View>
+                      <Text style={styles.voiceModeStatusText}>{voiceModeStatus}</Text>
+                      <View style={styles.voiceModeActions}>
                         <TouchableOpacity
-                          style={styles.muteIconBtn}
-                          onPress={() => setHandsFreeMuted((v) => !v)}
+                          style={[styles.voiceModeRoundBtn, styles.voiceModeMicBtn, handsFreeMuted && styles.voiceModeRoundBtnMuted, iosManualAskDisabled && styles.voiceModeRoundBtnDisabled]}
+                          onPress={() => {
+                            if (iosManualHandsFree) {
+                              if (!iosManualAskDisabled) startHandsFreeTurn();
+                              return;
+                            }
+                            setHandsFreeMuted((v) => !v);
+                          }}
+                          disabled={iosManualAskDisabled}
+                          accessibilityLabel={iosManualAskLabel}
                         >
-                          <IconMicrophoneOff color={handsFreeMuted ? EMBER.emberBright : EMBER.paperDim} size={13} strokeWidth={2} />
+                          {handsFreeMuted
+                            ? <IconMicrophoneOff color={EMBER.ink} size={28} strokeWidth={2.2} />
+                            : <IconMicrophone color={EMBER.ink} size={30} strokeWidth={2.2} />}
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={[styles.voiceModeRoundBtn, styles.voiceModeExitBtn]}
+                          onPress={() => setHandsFreeEnabled(false)}
+                          accessibilityLabel="退出语音模式"
+                        >
+                          <IconX color="#ff2d2d" size={34} strokeWidth={2.7} />
                         </TouchableOpacity>
                       </View>
-                    )}
-                  </View>
+                    </View>
+                  ) : (
+                    <View style={styles.askZone}>
+                      <TouchableOpacity
+                        style={styles.interruptBtnEl}
+                        onPress={() => {
+                          if (!requireAuth('ai')) return;
+                          setHandsFreeEnabled(true);
+                        }}
+                      >
+                        <IconMicrophone color={EMBER.ink} size={16} strokeWidth={2.2} />
+                        <Text style={styles.interruptBtnElText}>进入语音提问</Text>
+                      </TouchableOpacity>
+                    </View>
+                  )
                 ) : (
                   <>
                     {phase === 'paused' && (
@@ -1767,32 +1798,8 @@ export default function ListenScreen({ route, navigation }) {
                   </>
                 )}
 
-                {inNarrating && (
-                  <>
-                    <TouchableOpacity
-                      style={[styles.micToggle, handsFreeEnabled && styles.micToggleOn]}
-                      onPress={() => {
-                        // 续二十三访客模式：免提是"AI相关入口"，只挡"开启"这个
-                        // 方向——关掉免提（已经开着的情况下）不需要账号，任何
-                        // 时候都该能关，只是访客理论上没法先把它打开。
-                        if (!handsFreeEnabled && !requireAuth('ai')) return;
-                        setHandsFreeEnabled((v) => !v);
-                      }}
-                      accessibilityLabel="开始提问"
-                    >
-                      {handsFreeEnabled
-                        ? <IconMicrophone color={EMBER.emberBright} size={18} strokeWidth={2} />
-                        : <IconMicrophoneOff color={EMBER.inkSoft} size={18} strokeWidth={2} />}
-                    </TouchableOpacity>
-                    {/* handsFreeStatus独立于handsFreeEnabled展示——启动失败时
-                        startHandsFreeAmbient会把handsFreeEnabled设回false，如果
-                        这里的文案也跟着handsFreeEnabled切换，失败原因会在
-                        用户还没看清楚之前就被"点击开始提问"这句默认文案盖掉，
-                        看不出到底出了什么问题。 */}
-                    <Text style={styles.micLabelText}>
-                      {handsFreeStatus || (handsFreeEnabled ? (IOS_EXTERNAL_PLAYBACK_HANDS_FREE ? '外放优先 · 点一下提问' : '免提已开启，随时说话') : '点击开始提问')}
-                    </Text>
-                  </>
+                {!!handsFreeStatus && !handsFreeEnabled && inNarrating && (
+                  <Text style={styles.micLabelText}>{handsFreeStatus}</Text>
                 )}
               </View>
             </>
@@ -1947,10 +1954,26 @@ const styles = StyleSheet.create({
 
   askZone: { minHeight: 34, alignItems: 'center', justifyContent: 'center' },
   interruptBtnEl: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7,
     backgroundColor: EMBER.ember, borderRadius: 999, paddingHorizontal: 30, paddingVertical: 12,
   },
   interruptBtnElDisabled: { opacity: 0.62 },
   interruptBtnElText: { fontSize: 14, color: EMBER.ink, fontWeight: '600' },
+  voiceModePanel: { alignItems: 'center', gap: 12, marginTop: -4 },
+  voiceModeDots: { flexDirection: 'row', gap: 7, alignItems: 'center', justifyContent: 'center', minHeight: 16 },
+  voiceModeDotsStop: { gap: 0 },
+  voiceModeDot: { width: 11, height: 11, borderRadius: 5.5, backgroundColor: EMBER.inkSoft },
+  voiceModeStopDot: { width: 16, height: 16, borderRadius: 5, backgroundColor: EMBER.inkSoft },
+  voiceModeStatusText: { fontSize: 12.5, color: EMBER.inkSoft, textAlign: 'center', letterSpacing: 0.2 },
+  voiceModeActions: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 34 },
+  voiceModeRoundBtn: {
+    width: 72, height: 72, borderRadius: 36, alignItems: 'center', justifyContent: 'center',
+    backgroundColor: 'rgba(242,230,210,0.78)',
+  },
+  voiceModeMicBtn: { shadowColor: EMBER.emberBright, shadowOpacity: 0.22, shadowRadius: 16, shadowOffset: { width: 0, height: 6 } },
+  voiceModeExitBtn: { backgroundColor: 'rgba(255,255,255,0.12)' },
+  voiceModeRoundBtnMuted: { opacity: 0.58 },
+  voiceModeRoundBtnDisabled: { opacity: 0.48 },
   hfLive: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   listeningTag: { fontSize: 11.5, color: EMBER.emberBright, letterSpacing: 0.3 },
   muteIconBtn: {
