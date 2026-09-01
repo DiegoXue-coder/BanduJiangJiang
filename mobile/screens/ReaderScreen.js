@@ -144,7 +144,7 @@ function findStandardPageBreak(text, target) {
 function paginateStandardBlocks(blocks, fontSizePt, pageWidth, pageHeight) {
   const fontPx = Math.round(fontSizePt * 1.35);
   const usableWidth = Math.max(220, Number(pageWidth || 0) - 40);
-  const usableHeight = Math.max(320, Number(pageHeight || 0) - 186);
+  const usableHeight = Math.max(360, Number(pageHeight || 0) - 142);
   const estimatedLines = Math.max(9, Math.min(24, Math.floor(usableHeight / (fontPx * STANDARD_READING_LINE_HEIGHT))));
   const estimatedCharsPerLine = Math.max(9, Math.min(20, Math.floor(usableWidth / fontPx)));
   const pageBudget = Math.max(
@@ -950,7 +950,6 @@ function ReaderInner({
     [standardChapterText, fontSizePt, windowSize.width, windowSize.height],
   );
   const standardPage = standardPages[Math.min(standardPageIndex, standardPages.length - 1)] || [];
-  const standardPageNo = Math.min(standardPageIndex + 1, standardPages.length);
   const visibleChapterTitle = readerMode === 'standard'
     ? (standardChapterText?.title || chapters?.[standardChapterIndex]?.title || bookTitle)
     : (currentSectionTitle || bookTitle);
@@ -1300,51 +1299,28 @@ function ReaderInner({
                         );
                       }
                       return (
-                        <TouchableOpacity
+                        <Text
                           key={key}
-                          activeOpacity={0.75}
+                          selectable
                           onLongPress={() => setSelection({ text: block.text, cfiRange: makeStandardCfi(block.paragraphIndex) })}
+                          style={[
+                            styles.standardParagraph,
+                            {
+                              color: THEMES[themeName].body.color,
+                              fontFamily: standardFontFamily,
+                              fontSize: standardFontSize,
+                              lineHeight: standardLineHeight,
+                            },
+                            bodyFont.key === 'sans' && { fontWeight: '700' },
+                          ]}
                         >
-                          <Text
-                            selectable
-                            style={[
-                              styles.standardParagraph,
-                              {
-                                color: THEMES[themeName].body.color,
-                                fontFamily: standardFontFamily,
-                                fontSize: standardFontSize,
-                                lineHeight: standardLineHeight,
-                              },
-                              bodyFont.key === 'sans' && { fontWeight: '700' },
-                            ]}
-                          >
-                            {block.text}
-                          </Text>
-                        </TouchableOpacity>
+                          {block.text}
+                        </Text>
                       );
                     })}
                   </View>
                   <TouchableOpacity activeOpacity={1} style={styles.standardTapLeft} onPress={goStandardPrev} />
                   <TouchableOpacity activeOpacity={1} style={styles.standardTapRight} onPress={goStandardNext} />
-                </View>
-                <View style={[styles.standardPager, { borderTopColor: uiTheme.cardBorder, backgroundColor: THEMES[themeName].body.background }]}>
-                  <TouchableOpacity
-                    style={[styles.standardPagerBtn, { borderColor: uiTheme.cardBorder, borderRadius: uiTheme.radius }]}
-                    onPress={goStandardPrev}
-                    disabled={standardChapterIndex === 0 && standardPageIndex === 0}
-                  >
-                    <Text style={[styles.standardPagerBtnText, { color: uiTheme.textSecondary }]}>上一页</Text>
-                  </TouchableOpacity>
-                  <Text style={[styles.standardPagerMeta, { color: uiTheme.textSecondary, fontFamily: MONO_FONT }]}>
-                    {standardChapterIndex + 1}/{chapters?.length || 0} · {standardPageNo}/{standardPages.length}
-                  </Text>
-                  <TouchableOpacity
-                    style={[styles.standardPagerBtn, { borderColor: uiTheme.cardBorder, borderRadius: uiTheme.radius }]}
-                    onPress={goStandardNext}
-                    disabled={standardChapterIndex >= (chapters?.length || 1) - 1 && standardPageIndex >= standardPages.length - 1}
-                  >
-                    <Text style={[styles.standardPagerBtnText, { color: uiTheme.textSecondary }]}>下一页</Text>
-                  </TouchableOpacity>
                 </View>
               </>
             )}
@@ -1613,17 +1589,8 @@ const styles = StyleSheet.create({
     fontSize: 11,
     lineHeight: 16,
   },
-  standardTapLeft: { position: 'absolute', left: 0, top: 0, bottom: 0, width: '24%', zIndex: 8, elevation: 8 },
-  standardTapRight: { position: 'absolute', right: 0, top: 0, bottom: 0, width: '24%', zIndex: 8, elevation: 8 },
-  standardPager: {
-    height: 58, borderTopWidth: StyleSheet.hairlineWidth,
-    paddingHorizontal: 18, flexDirection: 'row',
-    alignItems: 'center', justifyContent: 'space-between',
-    flexShrink: 0, zIndex: 9, elevation: 9,
-  },
-  standardPagerBtn: { borderWidth: 1, paddingHorizontal: 14, paddingVertical: 8 },
-  standardPagerBtnText: { fontSize: 13, fontWeight: '600' },
-  standardPagerMeta: { fontSize: 12, fontWeight: '600' },
+  standardTapLeft: { position: 'absolute', left: 0, top: 0, bottom: 0, width: '14%', zIndex: 8, elevation: 8 },
+  standardTapRight: { position: 'absolute', right: 0, top: 0, bottom: 0, width: '14%', zIndex: 8, elevation: 8 },
 
   controlPanel: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
