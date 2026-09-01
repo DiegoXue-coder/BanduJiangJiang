@@ -451,6 +451,8 @@ function ReaderInner({
   // 兜底：只要 epub.js 报了新的选区（onSelected，拖动调整后也会正常触发），
   // 就显示"划线/问AI"按钮，不依赖那个容易失效的原生菜单。
   const [selection, setSelection] = useState(null); // { text, cfiRange }
+  const [standardRangeSelection, setStandardRangeSelection] = useState(null);
+  const [standardSavedHighlights, setStandardSavedHighlights] = useState([]);
   const progressTimer = useRef(null);
   const annotationsRestored = useRef(false);
   const skippedInitialNav = useRef(false);
@@ -488,6 +490,14 @@ function ReaderInner({
     SecureStore.setItemAsync(READER_SETTINGS_KEY, JSON.stringify({ bodyFontKey, fontSizePt, readerMode }))
       .catch((e) => console.warn('[阅读器设置] 保存失败', e.message || e));
   }, [readerSettingsLoaded, bodyFontKey, fontSizePt, readerMode]);
+
+  useEffect(() => {
+    setStandardSavedHighlights(
+      (initialAnnotations || [])
+        .filter((h) => h.cfi_location?.startsWith('standard:') && h.highlighted_text)
+        .map((h) => ({ cfiRange: h.cfi_location, text: h.highlighted_text })),
+    );
+  }, [initialAnnotations]);
 
   useEffect(() => {
     if (readerMode !== 'standard') return;
@@ -887,6 +897,8 @@ function ReaderInner({
       const saved = await saveHighlight(bookId, { cfiLocation: cfiRange, highlightedText: text });
       if (readerMode === 'epub' && cfiRange?.startsWith('epubcfi(')) {
         addAnnotation('highlight', cfiRange, { id: saved.id }, { color: '#ffd54f' });
+      } else if (readerMode === 'standard' && cfiRange?.startsWith('standard:')) {
+        setStandardSavedHighlights((prev) => [...prev, { cfiRange, text }]);
       }
     } catch (e) {
       Alert.alert('划线保存失败', e.message || '请稍后重试');
@@ -954,6 +966,50 @@ function ReaderInner({
     return `standard:${chapter?.id || 'unknown'}:${paragraphIndex}`;
   }
 
+  function getStandardRangeText(range = standardRangeSelection) {
+    if (!range) return '';
+    const start = Math.min(range.start, range.end);
+    const end = Math.max(range.start, range.end);
+    return range.chunks.slice(start, end + 1).join('').trim();
+  }
+
+  function beginStandardSelection(block, chunkIndex, chunks) {
+    const paragraphIndex = block.paragraphIndex;
+    setStandardRangeSelection({
+      paragraphIndex,
+      cfiRange: makeStandardCfi(paragraphIndex),
+      chunks,
+      start: chunkIndex,
+      end: chunkIndex,
+    });
+    setSelection(null);
+  }
+
+  function extendStandardSelection(block, chunkIndex, chunks) {
+    if (standardRangeSelection?.paragraphIndex === block.paragraphIndex) {
+      setStandardRangeSelection((prev) => ({ ...prev, chunks, end: chunkIndex }));
+      return;
+    }
+    beginStandardSelection(block, chunkIndex, chunks);
+  }
+
+  function isStandardChunkSelected(block, chunkIndex) {
+    if (!standardRangeSelection || standardRangeSelection.paragraphIndex !== block.paragraphIndex) return false;
+    const start = Math.min(standardRangeSelection.start, standardRangeSelection.end);
+    const end = Math.max(standardRangeSelection.start, standardRangeSelection.end);
+    return chunkIndex >= start && chunkIndex <= end;
+  }
+
+  function isStandardChunkHighlighted(block, chunk) {
+    const cfiRange = makeStandardCfi(block.paragraphIndex);
+    const text = String(chunk || '').trim();
+    if (!text) return false;
+    return standardSavedHighlights.some((h) => (
+      h.cfiRange === cfiRange &&
+      (String(h.text || '').includes(text) || text.includes(String(h.text || '').trim()))
+    ));
+  }
+
   const bodyFont = BODY_FONT_OPTIONS.find((o) => o.key === bodyFontKey) || BODY_FONT_OPTIONS[0];
   const standardFontFamily = bodyFont.asset;
   const standardFontSize = Math.round(fontSizePt * 1.35);
@@ -987,6 +1043,8 @@ function ReaderInner({
 
   function goStandardPrev() {
     if (closeReaderPanels()) return;
+    setSelection(null);
+    setStandardRangeSelection(null);
     if (standardPageIndex > 0) {
       setStandardPageIndex((prev) => Math.max(0, prev - 1));
       return;
@@ -999,6 +1057,8 @@ function ReaderInner({
 
   function goStandardNext() {
     if (closeReaderPanels()) return;
+    setSelection(null);
+    setStandardRangeSelection(null);
     if (standardPageIndex < standardPages.length - 1) {
       setStandardPageIndex((prev) => Math.min(standardPages.length - 1, prev + 1));
       return;
@@ -1027,6 +1087,10 @@ function ReaderInner({
       }
     },
   }), [readerMode, readerPanelOpen, standardPageIndex, standardPages.length, standardChapterIndex, chapters]);
+
+  const activeSelection = standardRangeSelection
+    ? { text: getStandardRangeText(), cfiRange: standardRangeSelection.cfiRange, standardRange: true }
+    : selection;
 
   return (
     <SafeAreaView edges={['bottom', 'left', 'right']} style={[styles.safe, { backgroundColor: THEMES[themeName].body.background }]}>
@@ -1331,15 +1395,27 @@ function ReaderInner({
                             bodyFont.key === 'sans' && { fontWeight: '700' },
                           ]}
                         >
-                          {splitStandardSelectionChunks(block.text).map((chunk, chunkIndex) => (
-                            <Text
-                              key={`${key}-chunk-${chunkIndex}`}
-                              suppressHighlighting={false}
-                              onLongPress={() => setSelection({ text: chunk.trim(), cfiRange: makeStandardCfi(block.paragraphIndex) })}
-                            >
-                              {chunk}
-                            </Text>
-                          ))}
+                          {(() => {
+                            const chunks = splitStandardSelectionChunks(block.text);
+                            return chunks.map((chunk, chunkIndex) => {
+                              const selected = isStandardChunkSelected(block, chunkIndex);
+                              const highlighted = isStandardChunkHighlighted(block, chunk);
+                              return (
+                                <Text
+                                  key={`${key}-chunk-${chunkIndex}`}
+                                  suppressHighlighting={false}
+                                  onPress={() => standardRangeSelection ? extendStandardSelection(block, chunkIndex, chunks) : undefined}
+                                  onLongPress={() => beginStandardSelection(block, chunkIndex, chunks)}
+                                  style={[
+                                    highlighted && styles.standardHighlightedText,
+                                    selected && styles.standardSelectedText,
+                                  ]}
+                                >
+                                  {chunk}
+                                </Text>
+                              );
+                            });
+                          })()}
                         </Text>
                       );
                     })}
@@ -1405,15 +1481,16 @@ function ReaderInner({
         )}
       </View>
 
-      {!!selection && (
+      {!!activeSelection && (
         <View style={[styles.selectionBar, { backgroundColor: uiTheme.text, borderRadius: uiTheme.radius }]}>
-          <Text style={[styles.selectionBarText, { color: uiTheme.bg }]} numberOfLines={1}>“{selection.text}”</Text>
+          <Text style={[styles.selectionBarText, { color: uiTheme.bg }]} numberOfLines={1}>“{activeSelection.text}”</Text>
           <View style={styles.selectionBarActions}>
             <TouchableOpacity
               style={[styles.selectionBtn, { backgroundColor: uiTheme.accent, borderRadius: uiTheme.radius }]}
               onPress={async () => {
-                await handleHighlight(selection.cfiRange, selection.text);
+                await handleHighlight(activeSelection.cfiRange, activeSelection.text);
                 setSelection(null);
+                setStandardRangeSelection(null);
               }}
             >
               <Text style={[styles.selectionBtnText, { color: uiTheme.textOnAccent }]}>划线</Text>
@@ -1421,14 +1498,21 @@ function ReaderInner({
             <TouchableOpacity
               style={[styles.selectionBtn, { backgroundColor: uiTheme.accent, borderRadius: uiTheme.radius }]}
               onPress={() => {
-                const { text, cfiRange } = selection;
+                const { text, cfiRange } = activeSelection;
                 setSelection(null);
+                setStandardRangeSelection(null);
                 openChat(text, cfiRange);
               }}
             >
               <Text style={[styles.selectionBtnText, { color: uiTheme.textOnAccent }]}>问AI</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={styles.selectionCloseBtn} onPress={() => setSelection(null)}>
+            <TouchableOpacity
+              style={styles.selectionCloseBtn}
+              onPress={() => {
+                setSelection(null);
+                setStandardRangeSelection(null);
+              }}
+            >
               <Text style={[styles.selectionCloseBtnText, { color: uiTheme.bg }]}>✕</Text>
             </TouchableOpacity>
           </View>
@@ -1600,6 +1684,8 @@ const styles = StyleSheet.create({
   standardReaderContent: { flex: 1, paddingHorizontal: 20, paddingTop: 12, paddingBottom: 8, overflow: 'hidden' },
   standardChapterTitle: { fontSize: 24, lineHeight: 34, fontWeight: '700', marginBottom: 22 },
   standardParagraph: { marginBottom: 6 },
+  standardSelectedText: { backgroundColor: 'rgba(217, 155, 68, 0.38)' },
+  standardHighlightedText: { backgroundColor: 'rgba(255, 213, 79, 0.34)' },
   standardInlineHeading: { fontSize: 17, lineHeight: 24, fontWeight: '700', marginBottom: 6 },
   standardMediaBlock: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 2 },
   standardImage: { width: '100%', height: '100%' },
