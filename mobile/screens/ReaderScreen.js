@@ -1295,7 +1295,6 @@ function ReaderInner({
       return;
     }
     if (data?.type === 'standardSelection' && data.text) {
-      setStandardRangeSelection(null);
       setSelection({ text: data.text, cfiRange: data.cfiRange || makeStandardCfi(0) });
       return;
     }
