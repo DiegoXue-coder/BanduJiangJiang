@@ -405,6 +405,19 @@ export async function getConceptGraphBuildStatus() {
   return appFetch('/app/concept-graph/build-status');
 }
 
+// 听书语音速度诊断：只上报各阶段耗时和长度，不上传录音/完整问题/完整回答。
+export async function submitVoiceLatencyMetric(payload) {
+  return appFetch('/app/voice-latency-metrics', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function listVoiceLatencyMetrics(limit = 50) {
+  return appFetch(`/app/voice-latency-metrics?limit=${encodeURIComponent(limit)}`);
+}
+
 // ── 阶段十四：测试阶段Bug反馈 ────────────────────────────────────────
 // 相册选图+文字描述，不做程序自动截屏（避免额外的权限/技术复杂度，决策层
 // 拍板范围）。appFetch 不手动设 Content-Type——RN 的 fetch 遇到 FormData

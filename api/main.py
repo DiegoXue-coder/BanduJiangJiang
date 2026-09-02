@@ -233,6 +233,21 @@ async def init_db():
                 created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
         """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS voice_latency_metrics (
+                id            BIGSERIAL PRIMARY KEY,
+                user_id       BIGINT NOT NULL REFERENCES users(id),
+                created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                book_id       TEXT NOT NULL DEFAULT '',
+                book_title    TEXT NOT NULL DEFAULT '',
+                chapter_title TEXT NOT NULL DEFAULT '',
+                platform      TEXT NOT NULL DEFAULT '',
+                reason        TEXT NOT NULL DEFAULT '',
+                summary       TEXT NOT NULL DEFAULT '',
+                metrics       JSONB NOT NULL DEFAULT '{}'::jsonb,
+                meta          JSONB NOT NULL DEFAULT '{}'::jsonb
+            )
+        """)
     print("[DB] 初始化完成，pgvector 已启用")
 
 @asynccontextmanager
@@ -535,6 +550,16 @@ class HistorySaveRequest(BaseModel):
     selection: str = ""
     cfi_location: str = ""
     style: str = "simple"
+
+class VoiceLatencyMetricIn(BaseModel):
+    book_id: str = ""
+    book_title: str = ""
+    chapter_title: str = ""
+    platform: str = ""
+    reason: str = ""
+    summary: str = ""
+    metrics: dict = {}
+    meta: dict = {}
 
 # ── 手机端 App 请求/响应模型（WBS 阶段一骨架）──────────────────────
 
@@ -3914,6 +3939,52 @@ async def app_submit_bug_report(
             VALUES ($1, $2, $3)
         """, user_id, image_path, description)
     return {"ok": True}
+
+@app.post("/app/voice-latency-metrics")
+async def app_submit_voice_latency_metric(req: VoiceLatencyMetricIn, user_id: int = CurrentUser):
+    """听书语音速度诊断：手机端每轮语音问答结束后上报纯耗时数据。
+    不上传录音、完整问题或完整回答，只保留阶段耗时和字符数，方便工程侧
+    后台拉样本分析瓶颈。"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO voice_latency_metrics
+                (user_id, book_id, book_title, chapter_title, platform, reason, summary, metrics, meta)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb)
+        """, user_id, req.book_id, req.book_title, req.chapter_title, req.platform,
+            req.reason, req.summary,
+            json.dumps(req.metrics, ensure_ascii=False),
+            json.dumps(req.meta, ensure_ascii=False))
+    return {"ok": True}
+
+@app.get("/app/voice-latency-metrics")
+async def app_list_voice_latency_metrics(limit: int = 50, user_id: int | None = None, _=ExtAuth):
+    """管理用速度样本查询入口。limit 默认最近 50 条；必要时可按 user_id 过滤。"""
+    limit = max(1, min(limit, 200))
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if user_id is not None:
+            rows = await conn.fetch("""
+                SELECT vlm.id, vlm.user_id, u.username, vlm.created_at,
+                       vlm.book_id, vlm.book_title, vlm.chapter_title,
+                       vlm.platform, vlm.reason, vlm.summary, vlm.metrics, vlm.meta
+                FROM voice_latency_metrics vlm
+                JOIN users u ON u.id = vlm.user_id
+                WHERE vlm.user_id = $1
+                ORDER BY vlm.created_at DESC
+                LIMIT $2
+            """, user_id, limit)
+        else:
+            rows = await conn.fetch("""
+                SELECT vlm.id, vlm.user_id, u.username, vlm.created_at,
+                       vlm.book_id, vlm.book_title, vlm.chapter_title,
+                       vlm.platform, vlm.reason, vlm.summary, vlm.metrics, vlm.meta
+                FROM voice_latency_metrics vlm
+                JOIN users u ON u.id = vlm.user_id
+                ORDER BY vlm.created_at DESC
+                LIMIT $1
+            """, limit)
+    return [dict(r) for r in rows]
 
 @app.get("/app/bug-reports")
 async def app_list_bug_reports(_=ExtAuth):

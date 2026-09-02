@@ -25,7 +25,7 @@ import {
 } from '@tabler/icons-react-native';
 import {
   getBookContext, getChapterText, getTtsPlayUrl, transcribeAudio,
-  streamAsk, saveHighlight, saveQaHistory, classifyIntent,
+  streamAsk, saveHighlight, saveQaHistory, classifyIntent, submitVoiceLatencyMetric,
 } from '../lib/api';
 import { useAuthGate } from '../lib/authGate';
 
@@ -566,6 +566,46 @@ export default function ListenScreen({ route, navigation }) {
     return parts.length ? `本轮耗时：${parts.join(' / ')}` : '';
   }
 
+  function buildHfTimingMetrics(timing) {
+    const m = timing?.marks || {};
+    const diff = (from, to) => (
+      m[from] && m[to] ? Math.max(0, m[to] - m[from]) : null
+    );
+    const totalEnd = m.resume_audio_start || timing?.lastAt || null;
+    return {
+      recording_ms: diff('recording_started', 'endpoint_end'),
+      asr_ms: diff('asr_start', 'asr_end'),
+      intent_ms: diff('intent_start', 'intent_end'),
+      llm_first_delta_ms: diff('llm_start', 'llm_first_delta'),
+      llm_total_ms: diff('llm_start', 'llm_done'),
+      tts_to_audio_start_ms: diff('llm_done', 'answer_audio_start'),
+      answer_play_ms: diff('answer_audio_start', 'answer_play_end'),
+      resume_to_audio_start_ms: diff('resume_start', 'resume_audio_start'),
+      total_ms: m.start && totalEnd ? Math.max(0, totalEnd - m.start) : null,
+    };
+  }
+
+  function uploadHfTiming(timing, summary) {
+    if (!summary || !timing?.marks) return;
+    submitVoiceLatencyMetric({
+      book_id: String(bookId || ''),
+      book_title: bookTitle || '',
+      chapter_title: chapterTitle || '',
+      platform: Platform.OS,
+      reason: timing.reason || '',
+      summary,
+      metrics: buildHfTimingMetrics(timing),
+      meta: timing.meta || {},
+    }).catch((e) => {
+      console.log(`[免提计时汇总] 后台上报失败：${e.message || e}`);
+    });
+  }
+
+  function setHfTimingMeta(patch) {
+    if (!hfTimingRef.current) return;
+    hfTimingRef.current.meta = { ...(hfTimingRef.current.meta || {}), ...patch };
+  }
+
   function finishHfTiming(label) {
     if (label) markHfTiming(label);
     const timing = hfTimingRef.current;
@@ -573,6 +613,7 @@ export default function ListenScreen({ route, navigation }) {
     if (summary) {
       console.log(`[免提计时汇总] ${summary}`);
       setHfTimingSummary(summary);
+      uploadHfTiming(timing, summary);
     }
     hfTimingRef.current = null;
     hfResumePendingRef.current = false;
@@ -1078,6 +1119,7 @@ export default function ListenScreen({ route, navigation }) {
       markHfTiming('开始ASR识别', 'asr_start');
       const text = await transcribeAudio(uri, FileSystem.uploadAsync, FileSystem.FileSystemUploadType);
       markHfTiming(`ASR识别完成 chars=${(text || '').trim().length}`, 'asr_end');
+      setHfTimingMeta({ asrTextChars: (text || '').trim().length });
       return (text || '').trim();
     } catch (e) {
       markHfTiming(`录音/ASR失败 ${e.message || e}`);
@@ -1130,6 +1172,7 @@ export default function ListenScreen({ route, navigation }) {
     if (!hfActiveRef.current) return;
     hfReplyInterruptingRef.current = false;
     markHfTiming(`开始AI问答 questionChars=${question.length}`);
+    setHfTimingMeta({ questionChars: question.length });
     const chapter = chaptersRef.current[posRef.current.chapterIdx];
     let replyWasInterrupted = false;
     let sawFirstDelta = false;
@@ -1156,6 +1199,7 @@ export default function ListenScreen({ route, navigation }) {
           onDone: async (answer) => {
             hfAbortRef.current = null;
             markHfTiming(`AI回复完成 answerChars=${(answer || '').length}`, 'llm_done');
+            setHfTimingMeta({ answerChars: (answer || '').length });
             const fakeCfi = `listen:${chapter?.id}:${posRef.current.paragraphIdx}`;
             saveQaHistory({
               bookId, bookTitle, chapterTitle: chapter?.title || '',
