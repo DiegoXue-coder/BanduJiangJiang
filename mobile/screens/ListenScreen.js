@@ -95,8 +95,17 @@ const AUTO_LISTEN_WINDOW_MS = 4000;
 // 包含"算了"这类词被误判成"继续"指令（比如"算了这段的账目是什么意思"
 // 这种问题不应该被拦截）。
 const CONTINUE_VOICE_PATTERNS = ['继续', '没事', '不问了', '算了', '好了', '行了', '够了', '不用了'];
-const CONTINUE_READING_VOICE_PATTERNS = ['继续读', '继续念', '继续听', '接着读', '接着念', '接着听', '往下读', '往下念', '读下去', '念下去'];
-const FOLLOW_UP_VOICE_PATTERNS = ['继续解释', '继续讲', '继续说', '接着解释', '接着讲', '再讲讲', '展开讲'];
+const CONTINUE_READING_VOICE_PATTERNS = [
+  '继续读', '继续念', '继续听', '继续讲述', '继续讲书', '继续正文', '继续原文',
+  '接着读', '接着念', '接着听', '接着讲述', '接着讲书',
+  '往下读', '往下念', '读下去', '念下去', '讲下去', '说下去',
+];
+// 听书页的默认语境是回到正文讲述，所以"继续讲/继续说/接着讲"这种
+// 模糊说法不拦截为追问；只有明确要求AI继续解释/讲解时才留在问答线。
+const FOLLOW_UP_VOICE_PATTERNS = [
+  '继续解释', '继续讲解', '接着解释', '接着讲解',
+  '再解释', '再讲讲', '展开讲', '详细讲',
+];
 function isContinueVoiceCommand(text) {
   const t = (text || '').trim();
   if (!t || t.length > 14) return false;
