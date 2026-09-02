@@ -1,11 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View, Text, TouchableOpacity, StyleSheet, ActivityIndicator, Alert,
-  Modal, FlatList, PanResponder, Platform, useWindowDimensions, Image,
+  Modal, FlatList, PanResponder, Platform, useWindowDimensions,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Reader, useReader } from '@epubjs-react-native/core';
 import { useFileSystem } from '@epubjs-react-native/expo-file-system';
+import { WebView } from 'react-native-webview';
 import { BottomSheetModal, BottomSheetBackdrop } from '@gorhom/bottom-sheet';
 import { IconList, IconMessageCircle, IconBrightness, IconTextSize, IconHeadphones } from '@tabler/icons-react-native';
 import { Asset } from 'expo-asset';
@@ -141,22 +142,125 @@ function findStandardPageBreak(text, target) {
   return Math.max(min, Math.min(target, text.length));
 }
 
-function splitStandardSelectionChunks(text) {
-  const value = String(text || '').trim();
-  if (!value) return [];
-  const chunks = [];
-  let buffer = '';
-  const hardMax = 34;
-  for (const char of value) {
-    buffer += char;
-    const shouldBreak = /[。！？；：，、,.!?;:]/.test(char) && buffer.length >= 8;
-    if (shouldBreak || buffer.length >= hardMax) {
-      chunks.push(buffer);
-      buffer = '';
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function escapeRegExp(value) {
+  return String(value ?? '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function renderStandardTextHtml(text, cfiRange, highlights) {
+  let html = escapeHtml(text);
+  const related = (highlights || [])
+    .filter((h) => h.cfiRange === cfiRange && h.text)
+    .map((h) => String(h.text).trim())
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length);
+  related.forEach((highlight) => {
+    html = html.replace(
+      new RegExp(escapeRegExp(escapeHtml(highlight)), 'g'),
+      `<mark>${escapeHtml(highlight)}</mark>`,
+    );
+  });
+  return html;
+}
+
+function buildStandardPageHtml({
+  blocks,
+  fontFamily,
+  fontCssFamily,
+  fontBase64,
+  fontWeight,
+  fontSize,
+  lineHeight,
+  theme,
+  accent,
+  highlights,
+  chapterId,
+}) {
+  const faceCss = fontBase64
+    ? `@font-face{font-family:"${fontFamily}";src:url("data:font/truetype;charset=utf-8;base64,${fontBase64}") format("truetype");font-weight:${fontWeight};font-style:normal;}`
+    : '';
+  const bodyHtml = (blocks || []).map((block) => {
+    const cfiRange = block.type === 'text' ? `standard:${chapterId || 'unknown'}:${block.paragraphIndex}` : '';
+    if (block.type === 'image') {
+      return `<figure class="media"><img src="${escapeHtml(block.uri)}" /></figure>`;
     }
-  }
-  if (buffer) chunks.push(buffer);
-  return chunks;
+    if (block.type === 'table') {
+      const rows = (block.rows || []).slice(0, 14).map((row) => (
+        `<tr>${row.map((cell) => `<td>${escapeHtml(cell)}</td>`).join('')}</tr>`
+      )).join('');
+      return `<table>${rows}</table>`;
+    }
+    if (block.type === 'heading') {
+      return `<h2>${escapeHtml(block.text)}</h2>`;
+    }
+    return `<p data-cfi="${escapeHtml(cfiRange)}">${renderStandardTextHtml(block.text, cfiRange, highlights)}</p>`;
+  }).join('');
+  return `<!doctype html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <style>
+    ${faceCss}
+    html,body{margin:0;padding:0;background:${theme.background};color:${theme.color};height:100%;overflow:hidden;-webkit-user-select:text;user-select:text;}
+    body{font-family:${fontCssFamily};font-size:${fontSize}px;line-height:${lineHeight}px;-webkit-touch-callout:default;}
+    #page{box-sizing:border-box;height:100vh;overflow:hidden;padding:12px 20px 8px;}
+    p{margin:0 0 6px;}
+    h2{margin:0 0 6px;color:${accent};font-size:17px;line-height:24px;font-weight:700;}
+    mark{background:rgba(255,213,79,.38);color:inherit;padding:0 1px;}
+    figure.media{margin:2px 0 4px;height:72vh;display:flex;align-items:center;justify-content:center;}
+    figure.media img{max-width:100%;max-height:100%;object-fit:contain;}
+    table{width:100%;border-collapse:collapse;margin:4px 0;font-size:11px;line-height:16px;}
+    td{border:1px solid currentColor;padding:5px 6px;vertical-align:top;}
+    ::selection{background:rgba(217,155,68,.42);}
+  </style>
+</head>
+<body>
+  <main id="page">${bodyHtml}</main>
+  <script>
+    (function(){
+      var startX=0,startY=0,startT=0,moved=false;
+      function post(payload){ window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify(payload)); }
+      function hasSelection(){ var s=window.getSelection && window.getSelection(); return !!(s && s.toString().trim()); }
+      document.addEventListener('selectionchange', function(){
+        clearTimeout(window.__selTimer);
+        window.__selTimer=setTimeout(function(){
+          var sel=window.getSelection();
+          var text=sel ? sel.toString().trim() : '';
+          if(!text) return;
+          var node=sel.anchorNode;
+          var el=node && (node.nodeType===1 ? node : node.parentElement);
+          while(el && !el.dataset.cfi) el=el.parentElement;
+          post({type:'standardSelection', text:text, cfiRange:(el && el.dataset.cfi) || 'standard:unknown'});
+        }, 160);
+      });
+      document.addEventListener('touchstart', function(e){
+        var t=e.changedTouches[0]; startX=t.clientX; startY=t.clientY; startT=Date.now(); moved=false;
+      }, {passive:true});
+      document.addEventListener('touchmove', function(e){
+        var t=e.changedTouches[0]; if(Math.abs(t.clientX-startX)>18 || Math.abs(t.clientY-startY)>18) moved=true;
+      }, {passive:true});
+      document.addEventListener('touchend', function(e){
+        if(hasSelection()) return;
+        var t=e.changedTouches[0], dx=t.clientX-startX, dy=t.clientY-startY;
+        if(Math.abs(dx)>54 && Math.abs(dx)>Math.abs(dy)*1.45){ post({type:dx<0?'standardNext':'standardPrev'}); return; }
+        if(!moved && Date.now()-startT<420){
+          var w=window.innerWidth || document.documentElement.clientWidth;
+          if(t.clientX < w*.14) post({type:'standardPrev'});
+          if(t.clientX > w*.86) post({type:'standardNext'});
+        }
+      }, {passive:true});
+    })();
+  </script>
+</body>
+</html>`;
 }
 
 function paginateStandardBlocks(blocks, fontSizePt, pageWidth, pageHeight) {
@@ -446,12 +550,12 @@ function ReaderInner({
   const [standardChapterError, setStandardChapterError] = useState('');
   const [readerSettingsLoaded, setReaderSettingsLoaded] = useState(false);
   const [fontAssetReport, setFontAssetReport] = useState([]);
+  const [standardFontBase64, setStandardFontBase64] = useState('');
   // 长按原生菜单（menuItems）在拖动选区手柄调整范围后不会重新弹出——这是
   // react-native-webview 自身的已知限制，不是我们代码能修的。改用这个悬浮条
   // 兜底：只要 epub.js 报了新的选区（onSelected，拖动调整后也会正常触发），
   // 就显示"划线/问AI"按钮，不依赖那个容易失效的原生菜单。
   const [selection, setSelection] = useState(null); // { text, cfiRange }
-  const [standardRangeSelection, setStandardRangeSelection] = useState(null);
   const [standardSavedHighlights, setStandardSavedHighlights] = useState([]);
   const progressTimer = useRef(null);
   const annotationsRestored = useRef(false);
@@ -498,6 +602,24 @@ function ReaderInner({
         .map((h) => ({ cfiRange: h.cfi_location, text: h.highlighted_text })),
     );
   }, [initialAnnotations]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const currentOpt = BODY_FONT_OPTIONS.find((o) => o.key === bodyFontKey) || BODY_FONT_OPTIONS[0];
+    Asset.fromModule(FONT_ASSETS[currentOpt.asset]).downloadAsync()
+      .then(async (asset) => {
+        const url = asset.localUri || asset.uri;
+        return FileSystem.readAsStringAsync(url, { encoding: FileSystem.EncodingType.Base64 });
+      })
+      .then((base64) => {
+        if (!cancelled) setStandardFontBase64(base64);
+      })
+      .catch((e) => {
+        console.warn('[标准阅读字体] 加载失败', e.message || e);
+        if (!cancelled) setStandardFontBase64('');
+      });
+    return () => { cancelled = true; };
+  }, [bodyFontKey]);
 
   useEffect(() => {
     if (readerMode !== 'standard') return;
@@ -966,52 +1088,7 @@ function ReaderInner({
     return `standard:${chapter?.id || 'unknown'}:${paragraphIndex}`;
   }
 
-  function getStandardRangeText(range = standardRangeSelection) {
-    if (!range) return '';
-    const start = Math.min(range.start, range.end);
-    const end = Math.max(range.start, range.end);
-    return range.chunks.slice(start, end + 1).join('').trim();
-  }
-
-  function beginStandardSelection(block, chunkIndex, chunks) {
-    const paragraphIndex = block.paragraphIndex;
-    setStandardRangeSelection({
-      paragraphIndex,
-      cfiRange: makeStandardCfi(paragraphIndex),
-      chunks,
-      start: chunkIndex,
-      end: chunkIndex,
-    });
-    setSelection(null);
-  }
-
-  function extendStandardSelection(block, chunkIndex, chunks) {
-    if (standardRangeSelection?.paragraphIndex === block.paragraphIndex) {
-      setStandardRangeSelection((prev) => ({ ...prev, chunks, end: chunkIndex }));
-      return;
-    }
-    beginStandardSelection(block, chunkIndex, chunks);
-  }
-
-  function isStandardChunkSelected(block, chunkIndex) {
-    if (!standardRangeSelection || standardRangeSelection.paragraphIndex !== block.paragraphIndex) return false;
-    const start = Math.min(standardRangeSelection.start, standardRangeSelection.end);
-    const end = Math.max(standardRangeSelection.start, standardRangeSelection.end);
-    return chunkIndex >= start && chunkIndex <= end;
-  }
-
-  function isStandardChunkHighlighted(block, chunk) {
-    const cfiRange = makeStandardCfi(block.paragraphIndex);
-    const text = String(chunk || '').trim();
-    if (!text) return false;
-    return standardSavedHighlights.some((h) => (
-      h.cfiRange === cfiRange &&
-      (String(h.text || '').includes(text) || text.includes(String(h.text || '').trim()))
-    ));
-  }
-
   const bodyFont = BODY_FONT_OPTIONS.find((o) => o.key === bodyFontKey) || BODY_FONT_OPTIONS[0];
-  const standardFontFamily = bodyFont.asset;
   const standardFontSize = Math.round(fontSizePt * 1.35);
   const standardLineHeight = Math.round(standardFontSize * STANDARD_READING_LINE_HEIGHT);
   const standardPages = useMemo(
@@ -1024,6 +1101,30 @@ function ReaderInner({
     [standardChapterText, fontSizePt, windowSize.width, windowSize.height],
   );
   const standardPage = standardPages[Math.min(standardPageIndex, standardPages.length - 1)] || [];
+  const standardChapterId = chapters?.[standardChapterIndex]?.id || '';
+  const standardPageHtml = useMemo(() => buildStandardPageHtml({
+    blocks: standardPage,
+    fontFamily: bodyFont.family,
+    fontCssFamily: bodyFont.cssFamily,
+    fontBase64: standardFontBase64,
+    fontWeight: bodyFont.profile.weight || 400,
+    fontSize: standardFontSize,
+    lineHeight: standardLineHeight,
+    theme: THEMES[themeName].body,
+    accent: uiTheme.accent,
+    highlights: standardSavedHighlights,
+    chapterId: standardChapterId,
+  }), [
+    standardPage,
+    bodyFont,
+    standardFontBase64,
+    standardFontSize,
+    standardLineHeight,
+    themeName,
+    uiTheme.accent,
+    standardSavedHighlights,
+    standardChapterId,
+  ]);
   const visibleChapterTitle = readerMode === 'standard'
     ? (standardChapterText?.title || chapters?.[standardChapterIndex]?.title || bookTitle)
     : (currentSectionTitle || bookTitle);
@@ -1044,7 +1145,6 @@ function ReaderInner({
   function goStandardPrev() {
     if (closeReaderPanels()) return;
     setSelection(null);
-    setStandardRangeSelection(null);
     if (standardPageIndex > 0) {
       setStandardPageIndex((prev) => Math.max(0, prev - 1));
       return;
@@ -1058,7 +1158,6 @@ function ReaderInner({
   function goStandardNext() {
     if (closeReaderPanels()) return;
     setSelection(null);
-    setStandardRangeSelection(null);
     if (standardPageIndex < standardPages.length - 1) {
       setStandardPageIndex((prev) => Math.min(standardPages.length - 1, prev + 1));
       return;
@@ -1069,28 +1168,28 @@ function ReaderInner({
     }
   }
 
-  const standardPagePanResponder = useMemo(() => PanResponder.create({
-    onStartShouldSetPanResponder: () => false,
-    onMoveShouldSetPanResponder: (_, gesture) =>
-      readerMode === 'standard' &&
-      Math.abs(gesture.dx) > 34 &&
-      Math.abs(gesture.dx) > Math.abs(gesture.dy) * 1.6,
-    onPanResponderRelease: (_, gesture) => {
-      if (readerPanelOpen) {
-        closeReaderPanels();
-        return;
-      }
-      if (gesture.dx < -48) {
-        goStandardNext();
-      } else if (gesture.dx > 48) {
-        goStandardPrev();
-      }
-    },
-  }), [readerMode, readerPanelOpen, standardPageIndex, standardPages.length, standardChapterIndex, chapters]);
+  function handleStandardWebViewMessage(event) {
+    let data;
+    try {
+      data = JSON.parse(event.nativeEvent.data);
+    } catch {
+      return;
+    }
+    if (data?.type === 'standardSelection' && data.text) {
+      setStandardRangeSelection(null);
+      setSelection({ text: data.text, cfiRange: data.cfiRange || makeStandardCfi(0) });
+      return;
+    }
+    if (data?.type === 'standardPrev') {
+      goStandardPrev();
+      return;
+    }
+    if (data?.type === 'standardNext') {
+      goStandardNext();
+    }
+  }
 
-  const activeSelection = standardRangeSelection
-    ? { text: getStandardRangeText(), cfiRange: standardRangeSelection.cfiRange, standardRange: true }
-    : selection;
+  const activeSelection = selection;
 
   return (
     <SafeAreaView edges={['bottom', 'left', 'right']} style={[styles.safe, { backgroundColor: THEMES[themeName].body.background }]}>
@@ -1333,96 +1432,19 @@ function ReaderInner({
               </View>
             ) : (
               <>
-                <View style={styles.standardReaderPage} {...standardPagePanResponder.panHandlers}>
-                  <View style={styles.standardReaderContent}>
-                    {standardPage.map((block, pageItemIndex) => {
-                      const key = `${standardChapterIndex}-${standardPageIndex}-${block.blockIndex ?? block.paragraphIndex}-${pageItemIndex}`;
-                      if (block.type === 'image') {
-                        return (
-                          <View key={key} style={styles.standardMediaBlock}>
-                            <Image source={{ uri: block.uri }} style={styles.standardImage} resizeMode="contain" />
-                          </View>
-                        );
-                      }
-                      if (block.type === 'table') {
-                        return (
-                          <View key={key} style={[styles.standardTable, { borderColor: uiTheme.cardBorder }]}>
-                            {(block.rows || []).slice(0, 12).map((row, rowIndex) => (
-                              <View key={`${key}-r${rowIndex}`} style={[styles.standardTableRow, { borderBottomColor: uiTheme.cardBorder }]}>
-                                {row.map((cell, cellIndex) => (
-                                  <Text
-                                    key={`${key}-c${rowIndex}-${cellIndex}`}
-                                    style={[
-                                      styles.standardTableCell,
-                                      { color: THEMES[themeName].body.color, borderRightColor: uiTheme.cardBorder },
-                                    ]}
-                                    numberOfLines={3}
-                                  >
-                                    {cell}
-                                  </Text>
-                                ))}
-                              </View>
-                            ))}
-                          </View>
-                        );
-                      }
-                      if (block.type === 'heading') {
-                        return (
-                          <Text
-                            key={key}
-                            style={[
-                              styles.standardInlineHeading,
-                              { color: uiTheme.accent, fontFamily: standardFontFamily },
-                              bodyFont.key === 'sans' && { fontWeight: '700' },
-                            ]}
-                            numberOfLines={2}
-                          >
-                            {block.text}
-                          </Text>
-                        );
-                      }
-                      return (
-                        <Text
-                          key={key}
-                          style={[
-                            styles.standardParagraph,
-                            {
-                              color: THEMES[themeName].body.color,
-                              fontFamily: standardFontFamily,
-                              fontSize: standardFontSize,
-                              lineHeight: standardLineHeight,
-                            },
-                            bodyFont.key === 'sans' && { fontWeight: '700' },
-                          ]}
-                        >
-                          {(() => {
-                            const chunks = splitStandardSelectionChunks(block.text);
-                            return chunks.map((chunk, chunkIndex) => {
-                              const selected = isStandardChunkSelected(block, chunkIndex);
-                              const highlighted = isStandardChunkHighlighted(block, chunk);
-                              return (
-                                <Text
-                                  key={`${key}-chunk-${chunkIndex}`}
-                                  suppressHighlighting={false}
-                                  onPress={() => standardRangeSelection ? extendStandardSelection(block, chunkIndex, chunks) : undefined}
-                                  onLongPress={() => beginStandardSelection(block, chunkIndex, chunks)}
-                                  style={[
-                                    highlighted && styles.standardHighlightedText,
-                                    selected && styles.standardSelectedText,
-                                  ]}
-                                >
-                                  {chunk}
-                                </Text>
-                              );
-                            });
-                          })()}
-                        </Text>
-                      );
-                    })}
-                  </View>
-                  <TouchableOpacity activeOpacity={1} style={styles.standardTapLeft} onPress={goStandardPrev} />
-                  <TouchableOpacity activeOpacity={1} style={styles.standardTapRight} onPress={goStandardNext} />
-                </View>
+                <WebView
+                  key={`${standardChapterIndex}-${standardPageIndex}-${bodyFontKey}-${themeName}-${standardFontBase64 ? 'font' : 'fallback'}`}
+                  originWhitelist={['*']}
+                  source={{ html: standardPageHtml }}
+                  style={styles.standardReaderPage}
+                  containerStyle={styles.standardReaderPage}
+                  onMessage={handleStandardWebViewMessage}
+                  showsVerticalScrollIndicator={false}
+                  showsHorizontalScrollIndicator={false}
+                  scrollEnabled={false}
+                  bounces={false}
+                  textInteractionEnabled
+                />
               </>
             )}
           </View>
@@ -1490,7 +1512,6 @@ function ReaderInner({
               onPress={async () => {
                 await handleHighlight(activeSelection.cfiRange, activeSelection.text);
                 setSelection(null);
-                setStandardRangeSelection(null);
               }}
             >
               <Text style={[styles.selectionBtnText, { color: uiTheme.textOnAccent }]}>划线</Text>
@@ -1500,7 +1521,6 @@ function ReaderInner({
               onPress={() => {
                 const { text, cfiRange } = activeSelection;
                 setSelection(null);
-                setStandardRangeSelection(null);
                 openChat(text, cfiRange);
               }}
             >
@@ -1510,7 +1530,6 @@ function ReaderInner({
               style={styles.selectionCloseBtn}
               onPress={() => {
                 setSelection(null);
-                setStandardRangeSelection(null);
               }}
             >
               <Text style={[styles.selectionCloseBtnText, { color: uiTheme.bg }]}>✕</Text>
@@ -1681,27 +1700,6 @@ const styles = StyleSheet.create({
   },
   standardReader: { flex: 1, position: 'relative' },
   standardReaderPage: { flex: 1, position: 'relative', overflow: 'hidden' },
-  standardReaderContent: { flex: 1, paddingHorizontal: 20, paddingTop: 12, paddingBottom: 8, overflow: 'hidden' },
-  standardChapterTitle: { fontSize: 24, lineHeight: 34, fontWeight: '700', marginBottom: 22 },
-  standardParagraph: { marginBottom: 6 },
-  standardSelectedText: { backgroundColor: 'rgba(217, 155, 68, 0.38)' },
-  standardHighlightedText: { backgroundColor: 'rgba(255, 213, 79, 0.34)' },
-  standardInlineHeading: { fontSize: 17, lineHeight: 24, fontWeight: '700', marginBottom: 6 },
-  standardMediaBlock: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 2 },
-  standardImage: { width: '100%', height: '100%' },
-  standardTable: { borderWidth: StyleSheet.hairlineWidth, marginVertical: 4 },
-  standardTableRow: { flexDirection: 'row', borderBottomWidth: StyleSheet.hairlineWidth },
-  standardTableCell: {
-    flex: 1,
-    minHeight: 34,
-    borderRightWidth: StyleSheet.hairlineWidth,
-    paddingHorizontal: 6,
-    paddingVertical: 6,
-    fontSize: 11,
-    lineHeight: 16,
-  },
-  standardTapLeft: { position: 'absolute', left: 0, top: 0, bottom: 0, width: '14%', zIndex: 8, elevation: 8 },
-  standardTapRight: { position: 'absolute', right: 0, top: 0, bottom: 0, width: '14%', zIndex: 8, elevation: 8 },
 
   controlPanel: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
