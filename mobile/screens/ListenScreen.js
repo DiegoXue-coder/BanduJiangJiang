@@ -464,6 +464,7 @@ export default function ListenScreen({ route, navigation }) {
   const [handsFreeEnabled, setHandsFreeEnabled] = useState(false);
   const [handsFreeMuted, setHandsFreeMuted] = useState(false);
   const [handsFreeStatus, setHandsFreeStatus] = useState('');
+  const [hfTimingSummary, setHfTimingSummary] = useState('');
   // 免提"一轮对话"独立状态机：''表示没有正在进行的免提轮次（这时候ambient
   // 的VAD监听按老逻辑跑），非空表示正在经历"暂停朗读→听问题→AI思考→
   // 念回答"这一整套流程，全程停留在朗读字幕这个视图里，不跳phase。
@@ -539,14 +540,52 @@ export default function ListenScreen({ route, navigation }) {
   const hfAbortRef = useRef(null);
   const hfReplyInterruptingRef = useRef(false);
   const hfTimingRef = useRef(null);
+  const hfResumePendingRef = useRef(false);
+
+  function formatHfMs(ms) {
+    if (!Number.isFinite(ms) || ms < 0) return '—';
+    if (ms < 1000) return `${Math.round(ms)}ms`;
+    return `${(ms / 1000).toFixed(1)}s`;
+  }
+
+  function buildHfTimingSummary(timing) {
+    if (!timing?.marks) return '';
+    const m = timing.marks;
+    const parts = [];
+    if (m.recording_started && m.endpoint_end) {
+      parts.push(`录音${formatHfMs(m.endpoint_end - m.recording_started)}`);
+    }
+    if (m.asr_start && m.asr_end) parts.push(`ASR${formatHfMs(m.asr_end - m.asr_start)}`);
+    if (m.intent_start && m.intent_end) parts.push(`意图${formatHfMs(m.intent_end - m.intent_start)}`);
+    if (m.llm_start && m.llm_first_delta) parts.push(`首字${formatHfMs(m.llm_first_delta - m.llm_start)}`);
+    if (m.llm_start && m.llm_done) parts.push(`回答${formatHfMs(m.llm_done - m.llm_start)}`);
+    if (m.llm_done && m.answer_audio_start) parts.push(`TTS出声${formatHfMs(m.answer_audio_start - m.llm_done)}`);
+    if (m.answer_audio_start && m.answer_play_end) parts.push(`播放${formatHfMs(m.answer_play_end - m.answer_audio_start)}`);
+    if (m.resume_start && m.resume_audio_start) parts.push(`续播${formatHfMs(m.resume_audio_start - m.resume_start)}`);
+    if (m.start) parts.push(`总计${formatHfMs((m.resume_audio_start || timing.lastAt) - m.start)}`);
+    return parts.length ? `本轮耗时：${parts.join(' / ')}` : '';
+  }
+
+  function finishHfTiming(label) {
+    if (label) markHfTiming(label);
+    const timing = hfTimingRef.current;
+    const summary = buildHfTimingSummary(timing);
+    if (summary) {
+      console.log(`[免提计时汇总] ${summary}`);
+      setHfTimingSummary(summary);
+    }
+    hfTimingRef.current = null;
+    hfResumePendingRef.current = false;
+  }
 
   function startHfTiming(reason) {
     const now = Date.now();
-    hfTimingRef.current = { reason, startedAt: now, lastAt: now };
+    hfTimingRef.current = { reason, startedAt: now, lastAt: now, marks: { start: now } };
+    setHfTimingSummary('');
     console.log(`[免提计时] ${reason} start`);
   }
 
-  function markHfTiming(label) {
+  function markHfTiming(label, key = null) {
     const now = Date.now();
     const timing = hfTimingRef.current;
     if (!timing) {
@@ -554,6 +593,7 @@ export default function ListenScreen({ route, navigation }) {
       return;
     }
     console.log(`[免提计时] ${label}: +${now - timing.lastAt}ms / total ${now - timing.startedAt}ms`);
+    if (key) timing.marks[key] = now;
     timing.lastAt = now;
   }
 
@@ -719,6 +759,10 @@ export default function ListenScreen({ route, navigation }) {
             setCurrentCaption(textToPlay);
             setCurrentSegCount({ idx: pi, total: paragraphs.length });
             console.log(`[听书诊断] 开始出声 章节="${chapter.title}" 第${pi + 1}/${paragraphs.length}段`);
+            if (hfResumePendingRef.current) {
+              markHfTiming('正文恢复开始播放', 'resume_audio_start');
+              finishHfTiming();
+            }
             // 这段刚出声，立刻在后台把下一段的TTS请求发出去（不等待），
             // 让加载时间跟当前段的播放时间重叠，减少段与段之间的停顿。
             const nextPi = pi + 1;
@@ -1007,7 +1051,7 @@ export default function ListenScreen({ route, navigation }) {
       });
       await recording.prepareToRecordAsync({ ...Audio.RecordingOptionsPresets.HIGH_QUALITY, isMeteringEnabled: true });
       await recording.startAsync();
-      markHfTiming('正式录音已开始');
+      markHfTiming('正式录音已开始', 'recording_started');
       hfRecordingRef.current = recording;
       if (IOS_EXTERNAL_PLAYBACK_HANDS_FREE && !voiceHoldActiveRef.current) {
         setTimeout(() => { hfListenResolveRef.current?.(); }, 0);
@@ -1027,13 +1071,13 @@ export default function ListenScreen({ route, navigation }) {
       hfRecordingRef.current = null;
       if (!rec) return null;
       await rec.stopAndUnloadAsync();
-      markHfTiming(`端点检测结束 speech=${speechEverDetected} elapsed=${elapsedMs}ms`);
+      markHfTiming(`端点检测结束 speech=${speechEverDetected} elapsed=${elapsedMs}ms`, 'endpoint_end');
       const uri = rec.getURI();
       await restorePlaybackAudioMode();
       if (!speechEverDetected) return null; // 全程没有真的检测到声音，不浪费一次识别请求
-      markHfTiming('开始ASR识别');
+      markHfTiming('开始ASR识别', 'asr_start');
       const text = await transcribeAudio(uri, FileSystem.uploadAsync, FileSystem.FileSystemUploadType);
-      markHfTiming(`ASR识别完成 chars=${(text || '').trim().length}`);
+      markHfTiming(`ASR识别完成 chars=${(text || '').trim().length}`, 'asr_end');
       return (text || '').trim();
     } catch (e) {
       markHfTiming(`录音/ASR失败 ${e.message || e}`);
@@ -1061,9 +1105,9 @@ export default function ListenScreen({ route, navigation }) {
     const chapter = chaptersRef.current[posRef.current.chapterIdx];
     let relevant = true;
     try {
-      markHfTiming('开始意图分类');
+      markHfTiming('开始意图分类', 'intent_start');
       relevant = await classifyIntent(text, bookTitle, chapter?.title || '');
-      markHfTiming(`意图分类完成 relevant=${relevant}`);
+      markHfTiming(`意图分类完成 relevant=${relevant}`, 'intent_end');
     } catch (e) {
       markHfTiming(`意图分类失败 ${e.message || e}`);
       relevant = true; // 判断这一步本身失败，保守当成是提问，交给下面真正的问答逻辑处理
@@ -1088,7 +1132,9 @@ export default function ListenScreen({ route, navigation }) {
     markHfTiming(`开始AI问答 questionChars=${question.length}`);
     const chapter = chaptersRef.current[posRef.current.chapterIdx];
     let replyWasInterrupted = false;
+    let sawFirstDelta = false;
     await new Promise((resolve) => {
+      markHfTiming('LLM请求开始', 'llm_start');
       hfAbortRef.current = streamAsk(
         {
           context: {
@@ -1101,10 +1147,15 @@ export default function ListenScreen({ route, navigation }) {
           history: [],
         },
         {
-          onDelta: () => {},
+          onDelta: () => {
+            if (!sawFirstDelta) {
+              sawFirstDelta = true;
+              markHfTiming('LLM首个增量返回', 'llm_first_delta');
+            }
+          },
           onDone: async (answer) => {
             hfAbortRef.current = null;
-            markHfTiming(`AI回复完成 answerChars=${(answer || '').length}`);
+            markHfTiming(`AI回复完成 answerChars=${(answer || '').length}`, 'llm_done');
             const fakeCfi = `listen:${chapter?.id}:${posRef.current.paragraphIdx}`;
             saveQaHistory({
               bookId, bookTitle, chapterTitle: chapter?.title || '',
@@ -1116,7 +1167,7 @@ export default function ListenScreen({ route, navigation }) {
             const epoch = epochRef.current;
             try {
               await playOneParagraph(answer, epoch, () => {
-                markHfTiming('AI回复TTS开始播放');
+                markHfTiming('AI回复TTS开始播放', 'answer_audio_start');
                 // 只在AI回答已经真正出声之后开启二次打断监听。上一版在
                 // 回答加载/TTS加载阶段就开环境监听，轻微杂音会把尚未完成
                 // 的第一轮回答打断，导致用户的问题没有任何回复。
@@ -1144,7 +1195,7 @@ export default function ListenScreen({ route, navigation }) {
               resolve();
               return;
             }
-            markHfTiming('AI回复播放结束');
+            markHfTiming('AI回复播放结束', 'answer_play_end');
             resolve();
           },
           onError: () => {
@@ -1177,7 +1228,8 @@ export default function ListenScreen({ route, navigation }) {
     setHfText('');
     const { chapterIdx, paragraphIdx } = posRef.current;
     epochRef.current += 1;
-    markHfTiming(`恢复正文 chapter=${chapterIdx} paragraph=${paragraphIdx}`);
+    hfResumePendingRef.current = true;
+    markHfTiming(`恢复正文 chapter=${chapterIdx} paragraph=${paragraphIdx}`, 'resume_start');
     playFrom(chapterIdx, paragraphIdx, epochRef.current);
     if (handsFreeEnabled && !handsFreeMuted && !IOS_EXTERNAL_PLAYBACK_HANDS_FREE) {
       setHandsFreeStatus('免提监听中');
@@ -1814,6 +1866,9 @@ export default function ListenScreen({ route, navigation }) {
                           {hfStage !== 'replying' && <View style={styles.voiceModeDot} />}
                         </View>
                         <Text style={styles.voiceModeStatusText}>{voiceModeStatus}</Text>
+                        {!!hfTimingSummary && (
+                          <Text style={styles.voiceTimingText}>{hfTimingSummary}</Text>
+                        )}
                       </TouchableOpacity>
                       <View style={styles.voiceModeActions}>
                         <TouchableOpacity
@@ -2070,6 +2125,7 @@ const styles = StyleSheet.create({
   voiceModeDot: { width: 11, height: 11, borderRadius: 5.5, backgroundColor: EMBER.inkSoft },
   voiceModeStopDot: { width: 16, height: 16, borderRadius: 5, backgroundColor: EMBER.inkSoft },
   voiceModeStatusText: { fontSize: 12.5, color: EMBER.inkSoft, textAlign: 'center', letterSpacing: 0.2 },
+  voiceTimingText: { fontSize: 10.5, color: EMBER.inkSoft, textAlign: 'center', lineHeight: 15, maxWidth: 310 },
   voiceModeActions: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 46, marginTop: 2 },
   voiceModeRoundBtn: {
     width: 74, height: 74, borderRadius: 37, alignItems: 'center', justifyContent: 'center',
