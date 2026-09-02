@@ -151,24 +151,79 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
-function escapeRegExp(value) {
-  return String(value ?? '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+function renderStandardTextHtml(text, cfiRange, highlights) {
+  return renderSelectableStandardText(text, cfiRange, highlights);
 }
 
-function renderStandardTextHtml(text, cfiRange, highlights) {
-  let html = escapeHtml(text);
-  const related = (highlights || [])
+function splitStandardTokens(text) {
+  const value = String(text || '');
+  const tokens = [];
+  let buffer = '';
+  let latin = '';
+  let bufferStart = 0;
+  let latinStart = 0;
+  let offset = 0;
+  function pushLatin() {
+    if (!latin) return;
+    tokens.push({ text: latin, start: latinStart, end: latinStart + latin.length });
+    latin = '';
+  }
+  function pushBuffer(force = false) {
+    if (!buffer) return;
+    if (force || buffer.length >= 2) {
+      tokens.push({ text: buffer, start: bufferStart, end: bufferStart + buffer.length });
+      buffer = '';
+    }
+  }
+  for (const char of value) {
+    if (/\s/.test(char)) {
+      pushLatin();
+      pushBuffer(true);
+      tokens.push({ text: char, start: offset, end: offset + char.length });
+      offset += char.length;
+      continue;
+    }
+    if (/[A-Za-z0-9]/.test(char)) {
+      pushBuffer(true);
+      if (!latin) latinStart = offset;
+      latin += char;
+      offset += char.length;
+      continue;
+    }
+    pushLatin();
+    if (/[。！？；：，、,.!?;:（）()《》“”‘’]/.test(char)) {
+      if (!buffer) bufferStart = offset;
+      buffer += char;
+      pushBuffer(true);
+      offset += char.length;
+      continue;
+    }
+    if (!buffer) bufferStart = offset;
+    buffer += char;
+    pushBuffer();
+    offset += char.length;
+  }
+  pushLatin();
+  pushBuffer(true);
+  return tokens.filter((token) => token.text.length > 0);
+}
+
+function renderSelectableStandardText(text, cfiRange, highlights) {
+  const value = String(text || '');
+  const ranges = (highlights || [])
     .filter((h) => h.cfiRange === cfiRange && h.text)
-    .map((h) => String(h.text).trim())
-    .filter(Boolean)
-    .sort((a, b) => b.length - a.length);
-  related.forEach((highlight) => {
-    html = html.replace(
-      new RegExp(escapeRegExp(escapeHtml(highlight)), 'g'),
-      `<mark>${escapeHtml(highlight)}</mark>`,
-    );
-  });
-  return html;
+    .map((h) => {
+      const selected = String(h.text || '').trim();
+      const start = selected ? value.indexOf(selected) : -1;
+      return start >= 0 ? { start, end: start + selected.length } : null;
+    })
+    .filter(Boolean);
+  return splitStandardTokens(value).map((token, index) => {
+    if (/^\s+$/.test(token.text)) return escapeHtml(token.text);
+    const highlighted = ranges.some((range) => token.start < range.end && token.end > range.start);
+    const className = highlighted ? 'tok hl' : 'tok';
+    return `<span class="${className}" data-idx="${index}">${escapeHtml(token.text)}</span>`;
+  }).join('');
 }
 
 function buildStandardPageHtml({
@@ -209,46 +264,103 @@ function buildStandardPageHtml({
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <style>
     ${faceCss}
-    html,body{margin:0;padding:0;background:${theme.background};color:${theme.color};height:100%;overflow:hidden;-webkit-user-select:text;user-select:text;}
-    body{font-family:${fontCssFamily};font-size:${fontSize}px;line-height:${lineHeight}px;-webkit-touch-callout:default;}
+    html,body{margin:0;padding:0;background:${theme.background};color:${theme.color};height:100%;overflow:hidden;-webkit-user-select:none;user-select:none;}
+    body{font-family:${fontCssFamily};font-size:${fontSize}px;line-height:${lineHeight}px;-webkit-touch-callout:none;touch-action:manipulation;}
     #page{box-sizing:border-box;height:100vh;overflow:hidden;padding:12px 20px 8px;}
     p{margin:0 0 6px;}
     h2{margin:0 0 6px;color:${accent};font-size:17px;line-height:24px;font-weight:700;}
     mark{background:rgba(255,213,79,.38);color:inherit;padding:0 1px;}
+    .tok{border-radius:2px;}
+    .tok.hl{background:rgba(255,213,79,.38);}
+    .tok.sel{background:rgba(217,155,68,.42);}
     figure.media{margin:2px 0 4px;height:72vh;display:flex;align-items:center;justify-content:center;}
     figure.media img{max-width:100%;max-height:100%;object-fit:contain;}
     table{width:100%;border-collapse:collapse;margin:4px 0;font-size:11px;line-height:16px;}
     td{border:1px solid currentColor;padding:5px 6px;vertical-align:top;}
-    ::selection{background:rgba(217,155,68,.42);}
   </style>
 </head>
 <body>
   <main id="page">${bodyHtml}</main>
   <script>
     (function(){
-      var startX=0,startY=0,startT=0,moved=false;
+      var startX=0,startY=0,startT=0,moved=false,selecting=false,longTimer=null,anchor=null,focus=null;
       function post(payload){ window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify(payload)); }
-      function hasSelection(){ var s=window.getSelection && window.getSelection(); return !!(s && s.toString().trim()); }
-      document.addEventListener('selectionchange', function(){
-        clearTimeout(window.__selTimer);
-        window.__selTimer=setTimeout(function(){
-          var sel=window.getSelection();
-          var text=sel ? sel.toString().trim() : '';
-          if(!text) return;
-          var node=sel.anchorNode;
-          var el=node && (node.nodeType===1 ? node : node.parentElement);
-          while(el && !el.dataset.cfi) el=el.parentElement;
-          post({type:'standardSelection', text:text, cfiRange:(el && el.dataset.cfi) || 'standard:unknown'});
-        }, 160);
-      });
+      function tokenFromPoint(x,y){
+        var el=document.elementFromPoint(x,y);
+        while(el && !(el.classList && el.classList.contains('tok'))) el=el.parentElement;
+        return el;
+      }
+      function tokenMeta(el){
+        if(!el) return null;
+        var p=el.closest ? el.closest('p[data-cfi]') : null;
+        if(!p) return null;
+        return {el:el,p:p,cfiRange:p.dataset.cfi,idx:Number(el.dataset.idx)};
+      }
+      function clearTokenSelection(){
+        var items=document.querySelectorAll('.tok.sel');
+        for(var i=0;i<items.length;i++) items[i].classList.remove('sel');
+      }
+      function markTokenRange(){
+        clearTokenSelection();
+        if(!anchor || !focus || anchor.cfiRange!==focus.cfiRange) return;
+        var start=Math.min(anchor.idx, focus.idx);
+        var end=Math.max(anchor.idx, focus.idx);
+        var tokens=anchor.p.querySelectorAll('.tok');
+        for(var i=start;i<=end;i++) if(tokens[i]) tokens[i].classList.add('sel');
+      }
+      function selectedTokenText(){
+        if(!anchor || !focus || anchor.cfiRange!==focus.cfiRange) return '';
+        var start=Math.min(anchor.idx, focus.idx);
+        var end=Math.max(anchor.idx, focus.idx);
+        var tokens=anchor.p.querySelectorAll('.tok');
+        var parts=[];
+        for(var i=start;i<=end;i++) if(tokens[i]) parts.push(tokens[i].textContent || '');
+        return parts.join('').trim();
+      }
+      function endCustomSelection(){
+        clearTimeout(longTimer);
+        longTimer=null;
+        if(!selecting) return false;
+        var text=selectedTokenText();
+        var cfiRange=anchor && anchor.cfiRange;
+        selecting=false;
+        anchor=null;
+        focus=null;
+        if(text) post({type:'standardSelection', text:text, cfiRange:cfiRange || 'standard:unknown'});
+        return true;
+      }
       document.addEventListener('touchstart', function(e){
         var t=e.changedTouches[0]; startX=t.clientX; startY=t.clientY; startT=Date.now(); moved=false;
+        clearTimeout(longTimer);
+        var meta=tokenMeta(tokenFromPoint(startX,startY));
+        if(meta){
+          longTimer=setTimeout(function(){
+            selecting=true;
+            anchor=meta;
+            focus=meta;
+            markTokenRange();
+          }, 320);
+        }
       }, {passive:true});
       document.addEventListener('touchmove', function(e){
-        var t=e.changedTouches[0]; if(Math.abs(t.clientX-startX)>18 || Math.abs(t.clientY-startY)>18) moved=true;
+        var t=e.changedTouches[0];
+        var dx=t.clientX-startX, dy=t.clientY-startY;
+        if(Math.abs(dx)>18 || Math.abs(dy)>18) moved=true;
+        if(selecting){
+          var meta=tokenMeta(tokenFromPoint(t.clientX,t.clientY));
+          if(meta && anchor && meta.cfiRange===anchor.cfiRange){
+            focus=meta;
+            markTokenRange();
+          }
+        } else if(longTimer && (Math.abs(dx)>22 || Math.abs(dy)>22)){
+          clearTimeout(longTimer);
+          longTimer=null;
+        }
       }, {passive:true});
       document.addEventListener('touchend', function(e){
-        if(hasSelection()) return;
+        if(endCustomSelection()) return;
+        clearTimeout(longTimer);
+        longTimer=null;
         var t=e.changedTouches[0], dx=t.clientX-startX, dy=t.clientY-startY;
         if(Math.abs(dx)>54 && Math.abs(dx)>Math.abs(dy)*1.45){ post({type:dx<0?'standardNext':'standardPrev'}); return; }
         if(!moved && Date.now()-startT<420){
@@ -256,6 +368,13 @@ function buildStandardPageHtml({
           if(t.clientX < w*.14) post({type:'standardPrev'});
           if(t.clientX > w*.86) post({type:'standardNext'});
         }
+      }, {passive:true});
+      document.addEventListener('touchcancel', function(){
+        clearTimeout(longTimer);
+        longTimer=null;
+        selecting=false;
+        anchor=null;
+        focus=null;
       }, {passive:true});
     })();
   </script>
@@ -1443,7 +1562,7 @@ function ReaderInner({
                   showsHorizontalScrollIndicator={false}
                   scrollEnabled={false}
                   bounces={false}
-                  textInteractionEnabled
+                  textInteractionEnabled={false}
                 />
               </>
             )}
