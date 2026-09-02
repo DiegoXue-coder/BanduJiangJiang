@@ -283,8 +283,12 @@ function buildStandardPageHtml({
   <main id="page">${bodyHtml}</main>
   <script>
     (function(){
-      var startX=0,startY=0,startT=0,moved=false,selecting=false,longTimer=null,anchor=null,focus=null;
-      function post(payload){ window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify(payload)); }
+      var startX=0,startY=0,startT=0,moved=false,selecting=false,longTimer=null,anchor=null,focus=null,lastFocusKey='',selectedEls=[];
+      function post(payload){
+        try {
+          window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify(payload));
+        } catch(e) {}
+      }
       function tokenFromPoint(x,y){
         var el=document.elementFromPoint(x,y);
         while(el && !(el.classList && el.classList.contains('tok'))) el=el.parentElement;
@@ -292,21 +296,29 @@ function buildStandardPageHtml({
       }
       function tokenMeta(el){
         if(!el) return null;
-        var p=el.closest ? el.closest('p[data-cfi]') : null;
+        var p=el.parentElement;
+        while(p && !(p.dataset && p.dataset.cfi)) p=p.parentElement;
         if(!p) return null;
         return {el:el,p:p,cfiRange:p.dataset.cfi,idx:Number(el.dataset.idx)};
       }
       function clearTokenSelection(){
-        var items=document.querySelectorAll('.tok.sel');
-        for(var i=0;i<items.length;i++) items[i].classList.remove('sel');
+        for(var i=0;i<selectedEls.length;i++) selectedEls[i].classList.remove('sel');
+        selectedEls=[];
       }
       function markTokenRange(){
+        if(!anchor || !focus || anchor.cfiRange!==focus.cfiRange) return;
+        var focusKey=focus.cfiRange + ':' + focus.idx;
+        if(focusKey===lastFocusKey) return;
+        lastFocusKey=focusKey;
         clearTokenSelection();
         if(!anchor || !focus || anchor.cfiRange!==focus.cfiRange) return;
         var start=Math.min(anchor.idx, focus.idx);
         var end=Math.max(anchor.idx, focus.idx);
         var tokens=anchor.p.querySelectorAll('.tok');
-        for(var i=start;i<=end;i++) if(tokens[i]) tokens[i].classList.add('sel');
+        for(var i=start;i<=end;i++) if(tokens[i]) {
+          tokens[i].classList.add('sel');
+          selectedEls.push(tokens[i]);
+        }
       }
       function selectedTokenText(){
         if(!anchor || !focus || anchor.cfiRange!==focus.cfiRange) return '';
@@ -330,7 +342,8 @@ function buildStandardPageHtml({
         return true;
       }
       document.addEventListener('touchstart', function(e){
-        var t=e.changedTouches[0]; startX=t.clientX; startY=t.clientY; startT=Date.now(); moved=false;
+        try {
+        var t=e.changedTouches[0]; startX=t.clientX; startY=t.clientY; startT=Date.now(); moved=false; lastFocusKey='';
         clearTimeout(longTimer);
         var meta=tokenMeta(tokenFromPoint(startX,startY));
         if(meta){
@@ -341,8 +354,10 @@ function buildStandardPageHtml({
             markTokenRange();
           }, 320);
         }
+        } catch(err) { post({type:'standardSelectionError'}); }
       }, {passive:true});
       document.addEventListener('touchmove', function(e){
+        try {
         var t=e.changedTouches[0];
         var dx=t.clientX-startX, dy=t.clientY-startY;
         if(Math.abs(dx)>18 || Math.abs(dy)>18) moved=true;
@@ -356,8 +371,10 @@ function buildStandardPageHtml({
           clearTimeout(longTimer);
           longTimer=null;
         }
+        } catch(err) { post({type:'standardSelectionError'}); }
       }, {passive:true});
       document.addEventListener('touchend', function(e){
+        try {
         if(endCustomSelection()) return;
         clearTimeout(longTimer);
         longTimer=null;
@@ -368,6 +385,7 @@ function buildStandardPageHtml({
           if(t.clientX < w*.14) post({type:'standardPrev'});
           if(t.clientX > w*.86) post({type:'standardNext'});
         }
+        } catch(err) { post({type:'standardSelectionError'}); }
       }, {passive:true});
       document.addEventListener('touchcancel', function(){
         clearTimeout(longTimer);
@@ -375,6 +393,7 @@ function buildStandardPageHtml({
         selecting=false;
         anchor=null;
         focus=null;
+        lastFocusKey='';
       }, {passive:true});
     })();
   </script>
@@ -677,8 +696,13 @@ function ReaderInner({
   const [selection, setSelection] = useState(null); // { text, cfiRange }
   const [standardSavedHighlights, setStandardSavedHighlights] = useState([]);
   const progressTimer = useRef(null);
+  const standardSelectionTimerRef = useRef(null);
   const annotationsRestored = useRef(false);
   const skippedInitialNav = useRef(false);
+
+  useEffect(() => () => {
+    if (standardSelectionTimerRef.current) clearTimeout(standardSelectionTimerRef.current);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -1295,7 +1319,17 @@ function ReaderInner({
       return;
     }
     if (data?.type === 'standardSelection' && data.text) {
-      setSelection({ text: data.text, cfiRange: data.cfiRange || makeStandardCfi(0) });
+      const text = String(data.text || '').trim().slice(0, 600);
+      const cfiRange = String(data.cfiRange || makeStandardCfi(0));
+      if (!text) return;
+      if (standardSelectionTimerRef.current) clearTimeout(standardSelectionTimerRef.current);
+      standardSelectionTimerRef.current = setTimeout(() => {
+        setSelection({ text, cfiRange });
+        standardSelectionTimerRef.current = null;
+      }, 50);
+      return;
+    }
+    if (data?.type === 'standardSelectionError') {
       return;
     }
     if (data?.type === 'standardPrev') {
@@ -1561,7 +1595,6 @@ function ReaderInner({
                   showsHorizontalScrollIndicator={false}
                   scrollEnabled={false}
                   bounces={false}
-                  textInteractionEnabled={false}
                 />
               </>
             )}
