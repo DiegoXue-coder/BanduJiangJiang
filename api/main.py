@@ -3941,17 +3941,22 @@ async def app_submit_bug_report(
     return {"ok": True}
 
 @app.post("/app/voice-latency-metrics")
-async def app_submit_voice_latency_metric(req: VoiceLatencyMetricIn, user_id: int = CurrentUser):
+async def app_submit_voice_latency_metric(
+    req: VoiceLatencyMetricIn,
+    _=ExtAuth,
+    user_id: int | None = OptionalUser,
+):
     """听书语音速度诊断：手机端每轮语音问答结束后上报纯耗时数据。
     不上传录音、完整问题或完整回答，只保留阶段耗时和字符数，方便工程侧
-    后台拉样本分析瓶颈。"""
+    后台拉样本分析瓶颈。带JWT时归真实用户；否则落到默认测试用户，避免
+    访客/旧链路能正常提问但诊断样本写不进来。"""
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute("""
             INSERT INTO voice_latency_metrics
                 (user_id, book_id, book_title, chapter_title, platform, reason, summary, metrics, meta)
             VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb)
-        """, user_id, req.book_id, req.book_title, req.chapter_title, req.platform,
+        """, user_id or 1, req.book_id, req.book_title, req.chapter_title, req.platform,
             req.reason, req.summary,
             json.dumps(req.metrics, ensure_ascii=False),
             json.dumps(req.meta, ensure_ascii=False))
