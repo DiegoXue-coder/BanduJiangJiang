@@ -1283,7 +1283,20 @@ export default function ListenScreen({ route, navigation }) {
         }
         soundRef.current = sound;
         sound.setOnPlaybackStatusUpdate((s) => {
-          if (!s.isLoaded || s.didJustFinish) {
+          // !isLoaded 不等于自然播放完成：它也可能是音频对象切换期间的
+          // 瞬时状态或真正的加载错误。此前把两者合并处理，会提前 unload
+          // 当前回答；iOS 真机表现就是在第一处句间停顿附近停止并恢复正文。
+          if (!s.isLoaded) {
+            if (s.error) {
+              markHfTiming(`AI回复播放状态错误 ${s.error}`);
+              sound.unloadAsync().catch(() => {});
+              if (soundRef.current === sound) soundRef.current = null;
+              playing = false;
+              playNext();
+            }
+            return;
+          }
+          if (s.didJustFinish) {
             sound.unloadAsync().catch(() => {});
             if (soundRef.current === sound) soundRef.current = null;
             playing = false;
@@ -1315,6 +1328,10 @@ export default function ListenScreen({ route, navigation }) {
           firstTtsQueued = true;
           markHfTiming('首段回答TTS入队', 'first_tts_enqueue');
         }
+        const firstStop = clean.search(/[。！？；]/);
+        markHfTiming(
+          `AI回复TTS入队 chars=${clean.length} charsAfterFirstStop=${firstStop >= 0 ? clean.length - firstStop - 1 : 0}`,
+        );
         queue.push({ seq: ++seq, text: clean });
         if (playing) prefetchNext();
         else playNext();
