@@ -2683,20 +2683,15 @@ async def tts_play(text: str, voice: str = "zh-CN-XiaoxiaoNeural", rate: str = "
     # 请求的query参数，不能照单全收）。
     if not _RATE_PATTERN.match(rate):
         raise HTTPException(status_code=400, detail="rate参数格式错误，应为类似+0%/-20%这样的百分比")
-
-    cleaned_text = clean_for_tts(text)
-
-    async def audio_stream():
-        communicate = edge_tts.Communicate(cleaned_text, voice, rate=rate)
+    try:
+        communicate = edge_tts.Communicate(clean_for_tts(text), voice, rate=rate)
+        chunks = []
         async for chunk in communicate.stream():
             if chunk["type"] == "audio":
-                yield chunk["data"]
-
-    return StreamingResponse(
-        audio_stream(),
-        media_type="audio/mpeg",
-        headers={"Cache-Control": "no-cache"},
-    )
+                chunks.append(chunk["data"])
+        return Response(content=b"".join(chunks), media_type="audio/mpeg")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"TTS 错误: {e}")
 
 @app.get("/tts/voices")
 async def tts_voices():

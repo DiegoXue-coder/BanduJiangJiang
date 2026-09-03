@@ -1371,6 +1371,7 @@ export default function ListenScreen({ route, navigation }) {
               return;
             }
             const finalAnswer = answer || fullAnswer;
+            const streamedAnswer = fullAnswer;
             if (finalAnswer && finalAnswer !== fullAnswer) {
               fullAnswer = finalAnswer;
               setHfText(finalAnswer);
@@ -1382,6 +1383,14 @@ export default function ListenScreen({ route, navigation }) {
               bookId, bookTitle, chapterTitle: chapter?.title || '',
               question, answer: finalAnswer, selection: currentCaption, cfiRange: fakeCfi, style: 'simple',
             }).catch(() => {});
+            if (finalAnswer && finalAnswer !== streamedAnswer) {
+              if (finalAnswer.startsWith(streamedAnswer)) {
+                sentenceBuffer += finalAnswer.slice(streamedAnswer.length);
+              } else {
+                sentenceBuffer = finalAnswer;
+              }
+              fullAnswer = finalAnswer;
+            }
             flushSentences(true);
             streamDone = true;
             maybeResolve();
