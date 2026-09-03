@@ -304,6 +304,7 @@ function buildStandardPageHtml({
       function clearTokenSelection(){
         for(var i=0;i<selectedEls.length;i++) selectedEls[i].classList.remove('sel');
         selectedEls=[];
+        lastFocusKey='';
       }
       function markTokenRange(){
         if(!anchor || !focus || anchor.cfiRange!==focus.cfiRange) return;
@@ -382,11 +383,19 @@ function buildStandardPageHtml({
         if(Math.abs(dx)>54 && Math.abs(dx)>Math.abs(dy)*1.45){ post({type:dx<0?'standardNext':'standardPrev'}); return; }
         if(!moved && Date.now()-startT<420){
           var w=window.innerWidth || document.documentElement.clientWidth;
-          if(t.clientX < w*.14) post({type:'standardPrev'});
-          if(t.clientX > w*.86) post({type:'standardNext'});
+          if(t.clientX < w*.14) { clearTokenSelection(); post({type:'standardPrev'}); return; }
+          if(t.clientX > w*.86) { clearTokenSelection(); post({type:'standardNext'}); return; }
+          clearTokenSelection();
+          post({type:'standardClearSelection'});
         }
         } catch(err) { post({type:'standardSelectionError'}); }
       }, {passive:true});
+      document.addEventListener('message', function(e){
+        if(e && e.data === 'standardClearSelection') clearTokenSelection();
+      });
+      window.addEventListener('message', function(e){
+        if(e && e.data === 'standardClearSelection') clearTokenSelection();
+      });
       document.addEventListener('touchcancel', function(){
         clearTimeout(longTimer);
         longTimer=null;
@@ -697,6 +706,7 @@ function ReaderInner({
   const [standardSavedHighlights, setStandardSavedHighlights] = useState([]);
   const progressTimer = useRef(null);
   const standardSelectionTimerRef = useRef(null);
+  const standardWebViewRef = useRef(null);
   const annotationsRestored = useRef(false);
   const skippedInitialNav = useRef(false);
 
@@ -1285,9 +1295,18 @@ function ReaderInner({
     return true;
   }
 
+  function clearStandardSelection() {
+    if (standardSelectionTimerRef.current) {
+      clearTimeout(standardSelectionTimerRef.current);
+      standardSelectionTimerRef.current = null;
+    }
+    setSelection(null);
+    standardWebViewRef.current?.postMessage?.('standardClearSelection');
+  }
+
   function goStandardPrev() {
     if (closeReaderPanels()) return;
-    setSelection(null);
+    clearStandardSelection();
     if (standardPageIndex > 0) {
       setStandardPageIndex((prev) => Math.max(0, prev - 1));
       return;
@@ -1300,7 +1319,7 @@ function ReaderInner({
 
   function goStandardNext() {
     if (closeReaderPanels()) return;
-    setSelection(null);
+    clearStandardSelection();
     if (standardPageIndex < standardPages.length - 1) {
       setStandardPageIndex((prev) => Math.min(standardPages.length - 1, prev + 1));
       return;
@@ -1330,6 +1349,10 @@ function ReaderInner({
       return;
     }
     if (data?.type === 'standardSelectionError') {
+      return;
+    }
+    if (data?.type === 'standardClearSelection') {
+      clearStandardSelection();
       return;
     }
     if (data?.type === 'standardPrev') {
@@ -1585,6 +1608,7 @@ function ReaderInner({
             ) : (
               <>
                 <WebView
+                  ref={standardWebViewRef}
                   key={`${standardChapterIndex}-${standardPageIndex}-${bodyFontKey}-${themeName}-${standardFontBase64 ? 'font' : 'fallback'}`}
                   originWhitelist={['*']}
                   source={{ html: standardPageHtml }}
@@ -1662,7 +1686,7 @@ function ReaderInner({
               style={[styles.selectionBtn, { backgroundColor: uiTheme.accent, borderRadius: uiTheme.radius }]}
               onPress={async () => {
                 await handleHighlight(activeSelection.cfiRange, activeSelection.text);
-                setSelection(null);
+                clearStandardSelection();
               }}
             >
               <Text style={[styles.selectionBtnText, { color: uiTheme.textOnAccent }]}>划线</Text>
@@ -1671,7 +1695,7 @@ function ReaderInner({
               style={[styles.selectionBtn, { backgroundColor: uiTheme.accent, borderRadius: uiTheme.radius }]}
               onPress={() => {
                 const { text, cfiRange } = activeSelection;
-                setSelection(null);
+                clearStandardSelection();
                 openChat(text, cfiRange);
               }}
             >
@@ -1680,7 +1704,7 @@ function ReaderInner({
             <TouchableOpacity
               style={styles.selectionCloseBtn}
               onPress={() => {
-                setSelection(null);
+                clearStandardSelection();
               }}
             >
               <Text style={[styles.selectionCloseBtnText, { color: uiTheme.bg }]}>✕</Text>
