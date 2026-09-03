@@ -252,6 +252,7 @@ function getResumeSlice(text, charOffset) {
 const NARRATION_SENTENCE_END = /([。！？；\n])/;
 const NARRATION_MIN_CHUNK_LEN = 60;
 const HF_REPLY_MIN_TTS_CHUNK_LEN = 24;
+const HF_REPLY_TTS_STREAMING_ENABLED = false;
 
 // 真机反馈：编号列表（"一、……二、……"这类）朗读起来听不出层次，跟前后
 // 文字粘在一起。查证过技术方案：edge_tts从5.0起微软禁掉了自定义SSML，
@@ -1320,6 +1321,13 @@ export default function ListenScreen({ route, navigation }) {
       };
 
       const flushSentences = (isFinal) => {
+        if (!HF_REPLY_TTS_STREAMING_ENABLED) {
+          if (isFinal && fullAnswer.trim()) {
+            enqueueReplyTts(fullAnswer);
+            sentenceBuffer = '';
+          }
+          return;
+        }
         let pending = '';
         for (;;) {
           const idx = sentenceBuffer.search(NARRATION_SENTENCE_END);
@@ -1361,7 +1369,7 @@ export default function ListenScreen({ route, navigation }) {
             sentenceBuffer += delta;
             setHfStage('replying');
             setHfText(fullAnswer);
-            flushSentences(false);
+            if (HF_REPLY_TTS_STREAMING_ENABLED) flushSentences(false);
           },
           onDone: async (answer) => {
             hfAbortRef.current = null;
