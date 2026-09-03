@@ -251,6 +251,7 @@ function getResumeSlice(text, charOffset) {
 // 正确愈合，不用额外判断。
 const NARRATION_SENTENCE_END = /([。！？；\n])/;
 const NARRATION_MIN_CHUNK_LEN = 60;
+const HF_REPLY_MIN_TTS_CHUNK_LEN = 24;
 
 // 真机反馈：编号列表（"一、……二、……"这类）朗读起来听不出层次，跟前后
 // 文字粘在一起。查证过技术方案：edge_tts从5.0起微软禁掉了自定义SSML，
@@ -559,7 +560,8 @@ export default function ListenScreen({ route, navigation }) {
     if (m.intent_start && m.intent_end) parts.push(`意图${formatHfMs(m.intent_end - m.intent_start)}`);
     if (m.llm_start && m.llm_first_delta) parts.push(`首字${formatHfMs(m.llm_first_delta - m.llm_start)}`);
     if (m.llm_start && m.llm_done) parts.push(`回答${formatHfMs(m.llm_done - m.llm_start)}`);
-    if (m.llm_done && m.answer_audio_start) parts.push(`TTS出声${formatHfMs(m.answer_audio_start - m.llm_done)}`);
+    const ttsWaitStart = m.first_tts_enqueue || m.llm_done;
+    if (ttsWaitStart && m.answer_audio_start) parts.push(`TTS出声${formatHfMs(m.answer_audio_start - ttsWaitStart)}`);
     if (m.answer_audio_start && m.answer_play_end) parts.push(`播放${formatHfMs(m.answer_play_end - m.answer_audio_start)}`);
     if (m.resume_start && m.resume_audio_start) parts.push(`续播${formatHfMs(m.resume_audio_start - m.resume_start)}`);
     if (m.start) parts.push(`总计${formatHfMs((m.resume_audio_start || timing.lastAt) - m.start)}`);
@@ -578,7 +580,7 @@ export default function ListenScreen({ route, navigation }) {
       intent_ms: diff('intent_start', 'intent_end'),
       llm_first_delta_ms: diff('llm_start', 'llm_first_delta'),
       llm_total_ms: diff('llm_start', 'llm_done'),
-      tts_to_audio_start_ms: diff('llm_done', 'answer_audio_start'),
+      tts_to_audio_start_ms: diff(m.first_tts_enqueue ? 'first_tts_enqueue' : 'llm_done', 'answer_audio_start'),
       answer_play_ms: diff('answer_audio_start', 'answer_play_end'),
       resume_to_audio_start_ms: diff('resume_start', 'resume_audio_start'),
       total_ms: m.start && totalEnd ? Math.max(0, totalEnd - m.start) : null,
@@ -1044,6 +1046,8 @@ export default function ListenScreen({ route, navigation }) {
     if (hfActiveRef.current && !interruptingReply) return;
     if (interruptingReply) {
       finishHfTiming('AI回复被用户长按打断');
+      hfAbortRef.current?.();
+      hfAbortRef.current = null;
       hfReplyInterruptingRef.current = true;
     }
     hfActiveRef.current = true;
@@ -1193,7 +1197,147 @@ export default function ListenScreen({ route, navigation }) {
     const chapter = chaptersRef.current[posRef.current.chapterIdx];
     let replyWasInterrupted = false;
     let sawFirstDelta = false;
+    const epoch = epochRef.current;
+    let fullAnswer = '';
+    let sentenceBuffer = '';
+    let streamDone = false;
+    let playing = false;
+    let preparing = false;
+    let prepared = null;
+    let markedPlayEnd = false;
+    let firstTtsQueued = false;
+    let seq = 0;
+    const queue = [];
+
     await new Promise((resolve) => {
+      const maybeResolve = () => {
+        if (!streamDone || playing || preparing || prepared || queue.length > 0) return;
+        if (!markedPlayEnd && fullAnswer.trim()) {
+          markedPlayEnd = true;
+          markHfTiming('AI回复播放结束', 'answer_play_end');
+          snapshotHfTiming();
+        }
+        resolve();
+      };
+
+      const prefetchNext = async () => {
+        if (prepared || preparing || queue.length === 0) return;
+        const item = queue.shift();
+        preparing = true;
+        try {
+          const { sound } = await Audio.Sound.createAsync(
+            { uri: getTtsPlayUrl(item.text, voiceRef.current, rateRef.current) },
+            { shouldPlay: false },
+          );
+          if (epoch !== epochRef.current || !hfActiveRef.current) {
+            sound.unloadAsync().catch(() => {});
+            return;
+          }
+          prepared = { ...item, sound };
+        } catch (e) {
+          markHfTiming(`AI回复TTS预取失败 ${e.message || e}`);
+        } finally {
+          preparing = false;
+          maybeResolve();
+        }
+      };
+
+      const playNext = async () => {
+        if (playing) return;
+        if (epoch !== epochRef.current || !hfActiveRef.current) {
+          maybeResolve();
+          return;
+        }
+        let item = null;
+        if (prepared) {
+          item = prepared;
+          prepared = null;
+        } else if (queue.length > 0) {
+          item = queue.shift();
+        } else {
+          maybeResolve();
+          return;
+        }
+        playing = true;
+        await restorePlaybackAudioMode().catch(() => {});
+        let sound = item.sound;
+        if (!sound) {
+          try {
+            ({ sound } = await Audio.Sound.createAsync(
+              { uri: getTtsPlayUrl(item.text, voiceRef.current, rateRef.current) },
+              { shouldPlay: false },
+            ));
+          } catch (e) {
+            playing = false;
+            markHfTiming(`AI回复TTS加载失败 ${e.message || e}`);
+            playNext();
+            return;
+          }
+          if (epoch !== epochRef.current || !hfActiveRef.current) {
+            sound.unloadAsync().catch(() => {});
+            playing = false;
+            maybeResolve();
+            return;
+          }
+        }
+        soundRef.current = sound;
+        sound.setOnPlaybackStatusUpdate((s) => {
+          if (!s.isLoaded || s.didJustFinish) {
+            sound.unloadAsync().catch(() => {});
+            if (soundRef.current === sound) soundRef.current = null;
+            playing = false;
+            playNext();
+          }
+        });
+        sound.playAsync().then(() => {
+          if (!hfTimingRef.current?.marks?.answer_audio_start) {
+            markHfTiming('AI回复TTS开始播放', 'answer_audio_start');
+            if (handsFreeEnabled && !handsFreeMuted && !IOS_EXTERNAL_PLAYBACK_HANDS_FREE) {
+              setHandsFreeStatus('AI回复中也在监听');
+              startHandsFreeAmbient()
+                .then(() => markHfTiming('AI回复期间环境监听已开启'))
+                .catch((e) => markHfTiming(`AI回复期间环境监听启动失败 ${e.message || e}`));
+            }
+          }
+        }).catch((e) => {
+          markHfTiming(`AI回复播放失败 ${e.message || e}`);
+          playing = false;
+          playNext();
+        });
+        prefetchNext();
+      };
+
+      const enqueueReplyTts = (text) => {
+        const clean = (text || '').trim();
+        if (!clean) return;
+        if (!firstTtsQueued) {
+          firstTtsQueued = true;
+          markHfTiming('首段回答TTS入队', 'first_tts_enqueue');
+        }
+        queue.push({ seq: ++seq, text: clean });
+        if (playing) prefetchNext();
+        else playNext();
+      };
+
+      const flushSentences = (isFinal) => {
+        let pending = '';
+        for (;;) {
+          const idx = sentenceBuffer.search(NARRATION_SENTENCE_END);
+          if (idx === -1) break;
+          pending += sentenceBuffer.slice(0, idx + 1);
+          sentenceBuffer = sentenceBuffer.slice(idx + 1);
+          if (pending.length >= HF_REPLY_MIN_TTS_CHUNK_LEN) {
+            enqueueReplyTts(pending);
+            pending = '';
+          }
+        }
+        if (pending) sentenceBuffer = pending + sentenceBuffer;
+        if (isFinal && sentenceBuffer.trim()) {
+          enqueueReplyTts(sentenceBuffer);
+          sentenceBuffer = '';
+        }
+      };
+
       markHfTiming('LLM请求开始', 'llm_start');
       hfAbortRef.current = streamAsk(
         {
@@ -1207,67 +1351,58 @@ export default function ListenScreen({ route, navigation }) {
           history: [],
         },
         {
-          onDelta: () => {
+          onDelta: (delta) => {
+            if (epoch !== epochRef.current || !hfActiveRef.current) return;
             if (!sawFirstDelta) {
               sawFirstDelta = true;
               markHfTiming('LLM首个增量返回', 'llm_first_delta');
             }
+            fullAnswer += delta;
+            sentenceBuffer += delta;
+            setHfStage('replying');
+            setHfText(fullAnswer);
+            flushSentences(false);
           },
           onDone: async (answer) => {
             hfAbortRef.current = null;
-            markHfTiming(`AI回复完成 answerChars=${(answer || '').length}`, 'llm_done');
-            setHfTimingMeta({ answerChars: (answer || '').length });
+            if (epoch !== epochRef.current || !hfActiveRef.current) {
+              streamDone = true;
+              maybeResolve();
+              return;
+            }
+            const finalAnswer = answer || fullAnswer;
+            if (finalAnswer && finalAnswer !== fullAnswer) {
+              fullAnswer = finalAnswer;
+              setHfText(finalAnswer);
+            }
+            markHfTiming(`AI回复完成 answerChars=${finalAnswer.length}`, 'llm_done');
+            setHfTimingMeta({ answerChars: finalAnswer.length });
             const fakeCfi = `listen:${chapter?.id}:${posRef.current.paragraphIdx}`;
             saveQaHistory({
               bookId, bookTitle, chapterTitle: chapter?.title || '',
-              question, answer, selection: currentCaption, cfiRange: fakeCfi, style: 'simple',
+              question, answer: finalAnswer, selection: currentCaption, cfiRange: fakeCfi, style: 'simple',
             }).catch(() => {});
-            if (!hfActiveRef.current) { resolve(); return; }
-            setHfStage('replying');
-            setHfText(answer);
-            const epoch = epochRef.current;
-            try {
-              await playOneParagraph(answer, epoch, () => {
-                markHfTiming('AI回复TTS开始播放', 'answer_audio_start');
-                // 只在AI回答已经真正出声之后开启二次打断监听。上一版在
-                // 回答加载/TTS加载阶段就开环境监听，轻微杂音会把尚未完成
-                // 的第一轮回答打断，导致用户的问题没有任何回复。
-                if (handsFreeEnabled && !handsFreeMuted && !IOS_EXTERNAL_PLAYBACK_HANDS_FREE) {
-                  setHandsFreeStatus('AI回复中也在监听');
-                  startHandsFreeAmbient()
-                    .then(() => markHfTiming('AI回复期间环境监听已开启'))
-                    .catch((e) => markHfTiming(`AI回复期间环境监听启动失败 ${e.message || e}`));
-                }
-              });
-            } catch (e) {
-              markHfTiming(`AI回复播放失败/中断 ${e.message || e}`);
-              // 回答播放失败不阻塞后续流程，直接进入追问窗口
-            }
-            replyWasInterrupted = epoch !== epochRef.current || hfReplyInterruptingRef.current;
-            if (!replyWasInterrupted) {
-              await stopHandsFreeAmbient();
-            }
-            if (soundRef.current) {
-              soundRef.current.unloadAsync().catch(() => {});
-              soundRef.current = null;
-            }
-            if (replyWasInterrupted) {
-              markHfTiming('AI回复已被二次打断，交给新一轮录音');
-              resolve();
-              return;
-            }
-            markHfTiming('AI回复播放结束', 'answer_play_end');
-            snapshotHfTiming();
-            resolve();
+            flushSentences(true);
+            streamDone = true;
+            maybeResolve();
           },
           onError: () => {
             hfAbortRef.current = null;
             markHfTiming('AI问答失败');
+            streamDone = true;
             resolve();
           },
         },
       );
     });
+    replyWasInterrupted = epoch !== epochRef.current || hfReplyInterruptingRef.current;
+    if (!replyWasInterrupted) {
+      await stopHandsFreeAmbient();
+    }
+    if (soundRef.current) {
+      soundRef.current.unloadAsync().catch(() => {});
+      soundRef.current = null;
+    }
     if (!hfActiveRef.current) return;
     if (replyWasInterrupted) return;
     if (IOS_EXTERNAL_PLAYBACK_HANDS_FREE) {
