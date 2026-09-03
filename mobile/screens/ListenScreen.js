@@ -251,8 +251,10 @@ function getResumeSlice(text, charOffset) {
 // 正确愈合，不用额外判断。
 const NARRATION_SENTENCE_END = /([。！？；\n])/;
 const NARRATION_MIN_CHUNK_LEN = 60;
-const HF_REPLY_MIN_TTS_CHUNK_LEN = 24;
-const HF_REPLY_TTS_STREAMING_ENABLED = false;
+// 第一段只等到一个不太短的完整句子就开始合成；后续句子由现有队列预取。
+// 16 字是在“尽快开口”和“避免一句太短导致听感碎裂”之间的保守折中。
+const HF_REPLY_MIN_TTS_CHUNK_LEN = 16;
+const HF_REPLY_TTS_STREAMING_ENABLED = true;
 
 // 真机反馈：编号列表（"一、……二、……"这类）朗读起来听不出层次，跟前后
 // 文字粘在一起。查证过技术方案：edge_tts从5.0起微软禁掉了自定义SSML，
