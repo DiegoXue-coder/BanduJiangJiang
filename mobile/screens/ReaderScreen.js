@@ -293,8 +293,7 @@ function buildStandardPageHtml({
         var el=document.elementFromPoint(x,y);
         while(el && !(el.classList && el.classList.contains('tok'))) el=el.parentElement;
         if(el) return el;
-        var scope=selecting && anchor && anchor.p ? anchor.p : document;
-        var tokens=scope.querySelectorAll('.tok');
+        var tokens=document.querySelectorAll('p[data-cfi] .tok');
         var best=null,bestScore=999999;
         for(var i=0;i<tokens.length;i++){
           var r=tokens[i].getBoundingClientRect();
@@ -320,6 +319,14 @@ function buildStandardPageHtml({
         if(!p) return null;
         return {el:el,p:p,cfiRange:p.dataset.cfi,idx:Number(el.dataset.idx)};
       }
+      function allTokens(){
+        return document.querySelectorAll('p[data-cfi] .tok');
+      }
+      function globalIndexOf(el){
+        var tokens=allTokens();
+        for(var i=0;i<tokens.length;i++) if(tokens[i]===el) return i;
+        return -1;
+      }
       function clearTokenSelection(){
         for(var i=0;i<selectedEls.length;i++) selectedEls[i].classList.remove('sel');
         var leftovers=document.querySelectorAll('.tok.sel');
@@ -336,39 +343,61 @@ function buildStandardPageHtml({
         clearTokenSelection();
       };
       function markTokenRange(){
-        if(!anchor || !focus || anchor.cfiRange!==focus.cfiRange) return;
-        var focusKey=focus.cfiRange + ':' + focus.idx;
+        if(!anchor || !focus) return;
+        var anchorIndex=globalIndexOf(anchor.el);
+        var focusIndex=globalIndexOf(focus.el);
+        if(anchorIndex<0 || focusIndex<0) return;
+        var focusKey=String(focusIndex);
         if(focusKey===lastFocusKey) return;
         lastFocusKey=focusKey;
         clearTokenSelection();
-        if(!anchor || !focus || anchor.cfiRange!==focus.cfiRange) return;
-        var start=Math.min(anchor.idx, focus.idx);
-        var end=Math.max(anchor.idx, focus.idx);
-        var tokens=anchor.p.querySelectorAll('.tok');
+        var start=Math.min(anchorIndex, focusIndex);
+        var end=Math.max(anchorIndex, focusIndex);
+        var tokens=allTokens();
         for(var i=start;i<=end;i++) if(tokens[i]) {
           tokens[i].classList.add('sel');
           selectedEls.push(tokens[i]);
         }
       }
-      function selectedTokenText(){
-        if(!anchor || !focus || anchor.cfiRange!==focus.cfiRange) return '';
-        var start=Math.min(anchor.idx, focus.idx);
-        var end=Math.max(anchor.idx, focus.idx);
-        var tokens=anchor.p.querySelectorAll('.tok');
-        var parts=[];
-        for(var i=start;i<=end;i++) if(tokens[i]) parts.push(tokens[i].textContent || '');
-        return parts.join('').trim();
+      function selectedTokenFragments(){
+        if(!anchor || !focus) return [];
+        var anchorIndex=globalIndexOf(anchor.el);
+        var focusIndex=globalIndexOf(focus.el);
+        if(anchorIndex<0 || focusIndex<0) return [];
+        var start=Math.min(anchorIndex, focusIndex);
+        var end=Math.max(anchorIndex, focusIndex);
+        var tokens=allTokens();
+        var fragments=[];
+        var currentCfi='';
+        var currentText='';
+        for(var i=start;i<=end;i++) if(tokens[i]) {
+          var meta=tokenMeta(tokens[i]);
+          if(!meta) continue;
+          if(currentCfi && meta.cfiRange!==currentCfi){
+            if(currentText.trim()) fragments.push({cfiRange:currentCfi,text:currentText.trim()});
+            currentText='';
+          }
+          currentCfi=meta.cfiRange;
+          currentText += tokens[i].textContent || '';
+        }
+        if(currentCfi && currentText.trim()) fragments.push({cfiRange:currentCfi,text:currentText.trim()});
+        return fragments;
       }
       function endCustomSelection(){
         clearTimeout(longTimer);
         longTimer=null;
         if(!selecting) return false;
-        var text=selectedTokenText();
-        var cfiRange=anchor && anchor.cfiRange;
+        var fragments=selectedTokenFragments();
+        var parts=[];
+        for(var i=0;i<fragments.length;i++) parts.push(fragments[i].text);
+        var text=parts.join('\\n').trim();
+        var cfiRange=fragments.length>1
+          ? fragments[0].cfiRange + '..' + fragments[fragments.length-1].cfiRange
+          : (fragments[0] && fragments[0].cfiRange) || (anchor && anchor.cfiRange);
         selecting=false;
         anchor=null;
         focus=null;
-        if(text) post({type:'standardSelection', text:text, cfiRange:cfiRange || 'standard:unknown'});
+        if(text) post({type:'standardSelection', text:text, cfiRange:cfiRange || 'standard:unknown', fragments:fragments});
         return true;
       }
       document.addEventListener('touchstart', function(e){
@@ -393,7 +422,7 @@ function buildStandardPageHtml({
         if(Math.abs(dx)>18 || Math.abs(dy)>18) moved=true;
         if(selecting){
           var meta=tokenMeta(tokenFromPoint(t.clientX,t.clientY));
-          if(meta && anchor && meta.cfiRange===anchor.cfiRange){
+          if(meta && anchor){
             focus=meta;
             markTokenRange();
           }
@@ -1191,13 +1220,35 @@ function ReaderInner({
     }, PROGRESS_DEBOUNCE_MS);
   }
 
-  async function handleHighlight(cfiRange, text) {
+  async function handleHighlight(cfiRange, text, fragments = null) {
     // 续二十三访客模式：划线本来就是"读的过程"里要按账号持久化的数据
     // （访客划线不做转移，见访客流程草案的产品决策），访客点划线不该
     // 打后端一个必然401的请求再弹一个"HTTP 401 ..."的原始报错——直接
     // 拦在请求之前，弹注册引导。
     if (!requireAuth('ai')) return false;
     try {
+      const standardFragments = Array.isArray(fragments)
+        ? fragments
+            .map((item) => ({
+              cfiRange: String(item?.cfiRange || ''),
+              text: String(item?.text || '').trim(),
+            }))
+            .filter((item) => item.cfiRange.startsWith('standard:') && item.text)
+        : [];
+      if (readerMode === 'standard' && standardFragments.length > 1) {
+        const savedItems = await Promise.all(standardFragments.map((item) => (
+          saveHighlight(bookId, { cfiLocation: item.cfiRange, highlightedText: item.text })
+        )));
+        setStandardSavedHighlights((prev) => [
+          ...prev,
+          ...standardFragments.map((item, index) => ({
+            cfiRange: item.cfiRange,
+            text: item.text,
+            id: savedItems[index]?.id,
+          })),
+        ]);
+        return false;
+      }
       const saved = await saveHighlight(bookId, { cfiLocation: cfiRange, highlightedText: text });
       if (readerMode === 'epub' && cfiRange?.startsWith('epubcfi(')) {
         addAnnotation('highlight', cfiRange, { id: saved.id }, { color: '#ffd54f' });
@@ -1372,10 +1423,18 @@ function ReaderInner({
     if (data?.type === 'standardSelection' && data.text) {
       const text = String(data.text || '').trim().slice(0, 600);
       const cfiRange = String(data.cfiRange || makeStandardCfi(0));
+      const fragments = Array.isArray(data.fragments)
+        ? data.fragments
+            .map((item) => ({
+              cfiRange: String(item?.cfiRange || ''),
+              text: String(item?.text || '').trim().slice(0, 600),
+            }))
+            .filter((item) => item.cfiRange.startsWith('standard:') && item.text)
+        : null;
       if (!text) return;
       if (standardSelectionTimerRef.current) clearTimeout(standardSelectionTimerRef.current);
       standardSelectionTimerRef.current = setTimeout(() => {
-        setSelection({ text, cfiRange });
+        setSelection({ text, cfiRange, fragments });
         standardSelectionTimerRef.current = null;
       }, 50);
       return;
@@ -1717,7 +1776,7 @@ function ReaderInner({
             <TouchableOpacity
               style={[styles.selectionBtn, { backgroundColor: uiTheme.accent, borderRadius: uiTheme.radius }]}
               onPress={async () => {
-                await handleHighlight(activeSelection.cfiRange, activeSelection.text);
+                await handleHighlight(activeSelection.cfiRange, activeSelection.text, activeSelection.fragments);
                 clearStandardSelection();
               }}
             >
