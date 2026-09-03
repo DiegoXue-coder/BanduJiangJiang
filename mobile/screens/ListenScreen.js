@@ -585,7 +585,7 @@ export default function ListenScreen({ route, navigation }) {
     };
   }
 
-  function uploadHfTiming(timing, summary) {
+  function uploadHfTiming(timing, summary, final = false) {
     if (!summary || !timing?.marks) return;
     submitVoiceLatencyMetric({
       book_id: String(bookId || ''),
@@ -595,7 +595,7 @@ export default function ListenScreen({ route, navigation }) {
       reason: timing.reason || '',
       summary,
       metrics: buildHfTimingMetrics(timing),
-      meta: timing.meta || {},
+      meta: { ...(timing.meta || {}), final },
     }).catch((e) => {
       console.log(`[免提计时汇总] 后台上报失败：${e.message || e}`);
     });
@@ -606,6 +606,17 @@ export default function ListenScreen({ route, navigation }) {
     hfTimingRef.current.meta = { ...(hfTimingRef.current.meta || {}), ...patch };
   }
 
+  function snapshotHfTiming(label = null) {
+    if (label) markHfTiming(label);
+    const timing = hfTimingRef.current;
+    const summary = buildHfTimingSummary(timing);
+    if (summary) {
+      console.log(`[免提计时汇总] ${summary}`);
+      setHfTimingSummary(summary);
+      uploadHfTiming(timing, summary, false);
+    }
+  }
+
   function finishHfTiming(label) {
     if (label) markHfTiming(label);
     const timing = hfTimingRef.current;
@@ -613,7 +624,7 @@ export default function ListenScreen({ route, navigation }) {
     if (summary) {
       console.log(`[免提计时汇总] ${summary}`);
       setHfTimingSummary(summary);
-      uploadHfTiming(timing, summary);
+      uploadHfTiming(timing, summary, true);
     }
     hfTimingRef.current = null;
     hfResumePendingRef.current = false;
@@ -1032,6 +1043,7 @@ export default function ListenScreen({ route, navigation }) {
     if (handsFreeMuted && !forceMic) return;
     if (hfActiveRef.current && !interruptingReply) return;
     if (interruptingReply) {
+      finishHfTiming('AI回复被用户长按打断');
       hfReplyInterruptingRef.current = true;
     }
     hfActiveRef.current = true;
@@ -1240,6 +1252,7 @@ export default function ListenScreen({ route, navigation }) {
               return;
             }
             markHfTiming('AI回复播放结束', 'answer_play_end');
+            snapshotHfTiming();
             resolve();
           },
           onError: () => {
