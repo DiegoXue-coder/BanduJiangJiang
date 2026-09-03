@@ -1055,7 +1055,7 @@ export default function ListenScreen({ route, navigation }) {
       markHfTiming('打断音频并释放环境监听');
       setHfStage('listening');
       setHfText('');
-      await hfListenTurnLoop();
+      await hfListenTurnLoop({ skipIntent: forceMic });
     })();
   }
   useEffect(() => { autoInterruptRef.current = startHandsFreeTurn; });
@@ -1145,7 +1145,7 @@ export default function ListenScreen({ route, navigation }) {
   // 但AI判断这不是真的在向它提问（多半是环境噪音/电视声/别人说话被误
   // 识别）——用户明确要求"不相关就继续读"，同样恢复朗读，不弹出回答去
   // 打扰；只有真的是在提问，才进入askHandsFree真正去问AI。
-  async function hfListenTurnLoop() {
+  async function hfListenTurnLoop({ skipIntent = false } = {}) {
     const text = await hfRecordUntilSilence();
     if (!hfActiveRef.current) return;
     markHfTiming(text ? `识别文本进入判断 chars=${text.length}` : '没有有效识别文本');
@@ -1158,13 +1158,18 @@ export default function ListenScreen({ route, navigation }) {
     setHfStage('thinking');
     const chapter = chaptersRef.current[posRef.current.chapterIdx];
     let relevant = true;
-    try {
-      markHfTiming('开始意图分类', 'intent_start');
-      relevant = await classifyIntent(text, bookTitle, chapter?.title || '');
-      markHfTiming(`意图分类完成 relevant=${relevant}`, 'intent_end');
-    } catch (e) {
-      markHfTiming(`意图分类失败 ${e.message || e}`);
-      relevant = true; // 判断这一步本身失败，保守当成是提问，交给下面真正的问答逻辑处理
+    if (skipIntent) {
+      setHfTimingMeta({ skippedIntent: true });
+      markHfTiming('手动长按：跳过意图分类');
+    } else {
+      try {
+        markHfTiming('开始意图分类', 'intent_start');
+        relevant = await classifyIntent(text, bookTitle, chapter?.title || '');
+        markHfTiming(`意图分类完成 relevant=${relevant}`, 'intent_end');
+      } catch (e) {
+        markHfTiming(`意图分类失败 ${e.message || e}`);
+        relevant = true; // 判断这一步本身失败，保守当成是提问，交给下面真正的问答逻辑处理
+      }
     }
     if (!hfActiveRef.current) return;
     if (!relevant && !looksLikeHandsFreeQuestion(text)) {
