@@ -193,11 +193,11 @@ const HF_NO_SPEECH_TIMEOUT_MS = 4000;
 // 安全上限：防止识别一直不停（比如背景持续有人在说话），录到这个时长
 // 强制截止，不会无限录下去。
 const HF_MAX_UTTERANCE_MS = 25000;
-// iOS真机复测确认：正文TTS播放期间只要常驻Audio.Recording做免提环境
-// 监听，系统音频会话就会明显压低外放音量。Expo AV没有iOS端"边录边播
-// 同时强制扬声器"的稳定JS参数，所以iOS先走外放优先：播放正文时不常驻
-// 开麦，用户点一下进入提问录音；Android仍保留原来的持续监听。
-const IOS_EXTERNAL_PLAYBACK_HANDS_FREE = Platform.OS === 'ios';
+// 2026-09-05真机复测后统一成"手动按住说话"：iOS最初是为了解决常驻录音
+// 压低外放音量，Android虽然技术上能常驻监听，但用户反馈环境噪音容易误
+// 触发，而且两端交互不一致。测试阶段先把两端都收敛成可控模式：听书时不
+// 常驻开麦，用户按住麦克风录音、松手发送问题。
+const MANUAL_HOLD_TO_TALK = true;
 
 // 免提这条交互线始终完全独立于手动"打断"那套聊天气泡流程，不共用
 // handleInterrupt/startAutoListen/conversation这些状态，也不跳出朗读
@@ -1126,7 +1126,7 @@ export default function ListenScreen({ route, navigation }) {
       await recording.startAsync();
       markHfTiming('正式录音已开始', 'recording_started');
       hfRecordingRef.current = recording;
-      if (IOS_EXTERNAL_PLAYBACK_HANDS_FREE && !voiceHoldActiveRef.current) {
+      if (MANUAL_HOLD_TO_TALK && !voiceHoldActiveRef.current) {
         setTimeout(() => { hfListenResolveRef.current?.(); }, 0);
       }
       // 双保险：万一某些机型metering回调不触发/触发不及时，硬性上限兜底，
@@ -1337,7 +1337,7 @@ export default function ListenScreen({ route, navigation }) {
         sound.playAsync().then(() => {
           if (!hfTimingRef.current?.marks?.answer_audio_start) {
             markHfTiming('AI回复TTS开始播放', 'answer_audio_start');
-            if (handsFreeEnabled && !handsFreeMuted && !IOS_EXTERNAL_PLAYBACK_HANDS_FREE) {
+            if (handsFreeEnabled && !handsFreeMuted && !MANUAL_HOLD_TO_TALK) {
               setHandsFreeStatus('AI回复中也在监听');
               startHandsFreeAmbient()
                 .then(() => markHfTiming('AI回复期间环境监听已开启'))
@@ -1470,8 +1470,8 @@ export default function ListenScreen({ route, navigation }) {
     }
     if (!hfActiveRef.current) return;
     if (replyWasInterrupted) return;
-    if (IOS_EXTERNAL_PLAYBACK_HANDS_FREE) {
-      markHfTiming('iOS外放优先：回答结束后关闭麦克风并恢复正文');
+    if (MANUAL_HOLD_TO_TALK) {
+      markHfTiming('手动按住说话：回答结束后关闭麦克风并恢复正文');
       finishHandsFreeTurn();
       return;
     }
@@ -1493,7 +1493,7 @@ export default function ListenScreen({ route, navigation }) {
     hfResumePendingRef.current = true;
     markHfTiming(`恢复正文 chapter=${chapterIdx} paragraph=${paragraphIdx}`, 'resume_start');
     playFrom(chapterIdx, paragraphIdx, epochRef.current);
-    if (handsFreeEnabled && !handsFreeMuted && !IOS_EXTERNAL_PLAYBACK_HANDS_FREE) {
+    if (handsFreeEnabled && !handsFreeMuted && !MANUAL_HOLD_TO_TALK) {
       setHandsFreeStatus('免提监听中');
       startHandsFreeAmbient();
     }
@@ -1527,7 +1527,7 @@ export default function ListenScreen({ route, navigation }) {
   }
 
   function handleVoiceModeMicPressIn() {
-    if (IOS_EXTERNAL_PLAYBACK_HANDS_FREE) {
+    if (MANUAL_HOLD_TO_TALK) {
       if (hfStage === 'listening' || hfStage === 'thinking') return;
       voiceHoldActiveRef.current = true;
       if (hfStage === 'replying') {
@@ -1545,14 +1545,14 @@ export default function ListenScreen({ route, navigation }) {
   }
 
   function handleVoiceModeMicPressOut() {
-    if (!IOS_EXTERNAL_PLAYBACK_HANDS_FREE) return;
+    if (!MANUAL_HOLD_TO_TALK) return;
     voiceHoldActiveRef.current = false;
     setHandsFreeMuted(true);
     hfListenResolveRef.current?.();
   }
 
   function handleVoiceModeStatusPress() {
-    if (IOS_EXTERNAL_PLAYBACK_HANDS_FREE && hfStage === 'replying') {
+    if (MANUAL_HOLD_TO_TALK && hfStage === 'replying') {
       voiceHoldActiveRef.current = true;
       setHandsFreeMuted(false);
       startHandsFreeTurn(true);
@@ -1669,7 +1669,7 @@ export default function ListenScreen({ route, navigation }) {
     // 这层判断的话，理论上不会有正在运行的环境监听（只有handleInterrupt
     // 会停它，进这里之前必然经过那一步），但多一层判断防止万一重复触发
     // 造成两路环境监听同时存在。
-    if (handsFreeEnabled && !handsFreeMuted && !IOS_EXTERNAL_PLAYBACK_HANDS_FREE && !hfAmbientRecordingRef.current) {
+    if (handsFreeEnabled && !handsFreeMuted && !MANUAL_HOLD_TO_TALK && !hfAmbientRecordingRef.current) {
       setHandsFreeStatus('免提监听中');
       startHandsFreeAmbient();
     }
@@ -1841,9 +1841,9 @@ export default function ListenScreen({ route, navigation }) {
   // 也应该能用（跟手动打断那条录音路径用的是同一个底层能力）。
   async function startHandsFreeAmbient() {
     try {
-      if (IOS_EXTERNAL_PLAYBACK_HANDS_FREE) {
+      if (MANUAL_HOLD_TO_TALK) {
         await restorePlaybackAudioMode().catch(() => {});
-        setHandsFreeStatus('外放优先 · 点一下提问');
+        setHandsFreeStatus('按住麦克风说话');
         return;
       }
       const { status: perm } = await Audio.requestPermissionsAsync();
@@ -1887,7 +1887,7 @@ export default function ListenScreen({ route, navigation }) {
   // 要确保断开，不能让这路环境监听录音在离开听书页之后还占着麦克风。
   useEffect(() => {
     if (handsFreeEnabled) {
-      setHandsFreeStatus(IOS_EXTERNAL_PLAYBACK_HANDS_FREE ? '外放优先 · 点一下提问' : '连接中…');
+      setHandsFreeStatus(MANUAL_HOLD_TO_TALK ? '按住麦克风说话' : '连接中…');
       startHandsFreeAmbient();
     }
     // 所有收尾逻辑都放进cleanup，不要在效果体的else分支里重复一遍——React
@@ -1918,8 +1918,8 @@ export default function ListenScreen({ route, navigation }) {
   const inConversation = phase === 'paused' || phase === 'thinking' || phase === 'answering';
   const inNarrating = phase === 'playing' || phase === 'loading-chapter';
   const segFraction = currentSegCount.total > 1 ? currentSegCount.idx / (currentSegCount.total - 1) : 0;
-  const iosManualHandsFree = handsFreeEnabled && IOS_EXTERNAL_PLAYBACK_HANDS_FREE;
-  const iosManualAskLabel = !iosManualHandsFree
+  const manualHoldToTalkEnabled = handsFreeEnabled && MANUAL_HOLD_TO_TALK;
+  const manualAskLabel = !manualHoldToTalkEnabled
     ? '打断，我想问问'
     : hfStage === 'replying'
       ? '打断追问'
@@ -1931,8 +1931,8 @@ export default function ListenScreen({ route, navigation }) {
   const voiceModeStatus = hfStage
     ? (hfStage === 'listening' ? '松开后发送问题' : hfStage === 'thinking' ? '正在识别和思考…' : '按住麦克风打断追问')
     : handsFreeMuted
-      ? (IOS_EXTERNAL_PLAYBACK_HANDS_FREE ? '按住麦克风说话' : '已静音 · 继续讲书')
-      : IOS_EXTERNAL_PLAYBACK_HANDS_FREE
+      ? (MANUAL_HOLD_TO_TALK ? '按住麦克风说话' : '已静音 · 继续讲书')
+      : MANUAL_HOLD_TO_TALK
         ? '松开后发送问题'
         : '正在听 · 你可以直接说话';
 
@@ -2119,7 +2119,7 @@ export default function ListenScreen({ route, navigation }) {
                       <TouchableOpacity
                         style={styles.voiceModeStatusButton}
                         onPress={handleVoiceModeStatusPress}
-                        disabled={!(IOS_EXTERNAL_PLAYBACK_HANDS_FREE && hfStage === 'replying')}
+                        disabled={!(MANUAL_HOLD_TO_TALK && hfStage === 'replying')}
                         accessibilityLabel={voiceModeStatus}
                       >
                         <View style={[styles.voiceModeDots, hfStage === 'replying' && styles.voiceModeDotsStop]}>
@@ -2141,7 +2141,7 @@ export default function ListenScreen({ route, navigation }) {
                           ]}
                           onPressIn={handleVoiceModeMicPressIn}
                           onPressOut={handleVoiceModeMicPressOut}
-                          accessibilityLabel={iosManualAskLabel}
+                          accessibilityLabel={manualAskLabel}
                         >
                           {handsFreeMuted
                             ? <IconMicrophoneOff color={EMBER.paperDim} size={28} strokeWidth={2.2} />
