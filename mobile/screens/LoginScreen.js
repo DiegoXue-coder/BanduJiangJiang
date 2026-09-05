@@ -20,19 +20,43 @@ export default function LoginScreen({ onLoggedIn }) {
 
   const isRegister = mode === 'register';
 
+  const getFriendlyErrorMessage = (message) => {
+    const text = String(message || '');
+    if (text.includes('Network request failed')) return '无法连接服务器，请检查网络后重试';
+    return text || '出错了，请重试';
+  };
+
   const handleSubmit = async () => {
     if (submitting) return;
+    const trimmedUsername = username.trim();
+    if (!trimmedUsername) {
+      setError('请输入用户名');
+      return;
+    }
+    if (isRegister && trimmedUsername.length < 3) {
+      setError('用户名至少3个字符');
+      return;
+    }
+    if (!password) {
+      setError('请输入密码');
+      return;
+    }
+    if (isRegister && password.length < 6) {
+      setError('密码至少6位');
+      return;
+    }
+
     setError('');
     setSubmitting(true);
     try {
       if (isRegister) {
-        await register(username.trim(), password);
+        await register(trimmedUsername, password);
       } else {
-        await login(username.trim(), password);
+        await login(trimmedUsername, password);
       }
       onLoggedIn();
     } catch (e) {
-      setError(e.message || '出错了，请重试');
+      setError(getFriendlyErrorMessage(e.message));
     } finally {
       setSubmitting(false);
     }
@@ -48,7 +72,7 @@ export default function LoginScreen({ onLoggedIn }) {
           <Text style={[styles.title, { color: theme.text }]}>沉光共读</Text>
           <Text style={[styles.enName, { color: theme.textMuted }]}>Dawn</Text>
           <Text style={[styles.subtitle, { color: theme.textSecondary }]}>
-            {isRegister ? '请输入您的用户名和密码' : '登录'}
+            {isRegister ? '用户名至少3个字符，密码至少6位' : '登录'}
           </Text>
 
           <TextInput
