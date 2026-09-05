@@ -580,10 +580,23 @@ export default function ListenScreen({ route, navigation }) {
     return {
       recording_ms: diff('recording_started', 'endpoint_end'),
       asr_ms: diff('asr_start', 'asr_end'),
+      asr_server_transcode_ms: timing?.meta?.asrServerTranscodeMs ?? null,
+      asr_provider_ms: timing?.meta?.asrProviderMs ?? null,
+      asr_transport_ms: (
+        Number.isFinite(timing?.meta?.asrServerTranscodeMs)
+        && Number.isFinite(timing?.meta?.asrProviderMs)
+        && Number.isFinite(diff('asr_start', 'asr_end'))
+      ) ? Math.max(0, diff('asr_start', 'asr_end')
+        - timing.meta.asrServerTranscodeMs - timing.meta.asrProviderMs) : null,
       intent_ms: diff('intent_start', 'intent_end'),
       llm_first_delta_ms: diff('llm_start', 'llm_first_delta'),
+      llm_first_sentence_ms: diff('llm_start', 'first_tts_enqueue'),
+      llm_delta_to_sentence_ms: diff('llm_first_delta', 'first_tts_enqueue'),
       llm_total_ms: diff('llm_start', 'llm_done'),
       tts_to_audio_start_ms: diff(m.first_tts_enqueue ? 'first_tts_enqueue' : 'llm_done', 'answer_audio_start'),
+      tts_audio_mode_ms: diff('first_tts_audio_mode_start', 'first_tts_audio_mode_end'),
+      tts_load_ms: diff('first_tts_load_start', 'first_tts_load_end'),
+      tts_play_start_ms: diff('first_tts_play_request', 'answer_audio_start'),
       answer_play_ms: diff('answer_audio_start', 'answer_play_end'),
       resume_to_audio_start_ms: diff('resume_start', 'resume_audio_start'),
       total_ms: m.start && totalEnd ? Math.max(0, totalEnd - m.start) : null,
@@ -1136,7 +1149,15 @@ export default function ListenScreen({ route, navigation }) {
       await restorePlaybackAudioMode();
       if (!speechEverDetected) return null; // 全程没有真的检测到声音，不浪费一次识别请求
       markHfTiming('开始ASR识别', 'asr_start');
-      const text = await transcribeAudio(uri, FileSystem.uploadAsync, FileSystem.FileSystemUploadType);
+      const text = await transcribeAudio(
+        uri,
+        FileSystem.uploadAsync,
+        FileSystem.FileSystemUploadType,
+        (timings) => setHfTimingMeta({
+          asrServerTranscodeMs: timings.transcode_ms,
+          asrProviderMs: timings.provider_ms,
+        }),
+      );
       markHfTiming(`ASR识别完成 chars=${(text || '').trim().length}`, 'asr_end');
       setHfTimingMeta({ asrTextChars: (text || '').trim().length });
       return (text || '').trim();
@@ -1262,14 +1283,18 @@ export default function ListenScreen({ route, navigation }) {
           return;
         }
         playing = true;
+        if (item.seq === 1) markHfTiming('首段TTS切换播放音频模式', 'first_tts_audio_mode_start');
         await restorePlaybackAudioMode().catch(() => {});
+        if (item.seq === 1) markHfTiming('首段TTS播放音频模式就绪', 'first_tts_audio_mode_end');
         let sound = item.sound;
         if (!sound) {
           try {
+            if (item.seq === 1) markHfTiming('首段TTS开始加载', 'first_tts_load_start');
             ({ sound } = await Audio.Sound.createAsync(
               { uri: getTtsPlayUrl(item.text, voiceRef.current, rateRef.current) },
               { shouldPlay: false },
             ));
+            if (item.seq === 1) markHfTiming('首段TTS加载完成', 'first_tts_load_end');
           } catch (e) {
             playing = false;
             markHfTiming(`AI回复TTS加载失败 ${e.message || e}`);
@@ -1298,6 +1323,9 @@ export default function ListenScreen({ route, navigation }) {
             }
             return;
           }
+          if (item.seq === 1 && s.isPlaying && !hfTimingRef.current?.marks?.answer_audio_start) {
+            markHfTiming('AI回复TTS实际开始播放', 'answer_audio_start');
+          }
           if (s.didJustFinish) {
             sound.unloadAsync().catch(() => {});
             if (soundRef.current === sound) soundRef.current = null;
@@ -1305,6 +1333,7 @@ export default function ListenScreen({ route, navigation }) {
             playNext();
           }
         });
+        if (item.seq === 1) markHfTiming('首段TTS请求播放', 'first_tts_play_request');
         sound.playAsync().then(() => {
           if (!hfTimingRef.current?.marks?.answer_audio_start) {
             markHfTiming('AI回复TTS开始播放', 'answer_audio_start');
@@ -1374,7 +1403,7 @@ export default function ListenScreen({ route, navigation }) {
             userHighlights: [], popularHighlights: [],
           },
           question,
-          style: 'simple',
+          style: 'voice',
           history: [],
         },
         {

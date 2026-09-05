@@ -327,7 +327,7 @@ export function getTtsPlayUrl(text, voice = 'zh-CN-XiaoxiaoNeural', rate = '+0%'
   return `${API_BASE}/tts/play?text=${encodeURIComponent(text)}&voice=${encodeURIComponent(voice)}&rate=${encodeURIComponent(rate)}`;
 }
 
-export async function transcribeAudio(fileUri, uploadAsync, FileSystemUploadType) {
+export async function transcribeAudio(fileUri, uploadAsync, FileSystemUploadType, onTiming = null) {
   // 真机反馈过好几次"未识别到内容"，但同一时间段后端日志完全没有对应
   // 请求记录——怀疑请求可能压根没真正打到后端（网络层面被拦截/超时返回
   // 了什么奇怪的东西），"未识别到内容"这条提示原来是"text为空就默认这句"，
@@ -358,6 +358,7 @@ export async function transcribeAudio(fileUri, uploadAsync, FileSystemUploadType
   if (!parsed.text) {
     throw new Error(`诊断：status=${result.status} 后端返回但text为空，body="${(result.body || '').slice(0, 120)}"`);
   }
+  if (onTiming && parsed.timings) onTiming(parsed.timings);
   return parsed.text;
 }
 

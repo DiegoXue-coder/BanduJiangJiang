@@ -2307,6 +2307,10 @@ SOCR_MAX_ROUNDS = 8
 STYLE_SUFFIX = {
     "academic": "\n\n【风格要求】请用严谨的学术语言，引用相关理论或概念，可以适当使用专业术语并解释。",
     "story":    "\n\n【风格要求】请用讲故事的方式解释，加入具体场景、比喻或类比，让人感觉身临其境。",
+    # 听书页会在第一句完整后立即送去TTS。第一句如果很长，即使LLM首字很快，
+    # 用户仍要等模型把长句写完才听得到声音；因此单独给语音回答一个短首句风格，
+    # 不改变标准阅读问AI的文字回答习惯。
+    "voice":    "\n\n【语音回答要求】开头先用8到15个汉字给出直接结论，以句号结束；不要加“简单来说”“这个问题”等铺垫。然后再自然解释，全文仍控制在150字以内。",
 }
 
 # 真机测试实锤：round2/round3+ 原来枚举"不懂/看不懂/什么意思/不知道"这几个
@@ -2715,12 +2719,19 @@ async def transcribe(request: Request, _=ExtAuth):
         wav_bytes = await asyncio.to_thread(_webm_to_wav, audio_bytes)
         t1        = time.time()
         text      = await _tencent_sentence_transcribe(wav_bytes)
+        t2        = time.time()
         # 拆开打日志：转码 vs 腾讯云ASR本身，方便以后排查延迟时一眼看出瓶颈在哪层
-        print(f"[转录] 转码={t1-t0:.2f}s 腾讯云ASR={time.time()-t1:.2f}s 总计={time.time()-t0:.2f}s → {repr(text)}")
+        print(f"[转录] 转码={t1-t0:.2f}s 腾讯云ASR={t2-t1:.2f}s 总计={t2-t0:.2f}s → {repr(text)}")
     except Exception as e:
         print(f"[转录] 错误: {e}")
         raise HTTPException(status_code=502, detail=f"语音识别错误: {e}")
-    return {"text": text}
+    return {
+        "text": text,
+        "timings": {
+            "transcode_ms": round((t1 - t0) * 1000),
+            "provider_ms": round((t2 - t1) * 1000),
+        },
+    }
 
 # ── 手机端 App 接口（/app 前缀，WBS 阶段一骨架）─────────────────────
 # 阶段十三之前这里鉴权是复用插件那套 HMAC（ExtAuth）、写死 user_id=1；
