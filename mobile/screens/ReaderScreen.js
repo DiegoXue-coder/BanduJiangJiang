@@ -107,6 +107,13 @@ const READER_MODE_LABEL = { epub: '原版', standard: '标准' };
 const STANDARD_PAGE_MIN_CHARS = 80;
 const STANDARD_PAGE_MAX_CHARS = 430;
 const STANDARD_READING_LINE_HEIGHT = 1.56;
+const READER_LOADING_STAGES = [
+  '准备书籍文件',
+  '读取目录结构',
+  '解析书籍内容',
+  '应用阅读样式',
+  '进入正文',
+];
 
 function jsStringLiteral(value) {
   return JSON.stringify(String(value ?? ''));
@@ -1403,9 +1410,12 @@ function ReaderInner({
   const standardInteractionReady = readerSettingsLoaded && !standardChapterError && !!standardChapterText;
   const epubInteractionReady = readerSettingsLoaded && !!epubSrc && isReady && epubReadyGateOpen;
   const readerInteractionReady = readerMode === 'standard' ? standardInteractionReady : epubInteractionReady;
+  const readerLoadingStageIndex = readerMode === 'standard'
+    ? (!readerSettingsLoaded ? 1 : !standardChapterText ? 2 : 3)
+    : (!epubSrc ? 0 : !isReady ? 2 : !epubReadyGateOpen ? 3 : 4);
   const readerLoadingLabel = readerMode === 'standard'
-    ? (!readerSettingsLoaded ? '正在加载阅读设置…' : '正在整理标准模式正文…')
-    : (!epubSrc ? '正在准备原版 EPUB…' : !isReady ? '正在解析 EPUB…' : '正在准备阅读器…');
+    ? (!readerSettingsLoaded ? '正在读取你的阅读设置' : '正在整理正文内容')
+    : (!epubSrc ? '正在准备书籍文件' : !isReady ? '正在解析书籍内容' : '正在应用阅读样式');
   const showReaderGateOverlay = !readerInteractionReady && !standardChapterError && !epubError;
   const readerPanelOpen = showFontSizePanel || showThemePanel;
 
@@ -1588,26 +1598,6 @@ function ReaderInner({
               <Text style={[styles.fontSizeBtnText, { color: uiTheme.text, fontSize: 20 }]}>A+</Text>
             </TouchableOpacity>
           </View>
-          <View style={styles.controlPanelRow}>
-            {READER_MODE_ORDER.map((mode) => (
-              <TouchableOpacity
-                key={mode}
-                style={[
-                  styles.themeSegment,
-                  { borderRadius: uiTheme.radius, borderColor: uiTheme.cardBorder },
-                  readerMode === mode && { backgroundColor: uiTheme.accent, borderColor: uiTheme.accent },
-                ]}
-                onPress={() => selectReaderMode(mode)}
-              >
-                <Text style={[
-                  styles.themeSegmentText,
-                  { color: readerMode === mode ? uiTheme.textOnAccent : uiTheme.textSecondary },
-                ]}>
-                  {READER_MODE_LABEL[mode]}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
           {/* 阶段十九：字体选择器（宋体/黑体/楷体三选一），跟字号调节放
               在同一个面板里——都是排版控制，没必要单独占一个头部图标。 */}
           <View style={styles.controlPanelRow}>
@@ -1754,8 +1744,7 @@ function ReaderInner({
               </View>
             ) : !standardChapterText ? (
               <View style={styles.centerBox}>
-                <ActivityIndicator size="large" color={uiTheme.accent} />
-                <Text style={[styles.loadingText, { color: uiTheme.textSecondary }]}>正在整理标准模式正文…</Text>
+                <ReaderLoadingProgress stageIndex={readerLoadingStageIndex} subtitle={readerLoadingLabel} theme={uiTheme} />
               </View>
             ) : (
               <>
@@ -1781,8 +1770,7 @@ function ReaderInner({
           </View>
         ) : !epubSrc ? (
           <View style={styles.centerBox}>
-            <ActivityIndicator size="large" color={uiTheme.accent} />
-            <Text style={[styles.loadingText, { color: uiTheme.textSecondary }]}>正在准备原版 EPUB…</Text>
+            <ReaderLoadingProgress stageIndex={readerLoadingStageIndex} subtitle={readerLoadingLabel} theme={uiTheme} />
           </View>
         ) : (
           <View
@@ -1838,8 +1826,7 @@ function ReaderInner({
         )}
         {showReaderGateOverlay && (
           <View style={[styles.readerReadyOverlay, { backgroundColor: THEMES[themeName].body.background }]}>
-            <ActivityIndicator size="large" color={uiTheme.accent} />
-            <Text style={[styles.loadingText, { color: uiTheme.textSecondary }]}>{readerLoadingLabel}</Text>
+            <ReaderLoadingProgress stageIndex={readerLoadingStageIndex} subtitle={readerLoadingLabel} theme={uiTheme} />
           </View>
         )}
       </View>
@@ -2001,7 +1988,11 @@ export default function ReaderScreen({ route, navigation }) {
     return (
       <SafeAreaView style={[styles.safe, { backgroundColor: theme.bg }]}>
         <View style={styles.centerBox}>
-          <ActivityIndicator size="large" color={theme.accent} />
+          <ReaderLoadingProgress
+            stageIndex={ctx ? 1 : 0}
+            subtitle={ctx ? '正在读取目录结构' : '正在准备书籍文件'}
+            theme={theme}
+          />
         </View>
       </SafeAreaView>
     );
@@ -2021,6 +2012,50 @@ export default function ReaderScreen({ route, navigation }) {
       epubError={epubError}
       chapters={ctx.chapters}
     />
+  );
+}
+
+function ReaderLoadingProgress({ stageIndex, title = '正在准备阅读体验', subtitle, theme }) {
+  const activeIndex = Math.max(0, Math.min(READER_LOADING_STAGES.length - 1, stageIndex));
+  const pct = Math.round(((activeIndex + 1) / READER_LOADING_STAGES.length) * 100);
+  return (
+    <View style={styles.loadingProgressBox}>
+      <Text style={[styles.loadingProgressTitle, { color: theme.text }]}>{title}</Text>
+      <Text style={[styles.loadingProgressSubtitle, { color: theme.textSecondary }]}>
+        {subtitle || READER_LOADING_STAGES[activeIndex]}
+      </Text>
+      <View style={[styles.loadingProgressTrack, { backgroundColor: theme.cardBorder }]}>
+        <View style={[styles.loadingProgressFill, { width: `${pct}%`, backgroundColor: theme.accent }]} />
+      </View>
+      <Text style={[styles.loadingProgressPercent, { color: theme.textMuted }]}>{pct}%</Text>
+      <View style={styles.loadingStageList}>
+        {READER_LOADING_STAGES.map((label, index) => {
+          const done = index < activeIndex;
+          const active = index === activeIndex;
+          return (
+            <View key={label} style={styles.loadingStageRow}>
+              <View style={[
+                styles.loadingStageDot,
+                { borderColor: active || done ? theme.accent : theme.cardBorder },
+                done && { backgroundColor: theme.accent },
+              ]} />
+              <Text style={[
+                styles.loadingStageText,
+                { color: active || done ? theme.textSecondary : theme.textMuted },
+                active && { color: theme.text, fontWeight: '700' },
+              ]}>
+                {label}
+              </Text>
+            </View>
+          );
+        })}
+      </View>
+      {activeIndex >= 2 && (
+        <Text style={[styles.loadingProgressHint, { color: theme.textMuted }]}>
+          首次打开大书会稍慢一些，之后会更快
+        </Text>
+      )}
+    </View>
   );
 }
 
@@ -2081,6 +2116,29 @@ const styles = StyleSheet.create({
 
   centerBox: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12 },
   loadingText: { fontSize: 13 },
+  loadingProgressBox: {
+    width: '78%',
+    maxWidth: 360,
+    alignItems: 'stretch',
+    gap: 10,
+  },
+  loadingProgressTitle: { fontSize: 20, fontWeight: '700', textAlign: 'center' },
+  loadingProgressSubtitle: { fontSize: 13, textAlign: 'center', marginBottom: 4 },
+  loadingProgressTrack: {
+    height: 6,
+    borderRadius: 999,
+    overflow: 'hidden',
+  },
+  loadingProgressFill: {
+    height: '100%',
+    borderRadius: 999,
+  },
+  loadingProgressPercent: { fontSize: 12, textAlign: 'right' },
+  loadingStageList: { gap: 8, marginTop: 4 },
+  loadingStageRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  loadingStageDot: { width: 9, height: 9, borderRadius: 9, borderWidth: 1.5 },
+  loadingStageText: { fontSize: 12.5 },
+  loadingProgressHint: { fontSize: 12, textAlign: 'center', marginTop: 4, lineHeight: 18 },
   errorText: { fontSize: 14, textAlign: 'center', paddingHorizontal: 24 },
   retryBtn: { marginTop: 16, paddingHorizontal: 20, paddingVertical: 10 },
   retryText: { fontWeight: '600' },
