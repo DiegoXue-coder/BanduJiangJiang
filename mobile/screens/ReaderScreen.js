@@ -245,6 +245,7 @@ function buildStandardPageHtml({
   accent,
   highlights,
   chapterId,
+  androidSelectionGuard,
 }) {
   const faceCss = fontBase64
     ? `@font-face{font-family:"${fontFamily}";src:url("data:font/truetype;charset=utf-8;base64,${fontBase64}") format("truetype");font-weight:${fontWeight};font-style:normal;}`
@@ -291,6 +292,8 @@ function buildStandardPageHtml({
   <script>
     (function(){
       var startX=0,startY=0,startT=0,moved=false,selecting=false,longTimer=null,anchor=null,focus=null,lastFocusKey='',selectedEls=[];
+      var longPressMs=${androidSelectionGuard ? 720 : 320};
+      var moveCancelPx=${androidSelectionGuard ? 10 : 22};
       function post(payload){
         try {
           window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify(payload));
@@ -418,7 +421,7 @@ function buildStandardPageHtml({
             anchor=meta;
             focus=meta;
             markTokenRange();
-          }, 320);
+          }, longPressMs);
         }
         } catch(err) { post({type:'standardSelectionError'}); }
       }, {passive:true});
@@ -433,7 +436,7 @@ function buildStandardPageHtml({
             focus=meta;
             markTokenRange();
           }
-        } else if(longTimer && (Math.abs(dx)>22 || Math.abs(dy)>22)){
+        } else if(longTimer && (Math.abs(dx)>moveCancelPx || Math.abs(dy)>moveCancelPx)){
           clearTimeout(longTimer);
           longTimer=null;
         }
@@ -1093,6 +1096,10 @@ function ReaderInner({
   }
 
   function handleReaderWebViewMessage(event) {
+    if (event?.type === 'chatbookClearAccidentalSelection') {
+      setSelection(null);
+      return;
+    }
     if (event?.type !== 'chatbookFontDiagnostics') return;
     Alert.alert('字体诊断', formatFontDiagnostics(event.payload, fontAssetReport));
   }
@@ -1168,6 +1175,96 @@ function ReaderInner({
       true;
     `);
   }, [isReady, themeName]);
+
+  // 安卓 Chromium 在翻页/滑动过程中偶尔会先生成原生文字选区。把一次
+  // 触摸先归类：720ms 内移动超过 10px 就视为翻页并清掉误选；稳定长按
+  // 达到门槛后才允许继续拖动选区手柄。iOS 不注入，保持原有行为。
+  useEffect(() => {
+    if (!isReady || Platform.OS !== 'android') return;
+    injectJavascript(`
+      (function() {
+        function getReaderRendition() {
+          if (typeof rendition !== 'undefined' && rendition) return rendition;
+          return window.rendition || null;
+        }
+        function install(doc) {
+          if (!doc || doc.__chatbookAndroidSelectionGuard) return;
+          doc.__chatbookAndroidSelectionGuard = true;
+          var startX = 0, startY = 0, startAt = 0;
+          var qualified = false, rejected = false, timer = null;
+          function postClear() {
+            try {
+              var bridge = window.ReactNativeWebView || (window.parent && window.parent.ReactNativeWebView);
+              if (bridge && bridge.postMessage) {
+                bridge.postMessage(JSON.stringify({ type: 'chatbookClearAccidentalSelection' }));
+              }
+            } catch (e) {}
+          }
+          function clearSelection() {
+            try {
+              var view = doc.defaultView;
+              var selected = view && view.getSelection ? view.getSelection() : null;
+              if (selected && selected.rangeCount) selected.removeAllRanges();
+            } catch (e) {}
+            postClear();
+          }
+          doc.addEventListener('touchstart', function(e) {
+            clearTimeout(timer);
+            var touch = e.changedTouches && e.changedTouches[0];
+            if (!touch || (e.touches && e.touches.length !== 1)) {
+              rejected = true;
+              qualified = false;
+              return;
+            }
+            startX = touch.clientX;
+            startY = touch.clientY;
+            startAt = Date.now();
+            qualified = false;
+            rejected = false;
+            timer = setTimeout(function() { qualified = !rejected; }, 720);
+          }, { passive: true, capture: true });
+          doc.addEventListener('touchmove', function(e) {
+            if (qualified || rejected) return;
+            var touch = e.changedTouches && e.changedTouches[0];
+            if (!touch) return;
+            if (Math.abs(touch.clientX - startX) > 10 || Math.abs(touch.clientY - startY) > 10) {
+              rejected = true;
+              clearTimeout(timer);
+              clearSelection();
+            }
+          }, { passive: true, capture: true });
+          doc.addEventListener('touchend', function() {
+            clearTimeout(timer);
+            if (rejected || !qualified || Date.now() - startAt < 720) clearSelection();
+            qualified = false;
+            rejected = false;
+          }, { passive: true, capture: true });
+          doc.addEventListener('touchcancel', function() {
+            clearTimeout(timer);
+            qualified = false;
+            rejected = true;
+            clearSelection();
+          }, { passive: true, capture: true });
+        }
+        try {
+          var readerRendition = getReaderRendition();
+          install(document);
+          if (readerRendition && typeof readerRendition.getContents === 'function') {
+            readerRendition.getContents().forEach(function(contents) {
+              install(contents && contents.document);
+            });
+          }
+          if (!window.__chatbookAndroidSelectionRenderedHook && readerRendition && typeof readerRendition.on === 'function') {
+            window.__chatbookAndroidSelectionRenderedHook = true;
+            readerRendition.on('rendered', function(section, contents) {
+              install(contents && contents.document);
+            });
+          }
+        } catch (e) {}
+      })();
+      true;
+    `);
+  }, [isReady]);
 
   // 阶段十四：点击左右边缘翻页——前两版分别用RN的Pressable和
   // react-native-gesture-handler的Gesture.Tap()在WebView上面盖一层透明
@@ -1388,6 +1485,7 @@ function ReaderInner({
     accent: uiTheme.accent,
     highlights: standardSavedHighlights,
     chapterId: standardChapterId,
+    androidSelectionGuard: Platform.OS === 'android',
   }), [
     standardPage,
     bodyFont,
