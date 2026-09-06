@@ -213,18 +213,12 @@ function AddTile({ theme, onPress, disabled }) {
   );
 }
 
-// 续二十七"定稿"原型：点"+"之前先弹一层格式说明（EPUB/PDF/TXT三种都
-// 支持，标出哪种排版最完整），确认之后才去跳系统原生文件选择器——旧版
-// 是点"+"直接弹文件选择器，用户对"选哪种格式的文件会怎样"没有预期。
+// 点"+"后先说明支持的格式和两种导入路径，再由唯一的主按钮打开系统
+// 文件选择器。格式名称只是能力说明，不做成可选项，避免用户误以为必须
+// 先判断或选择 EPUB/PDF/TXT。
 // 这里没有引入额外的bottom sheet依赖，用现成的transparent Modal +
 // 底部对齐的卡片自己实现滑出效果，跟这个文件里"importing"状态那个
 // Modal是同一个套路，不用为了这一个新面板多装一个库。
-const IMPORT_FORMATS = [
-  { key: 'epub', label: 'EPUB', hint: '推荐 · 排版最完整', good: true },
-  { key: 'pdf', label: 'PDF', hint: '自动转换，长文档可能需要1-2分钟', good: false },
-  { key: 'txt', label: 'TXT', hint: '自动转换，速度最快', good: false },
-];
-
 function ImportFormatSheet({ visible, theme, onClose, onConfirm }) {
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
@@ -235,24 +229,17 @@ function ImportFormatSheet({ visible, theme, onClose, onConfirm }) {
         <TouchableOpacity activeOpacity={1} onPress={() => {}} style={[styles.importSheetCard, { backgroundColor: theme.cardBg }]}>
           <View style={[styles.sheetHandle, { backgroundColor: theme.cardBorder }]} />
           <Text style={[styles.importSheetTitle, { color: theme.text, fontFamily: FONTS.serifBold }]}>导入你的书</Text>
-          <View style={styles.fmtList}>
-            {IMPORT_FORMATS.map((f) => (
-              <View
-                key={f.key}
-                style={[styles.fmtTag, { backgroundColor: f.good ? theme.accentSoft : theme.cardBg2 }]}
-              >
-                <Text style={[styles.fmtTagLabel, { color: f.good ? theme.accentDim : theme.textSecondary, fontFamily: MONO_FONT }]}>
-                  {f.label}
-                </Text>
-                <Text style={[styles.fmtTagHint, { color: theme.textMuted }]}>{f.hint}</Text>
-              </View>
-            ))}
+          <Text style={[styles.importSheetIntro, { color: theme.textSecondary }]}>无需选择文件格式，直接从手机中找到想读的书即可。</Text>
+          <View style={[styles.supportedFormats, { borderColor: theme.cardBorder }]}>
+            <Text style={[styles.supportedFormatsLabel, { color: theme.textMuted }]}>支持格式</Text>
+            <Text style={[styles.supportedFormatsValue, { color: theme.text, fontFamily: MONO_FONT }]}>EPUB · PDF · TXT</Text>
           </View>
+          <Text style={[styles.importSourceHint, { color: theme.textMuted }]}>也可以在微信、浏览器、网盘等 App 中，使用“分享/打开方式”发送到 ChatBook。</Text>
           <TouchableOpacity
             style={[styles.importConfirmBtn, { backgroundColor: theme.accent, borderRadius: theme.radius }]}
             onPress={onConfirm}
           >
-            <Text style={[styles.importConfirmBtnText, { color: theme.textOnAccent }]}>从文件里选一本</Text>
+            <Text style={[styles.importConfirmBtnText, { color: theme.textOnAccent }]}>从手机选择一本书</Text>
           </TouchableOpacity>
         </TouchableOpacity>
       </TouchableOpacity>
@@ -600,11 +587,12 @@ const styles = StyleSheet.create({
   sheetBackdrop: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(10,14,20,0.4)' },
   importSheetCard: { borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 20, paddingBottom: 34 },
   sheetHandle: { width: 34, height: 4, borderRadius: 2, alignSelf: 'center', marginBottom: 16 },
-  importSheetTitle: { fontSize: 17, fontWeight: '700', marginBottom: 16 },
-  fmtList: { gap: 10, marginBottom: 18 },
-  fmtTag: { flexDirection: 'row', alignItems: 'baseline', gap: 10, paddingHorizontal: 14, paddingVertical: 11, borderRadius: 8 },
-  fmtTagLabel: { fontSize: 12, fontWeight: '700' },
-  fmtTagHint: { fontSize: 11.5 },
+  importSheetTitle: { fontSize: 17, fontWeight: '700', marginBottom: 8 },
+  importSheetIntro: { fontSize: 13, lineHeight: 20, marginBottom: 18 },
+  supportedFormats: { flexDirection: 'row', alignItems: 'baseline', gap: 12, borderBottomWidth: StyleSheet.hairlineWidth, paddingBottom: 12 },
+  supportedFormatsLabel: { fontSize: 11.5 },
+  supportedFormatsValue: { fontSize: 13, fontWeight: '700', letterSpacing: 0.5 },
+  importSourceHint: { fontSize: 12, lineHeight: 19, marginTop: 12, marginBottom: 18 },
   importConfirmBtn: { paddingVertical: 13, alignItems: 'center' },
   importConfirmBtnText: { fontSize: 14, fontWeight: '700' },
 });
