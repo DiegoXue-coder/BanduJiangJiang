@@ -1785,44 +1785,49 @@ function ReaderInner({
             <Text style={[styles.loadingText, { color: uiTheme.textSecondary }]}>正在准备原版 EPUB…</Text>
           </View>
         ) : (
-          <Reader
-            src={epubSrc}
-            fileSystem={useFileSystem}
-            width="100%"
-            height="100%"
-            defaultTheme={THEMES.light}
-            initialLocation={initialLocation || undefined}
-            onReady={handleReady}
-            onDisplayError={(reason) => Alert.alert('加载失败', String(reason))}
-            onLocationChange={handleLocationChange}
-            onWebViewMessage={handleReaderWebViewMessage}
-            onSelected={(text, cfiRange) => {
-              if (!readerInteractionReady) return;
-              setSelection({ text, cfiRange });
-            }}
-            menuItems={[
-              {
-                label: '划线',
-                action: (cfiRange, text) => {
-                  handleHighlight(cfiRange, text);
-                  return false;
+          <View
+            pointerEvents={readerInteractionReady ? 'auto' : 'none'}
+            style={[styles.epubReaderHost, !readerInteractionReady && styles.readerHostHidden]}
+          >
+            <Reader
+              src={epubSrc}
+              fileSystem={useFileSystem}
+              width="100%"
+              height="100%"
+              defaultTheme={THEMES.light}
+              initialLocation={initialLocation || undefined}
+              onReady={handleReady}
+              onDisplayError={(reason) => Alert.alert('加载失败', String(reason))}
+              onLocationChange={handleLocationChange}
+              onWebViewMessage={handleReaderWebViewMessage}
+              onSelected={(text, cfiRange) => {
+                if (!readerInteractionReady) return;
+                setSelection({ text, cfiRange });
+              }}
+              menuItems={[
+                {
+                  label: '划线',
+                  action: (cfiRange, text) => {
+                    handleHighlight(cfiRange, text);
+                    return false;
+                  },
                 },
-              },
-              {
-                label: '问AI',
-                action: (cfiRange, text) => {
-                  openChat(text, cfiRange);
-                  return false;
+                {
+                  label: '问AI',
+                  action: (cfiRange, text) => {
+                    openChat(text, cfiRange);
+                    return false;
+                  },
                 },
-              },
-            ]}
-            renderLoadingFileComponent={() => (
-              <View style={styles.centerBox}>
-                <ActivityIndicator size="large" color={uiTheme.accent} />
-                <Text style={[styles.loadingText, { color: uiTheme.textSecondary }]}>正在下载书本…</Text>
-              </View>
-            )}
-          />
+              ]}
+              renderLoadingFileComponent={() => (
+                <View style={styles.centerBox}>
+                  <ActivityIndicator size="large" color={uiTheme.accent} />
+                  <Text style={[styles.loadingText, { color: uiTheme.textSecondary }]}>正在下载书本…</Text>
+                </View>
+              )}
+            />
+          </View>
         )}
         {readerPanelOpen && (
           <TouchableOpacity
@@ -2030,6 +2035,8 @@ const styles = StyleSheet.create({
   headerBtnText: { fontSize: 15, fontWeight: '600' },
 
   readerBody: { flex: 1, position: 'relative' },
+  epubReaderHost: { flex: 1 },
+  readerHostHidden: { opacity: 0 },
   readerReadyOverlay: {
     ...StyleSheet.absoluteFillObject,
     zIndex: 40,
