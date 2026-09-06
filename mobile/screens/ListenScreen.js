@@ -708,7 +708,12 @@ export default function ListenScreen({ route, navigation }) {
       return;
     }
     soundRef.current = sound;
-    onAudioStart?.(); // 真正要出声了才回调——见调用处注释，打断截取的位置要跟这个对齐
+    let audioStarted = false;
+    const notifyAudioStart = () => {
+      if (audioStarted) return;
+      audioStarted = true;
+      onAudioStart?.();
+    };
     await new Promise((resolve) => {
       let settled = false;
       const finish = () => {
@@ -730,9 +735,12 @@ export default function ListenScreen({ route, navigation }) {
             ),
           };
         }
+        if (s.isLoaded && s.isPlaying) notifyAudioStart();
         if (!s.isLoaded || s.didJustFinish) finish();
       });
-      sound.playAsync().catch(() => finish()); // 播放本身失败也别卡住整个循环，跳过这段
+      sound.playAsync()
+        .then(() => notifyAudioStart())
+        .catch(() => finish()); // 播放本身失败也别卡住整个循环，跳过这段
     });
   }
 
@@ -880,6 +888,19 @@ export default function ListenScreen({ route, navigation }) {
     if (epoch === epochRef.current) setPhase('done');
   }, [bookId]);
 
+  function restartNarrationFromCurrent(reason = '手动恢复正文播放') {
+    const { chapterIdx, paragraphIdx } = posRef.current;
+    epochRef.current += 1;
+    const epoch = epochRef.current;
+    console.log(`[听书诊断] ${reason} chapter=${chapterIdx} paragraph=${paragraphIdx}`);
+    setIsManuallyPaused(false);
+    (async () => {
+      await stopSound();
+      await restorePlaybackAudioMode().catch(() => {});
+      playFrom(chapterIdx, paragraphIdx, epoch);
+    })();
+  }
+
   // 真机反馈"切换声音要及时，不要等到下一部分"——已经在播的这一段音频
   // 没法中途换嗓音（已经合成好的音频文件改不了），做不到真正意义上的
   // "无缝切换"，但可以做到"立刻用新设置重新开始播这一段"，比"等这一整段
@@ -1005,7 +1026,10 @@ export default function ListenScreen({ route, navigation }) {
   // 直接操作soundRef.current这个正在播放的Sound实例（pauseAsync/playAsync
   // 是expo-av对已加载音频的原生操作，不需要重新合成语音），不碰phase。
   function togglePlayPause() {
-    if (!soundRef.current) return;
+    if (!soundRef.current) {
+      if (phase === 'playing') restartNarrationFromCurrent('播放键兜底重建sound');
+      return;
+    }
     if (isManuallyPaused) {
       soundRef.current.playAsync().catch(() => {});
       setIsManuallyPaused(false);
@@ -1492,7 +1516,12 @@ export default function ListenScreen({ route, navigation }) {
     epochRef.current += 1;
     hfResumePendingRef.current = true;
     markHfTiming(`恢复正文 chapter=${chapterIdx} paragraph=${paragraphIdx}`, 'resume_start');
-    playFrom(chapterIdx, paragraphIdx, epochRef.current);
+    const epoch = epochRef.current;
+    (async () => {
+      await stopSound();
+      await restorePlaybackAudioMode().catch(() => {});
+      playFrom(chapterIdx, paragraphIdx, epoch);
+    })();
     if (handsFreeEnabled && !handsFreeMuted && !MANUAL_HOLD_TO_TALK) {
       setHandsFreeStatus('免提监听中');
       startHandsFreeAmbient();
@@ -1526,7 +1555,7 @@ export default function ListenScreen({ route, navigation }) {
     setHfText('');
   }
 
-  function handleVoiceModeMicPressIn() {
+  function handleVoiceModeMicLongPress() {
     if (MANUAL_HOLD_TO_TALK) {
       if (hfStage === 'listening' || hfStage === 'thinking') return;
       voiceHoldActiveRef.current = true;
@@ -1546,17 +1575,14 @@ export default function ListenScreen({ route, navigation }) {
 
   function handleVoiceModeMicPressOut() {
     if (!MANUAL_HOLD_TO_TALK) return;
+    if (!voiceHoldActiveRef.current && hfStage !== 'listening') return;
     voiceHoldActiveRef.current = false;
     setHandsFreeMuted(true);
     hfListenResolveRef.current?.();
   }
 
   function handleVoiceModeStatusPress() {
-    if (MANUAL_HOLD_TO_TALK && hfStage === 'replying') {
-      voiceHoldActiveRef.current = true;
-      setHandsFreeMuted(false);
-      startHandsFreeTurn(true);
-    }
+    // 2026-09-06安卓P0：语音收音只能由麦克风长按触发，状态区轻点不再打断。
   }
 
   // 决策层这轮派发：连续追问改成"对话式"UI——之前点"继续追问"会跳回
@@ -2119,7 +2145,7 @@ export default function ListenScreen({ route, navigation }) {
                       <TouchableOpacity
                         style={styles.voiceModeStatusButton}
                         onPress={handleVoiceModeStatusPress}
-                        disabled={!(MANUAL_HOLD_TO_TALK && hfStage === 'replying')}
+                        disabled={MANUAL_HOLD_TO_TALK}
                         accessibilityLabel={voiceModeStatus}
                       >
                         <View style={[styles.voiceModeDots, hfStage === 'replying' && styles.voiceModeDotsStop]}>
@@ -2139,7 +2165,8 @@ export default function ListenScreen({ route, navigation }) {
                             !handsFreeMuted && styles.voiceModeMicBtnActive,
                             handsFreeMuted && styles.voiceModeMicBtnMuted,
                           ]}
-                          onPressIn={handleVoiceModeMicPressIn}
+                          onLongPress={handleVoiceModeMicLongPress}
+                          delayLongPress={260}
                           onPressOut={handleVoiceModeMicPressOut}
                           accessibilityLabel={manualAskLabel}
                         >
