@@ -126,7 +126,7 @@ function getTabBarStyle(route, visibleStyle) {
   return visibleStyle;
 }
 
-export default function App() {
+function AppContent() {
   const theme = useTheme();
   const [fontsLoaded] = useFonts(FONT_ASSETS);
   const tabBarStyle = { backgroundColor: theme.cardBg, borderTopColor: theme.cardBorder };
@@ -166,15 +166,14 @@ export default function App() {
   }
 
   return (
-    <ShareIntentProvider>
-      <AuthGateProvider loggedIn={loggedIn} onLoggedIn={handleLoggedIn}>
-        <SafeAreaProvider>
-          <EngineerBadge />
-          <GuestPromptModal />
-          <GestureHandlerRootView style={{ flex: 1 }}>
-            <BottomSheetModalProvider>
-              <ReaderProvider>
-                <NavigationContainer>
+    <AuthGateProvider loggedIn={loggedIn} onLoggedIn={handleLoggedIn}>
+      <SafeAreaProvider>
+        <EngineerBadge />
+        <GuestPromptModal />
+        <GestureHandlerRootView style={{ flex: 1 }}>
+          <BottomSheetModalProvider>
+            <ReaderProvider>
+              <NavigationContainer>
                 <StatusBar style="auto" />
                 <Tab.Navigator
                   screenOptions={({ route }) => ({
@@ -217,12 +216,19 @@ export default function App() {
                     })}
                   />
                 </Tab.Navigator>
-                </NavigationContainer>
-              </ReaderProvider>
-            </BottomSheetModalProvider>
-          </GestureHandlerRootView>
-        </SafeAreaProvider>
-      </AuthGateProvider>
+              </NavigationContainer>
+            </ReaderProvider>
+          </BottomSheetModalProvider>
+        </GestureHandlerRootView>
+      </SafeAreaProvider>
+    </AuthGateProvider>
+  );
+}
+
+export default function App() {
+  return (
+    <ShareIntentProvider>
+      <AppContent />
     </ShareIntentProvider>
   );
 }

@@ -7,6 +7,7 @@ import {
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import * as DocumentPicker from 'expo-document-picker';
+import * as FileSystem from 'expo-file-system/legacy';
 import { useShareIntentContext } from 'expo-share-intent';
 import Svg, { Line, Circle, Rect, Defs, LinearGradient as SvgLinearGradient, Stop, Mask, G } from 'react-native-svg';
 import { IconTrash, IconPlus } from '@tabler/icons-react-native';
@@ -46,10 +47,16 @@ function nameFromUri(uri = '', fallback = 'shared-book') {
   const cleanUri = (uri || '').split('?')[0].split('#')[0];
   const last = cleanUri.split('/').filter(Boolean).pop() || fallback;
   try {
-    return decodeURIComponent(last);
+    const decoded = decodeURIComponent(last);
+    return decoded.split(/[\\/]/).filter(Boolean).pop() || fallback;
   } catch {
     return last || fallback;
   }
+}
+
+function safeCacheName(fileName = 'shared-book') {
+  const cleaned = String(fileName || 'shared-book').replace(/[\\/:*?"<>|]/g, '_').trim();
+  return cleaned || 'shared-book';
 }
 
 function mimeForImportExt(ext, fallback = '') {
@@ -57,6 +64,15 @@ function mimeForImportExt(ext, fallback = '') {
   if (ext === 'pdf') return 'application/pdf';
   if (ext === 'txt') return 'text/plain';
   return fallback || 'application/octet-stream';
+}
+
+async function prepareImportUri(uri, fileName) {
+  if (Platform.OS !== 'android' || !uri?.startsWith('content://')) return uri;
+  const cacheDir = FileSystem.cacheDirectory;
+  if (!cacheDir) return uri;
+  const targetUri = `${cacheDir}external-import-${Date.now()}-${safeCacheName(fileName)}`;
+  await FileSystem.copyAsync({ from: uri, to: targetUri });
+  return targetUri;
 }
 
 // 网格背景：设计稿用CSS repeating-linear-gradient画横竖发丝线，顶部到
@@ -322,12 +338,13 @@ async function importBookAsset(asset, setImporting, onDone) {
 
   setImporting(true);
   try {
+    const importUri = await prepareImportUri(uri, fileName);
     if (ext === 'epub') {
-      await importEpub(uri, fileName);
+      await importEpub(importUri, fileName);
     } else {
       const mimeType = mimeForImportExt(ext, asset?.mimeType);
       const title = (fileName || '').replace(/\.(pdf|txt)$/i, '');
-      await importFile(uri, fileName, mimeType, title);
+      await importFile(importUri, fileName, mimeType, title);
     }
     onDone();
   } catch (e) {
@@ -391,6 +408,7 @@ export default function BookshelfScreen({ navigation }) {
   const [importing, setImporting] = useState(false);
   const [showImportSheet, setShowImportSheet] = useState(false);
   const handledExternalImportRef = useRef('');
+  const lastExternalImportAtRef = useRef(0);
 
   const load = useCallback(async (isRefresh = false) => {
     if (isRefresh) setRefreshing(true);
@@ -414,6 +432,7 @@ export default function BookshelfScreen({ navigation }) {
     const key = `${sourceLabel}:${uri || ''}:${fileName || ''}:${asset?.size || ''}`;
     if (!uri || handledExternalImportRef.current === key) return;
     handledExternalImportRef.current = key;
+    lastExternalImportAtRef.current = Date.now();
     if (!requireAuth('import')) {
       Alert.alert('登录后再导入', '外部分享来的书需要保存到你的书架。登录后请从原 App 再分享一次。');
       onConsumed?.();
@@ -458,8 +477,20 @@ export default function BookshelfScreen({ navigation }) {
 
   useEffect(() => {
     if (shareIntentError) {
-      Alert.alert('接收文件失败', '请在原 App 中重新使用分享或打开方式发送到 ChatBook。');
+      console.log('[external-import] expo-share-intent error:', shareIntentError);
+      const timer = setTimeout(() => {
+        if (Date.now() - lastExternalImportAtRef.current < 3000) return;
+        const detail = String(shareIntentError || '').slice(0, 140);
+        Alert.alert(
+          '接收文件失败',
+          detail
+            ? `请在原 App 中重新使用分享或打开方式发送到 ChatBook。\n\n诊断：${detail}`
+            : '请在原 App 中重新使用分享或打开方式发送到 ChatBook。',
+        );
+      }, 800);
+      return () => clearTimeout(timer);
     }
+    return undefined;
   }, [shareIntentError]);
 
   const presetBooks = useMemo(() => (books || []).filter((b) => b.source !== 'imported'), [books]);

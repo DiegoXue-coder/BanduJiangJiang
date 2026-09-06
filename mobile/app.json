@@ -80,6 +80,12 @@
             "application/pdf",
             "text/plain",
             "application/octet-stream"
+          ],
+          "androidMultiIntentFilters": [
+            "application/epub+zip",
+            "application/pdf",
+            "text/plain",
+            "application/octet-stream"
           ]
         }
       ],
