@@ -114,6 +114,46 @@ const READER_LOADING_STAGES = [
   '应用阅读样式',
   '进入正文',
 ];
+const EPUB_NON_READING_LABELS = ['cover', 'toc', 'nav', 'navigation', 'contents', '目录', '封面'];
+
+function isLikelyEpubNonReadingTarget(value) {
+  const text = String(value || '').trim().toLowerCase();
+  if (!text) return false;
+  return EPUB_NON_READING_LABELS.some((label) => text.includes(label));
+}
+
+function findFirstReadableTocItem(items = []) {
+  for (const item of items || []) {
+    const label = item?.label || item?.title || item?.text || '';
+    if (item?.href && !isLikelyEpubNonReadingTarget(label) && !isLikelyEpubNonReadingTarget(item.href)) {
+      return item;
+    }
+    const child = findFirstReadableTocItem(item?.subitems || item?.children || []);
+    if (child) return child;
+  }
+  return (items || []).find((item) => item?.href) || null;
+}
+
+function getReaderLoadingPercent(stageIndex, tick = 0) {
+  const activeIndex = Math.max(0, Math.min(READER_LOADING_STAGES.length - 1, stageIndex));
+  if (activeIndex >= READER_LOADING_STAGES.length - 1) return 100;
+  const stageStart = activeIndex * 20;
+  const gentleProgress = Math.min(18, 8 + tick * 2);
+  return Math.min(96, stageStart + gentleProgress);
+}
+
+function parseReaderBridgeMessage(event) {
+  if (!event) return null;
+  if (event.type) return event;
+  const raw = typeof event === 'string' ? event : (event?.nativeEvent?.data || event?.data);
+  if (typeof raw !== 'string') return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch (_e) {
+    return null;
+  }
+}
 
 function jsStringLiteral(value) {
   return JSON.stringify(String(value ?? ''));
@@ -773,16 +813,15 @@ function ReaderInner({
   // 就显示"划线/问AI"按钮，不依赖那个容易失效的原生菜单。
   const [selection, setSelection] = useState(null); // { text, cfiRange }
   const [standardSavedHighlights, setStandardSavedHighlights] = useState([]);
+  const [readerLoadingTick, setReaderLoadingTick] = useState(0);
   const progressTimer = useRef(null);
   const standardSelectionTimerRef = useRef(null);
   const standardWebViewRef = useRef(null);
-  const epubReadyGateTimerRef = useRef(null);
   const annotationsRestored = useRef(false);
   const skippedInitialNav = useRef(false);
 
   useEffect(() => () => {
     if (standardSelectionTimerRef.current) clearTimeout(standardSelectionTimerRef.current);
-    if (epubReadyGateTimerRef.current) clearTimeout(epubReadyGateTimerRef.current);
   }, []);
 
   useEffect(() => {
@@ -790,10 +829,6 @@ function ReaderInner({
     setEpubReadyGateOpen(false);
     annotationsRestored.current = false;
     skippedInitialNav.current = false;
-    if (epubReadyGateTimerRef.current) {
-      clearTimeout(epubReadyGateTimerRef.current);
-      epubReadyGateTimerRef.current = null;
-    }
   }, [epubSrc]);
 
   useEffect(() => {
@@ -900,14 +935,6 @@ function ReaderInner({
   function handleReady() {
     console.log(`[打开诊断] epub.js onReady触发，WebView内部解析耗时=${Date.now() - readerInnerMountedAtRef.current}ms`);
     setIsReady(true);
-    if (epubReadyGateTimerRef.current) clearTimeout(epubReadyGateTimerRef.current);
-    // onReady只说明epub.js能渲染了；首次跳过导航页、主题、字体、点击翻页
-    // 这些注入还需要跟着跑一轮。稍微延后开放交互，避免安卓用户看到蓝色
-    // 原始目录页、或在翻页/字体还没接好时摸到半成品界面。
-    epubReadyGateTimerRef.current = setTimeout(() => {
-      setEpubReadyGateOpen(true);
-      epubReadyGateTimerRef.current = null;
-    }, 950);
     if (annotationsRestored.current) return;
     annotationsRestored.current = true;
     for (const h of initialAnnotations) {
@@ -1096,13 +1123,89 @@ function ReaderInner({
   }
 
   function handleReaderWebViewMessage(event) {
-    if (event?.type === 'chatbookClearAccidentalSelection') {
+    const message = parseReaderBridgeMessage(event);
+    if (message?.type === 'chatbookClearAccidentalSelection') {
       setSelection(null);
       return;
     }
-    if (event?.type !== 'chatbookFontDiagnostics') return;
-    Alert.alert('字体诊断', formatFontDiagnostics(event.payload, fontAssetReport));
+    if (message?.type === 'chatbookReaderContentReady') {
+      setEpubReadyGateOpen(true);
+      return;
+    }
+    if (message?.type !== 'chatbookFontDiagnostics') return;
+    Alert.alert('字体诊断', formatFontDiagnostics(message.payload, fontAssetReport));
   }
+
+  useEffect(() => {
+    if (readerMode !== 'epub' || !isReady || epubReadyGateOpen) return undefined;
+    let tries = 0;
+    const probe = () => {
+      tries += 1;
+      injectJavascript(`
+        (function() {
+          function postReady(payload) {
+            var message = JSON.stringify({ type: 'chatbookReaderContentReady', payload: payload });
+            if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
+              window.ReactNativeWebView.postMessage(message);
+            } else if (typeof reactNativeWebview !== 'undefined' && reactNativeWebview.postMessage) {
+              reactNativeWebview.postMessage(message);
+            }
+          }
+          function isNonReading(value) {
+            var text = String(value || '').trim().toLowerCase();
+            if (!text) return false;
+            return ${jsStringLiteral(EPUB_NON_READING_LABELS.join('|'))}.split('|').some(function(label) {
+              return text.indexOf(label) >= 0;
+            });
+          }
+          function summarize(doc, index) {
+            if (!doc || !doc.body) return null;
+            var text = (doc.body.textContent || '').replace(/\\s+/g, ' ').trim();
+            var title = doc.title || '';
+            var href = doc.location && doc.location.href || '';
+            return {
+              index: index,
+              title: title,
+              href: href,
+              textLen: text.length,
+              links: doc.querySelectorAll ? doc.querySelectorAll('a[href]').length : 0,
+              paragraphs: doc.querySelectorAll ? doc.querySelectorAll('p, section, article, div').length : 0,
+              nonReading: isNonReading(title) || isNonReading(href),
+            };
+          }
+          try {
+            var readerRendition = null;
+            if (typeof rendition !== 'undefined' && rendition) readerRendition = rendition;
+            else if (window.rendition) readerRendition = window.rendition;
+            var contents = readerRendition && typeof readerRendition.getContents === 'function'
+              ? readerRendition.getContents()
+              : [];
+            var docs = [];
+            contents.forEach(function(content, idx) {
+              docs.push(summarize(content && content.document, idx));
+            });
+            var readable = docs.filter(Boolean).find(function(item) {
+              return item.textLen >= 40 && !item.nonReading && item.paragraphs > 0;
+            });
+            if (readable) {
+              postReady({ readable: readable, contentsCount: contents.length });
+            }
+          } catch (e) {}
+        })();
+        true;
+      `);
+    };
+    probe();
+    const timer = setInterval(() => {
+      if (tries >= 18) {
+        clearInterval(timer);
+        return;
+      }
+      probe();
+    }, 700);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [readerMode, isReady, epubReadyGateOpen]);
 
   // 字体选择变化时单独切换生效字体。真机反馈过一次：按钮选中态在变，
   // 但正文看起来完全没变。只调epub.js的changeFontFamily不够稳，因为
@@ -1326,14 +1429,34 @@ function ReaderInner({
     if (skippedInitialNav.current) return;
     if (!toc || toc.length === 0) return;
     skippedInitialNav.current = true;
-    const t = setTimeout(() => goToTocItem(toc[0].href), 400);
+    const firstReadable = findFirstReadableTocItem(toc);
+    if (!firstReadable?.href) return;
+    const t = setTimeout(() => goToTocItem(firstReadable.href), 400);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isReady, toc]);
 
+  function openEpubReadyGate(reason) {
+    if (epubReadyGateOpen) return;
+    console.log(`[阅读器ready] ${reason}`);
+    setEpubReadyGateOpen(true);
+  }
+
+  function maybeOpenEpubReadyGateFromLocation(location, section) {
+    if (readerMode !== 'epub' || !isReady || epubReadyGateOpen) return;
+    const cfi = location?.start?.cfi;
+    if (!cfi) return;
+    const label = section?.label || section?.title || '';
+    const href = location?.start?.href || location?.end?.href || section?.href || '';
+    if (!label && !href && !initialLocation && !jumpToCfi) return;
+    if (isLikelyEpubNonReadingTarget(label) || isLikelyEpubNonReadingTarget(href)) return;
+    openEpubReadyGate('location-ready');
+  }
+
   function handleLocationChange(_total, currentLocation, _progress, currentSection) {
     const cfi = currentLocation?.start?.cfi;
     if (currentSection?.label) setCurrentSectionTitle(currentSection.label.trim());
+    maybeOpenEpubReadyGateFromLocation(currentLocation, currentSection);
     if (!readerInteractionReady) return;
     if (!cfi) return;
     if (progressTimer.current) clearTimeout(progressTimer.current);
@@ -1516,6 +1639,16 @@ function ReaderInner({
     : (!epubSrc ? '正在准备书籍文件' : !isReady ? '正在解析书籍内容' : '正在应用阅读样式');
   const showReaderGateOverlay = !readerInteractionReady && !standardChapterError && !epubError;
   const readerPanelOpen = showFontSizePanel || showThemePanel;
+
+  useEffect(() => {
+    if (!showReaderGateOverlay) {
+      setReaderLoadingTick(0);
+      return undefined;
+    }
+    setReaderLoadingTick(0);
+    const timer = setInterval(() => setReaderLoadingTick((prev) => prev + 1), 900);
+    return () => clearInterval(timer);
+  }, [showReaderGateOverlay, readerLoadingStageIndex]);
 
   function closeReaderPanels() {
     if (!readerPanelOpen) return false;
@@ -1842,7 +1975,7 @@ function ReaderInner({
               </View>
             ) : !standardChapterText ? (
               <View style={styles.centerBox}>
-                <ReaderLoadingProgress stageIndex={readerLoadingStageIndex} subtitle={readerLoadingLabel} theme={uiTheme} />
+                <ReaderLoadingProgress stageIndex={readerLoadingStageIndex} tick={readerLoadingTick} subtitle={readerLoadingLabel} theme={uiTheme} />
               </View>
             ) : (
               <>
@@ -1868,7 +2001,7 @@ function ReaderInner({
           </View>
         ) : !epubSrc ? (
           <View style={styles.centerBox}>
-            <ReaderLoadingProgress stageIndex={readerLoadingStageIndex} subtitle={readerLoadingLabel} theme={uiTheme} />
+            <ReaderLoadingProgress stageIndex={readerLoadingStageIndex} tick={readerLoadingTick} subtitle={readerLoadingLabel} theme={uiTheme} />
           </View>
         ) : (
           <View
@@ -1924,7 +2057,7 @@ function ReaderInner({
         )}
         {showReaderGateOverlay && (
           <View style={[styles.readerReadyOverlay, { backgroundColor: THEMES[themeName].body.background }]}>
-            <ReaderLoadingProgress stageIndex={readerLoadingStageIndex} subtitle={readerLoadingLabel} theme={uiTheme} />
+            <ReaderLoadingProgress stageIndex={readerLoadingStageIndex} tick={readerLoadingTick} subtitle={readerLoadingLabel} theme={uiTheme} />
           </View>
         )}
       </View>
@@ -2113,9 +2246,10 @@ export default function ReaderScreen({ route, navigation }) {
   );
 }
 
-function ReaderLoadingProgress({ stageIndex, title = '正在准备阅读体验', subtitle, theme }) {
+function ReaderLoadingProgress({ stageIndex, tick = 0, title = '正在准备阅读体验', subtitle, theme }) {
   const activeIndex = Math.max(0, Math.min(READER_LOADING_STAGES.length - 1, stageIndex));
-  const pct = Math.round(((activeIndex + 1) / READER_LOADING_STAGES.length) * 100);
+  const pct = getReaderLoadingPercent(activeIndex, tick);
+  const waitingLonger = tick >= 12 && activeIndex >= 2 && activeIndex < READER_LOADING_STAGES.length - 1;
   return (
     <View style={styles.loadingProgressBox}>
       <Text style={[styles.loadingProgressTitle, { color: theme.text }]}>{title}</Text>
@@ -2150,7 +2284,7 @@ function ReaderLoadingProgress({ stageIndex, title = '正在准备阅读体验',
       </View>
       {activeIndex >= 2 && (
         <Text style={[styles.loadingProgressHint, { color: theme.textMuted }]}>
-          首次打开大书会稍慢一些，之后会更快
+          {waitingLonger ? '这本书结构较复杂，仍在继续准备正文' : '首次打开大书会稍慢一些，之后会更快'}
         </Text>
       )}
     </View>
