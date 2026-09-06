@@ -2,6 +2,7 @@
   "expo": {
     "name": "沉光共读",
     "slug": "bandujiangjiang",
+    "scheme": "bandujiangjiang",
     "version": "1.0.0",
     "orientation": "portrait",
     "sdkVersion": "54.0.0",
@@ -19,6 +20,22 @@
     },
     "android": {
       "package": "com.diegoxue.bandujiangjiang",
+      "intentFilters": [
+        {
+          "action": "VIEW",
+          "category": ["DEFAULT"],
+          "data": [
+            { "scheme": "content", "mimeType": "application/epub+zip" },
+            { "scheme": "content", "mimeType": "application/pdf" },
+            { "scheme": "content", "mimeType": "text/plain" },
+            { "scheme": "content", "mimeType": "application/octet-stream" },
+            { "scheme": "file", "mimeType": "application/epub+zip" },
+            { "scheme": "file", "mimeType": "application/pdf" },
+            { "scheme": "file", "mimeType": "text/plain" },
+            { "scheme": "file", "mimeType": "application/octet-stream" }
+          ]
+        }
+      ],
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -52,6 +69,18 @@
           "imageWidth": 220,
           "resizeMode": "contain",
           "backgroundColor": "#EAE3D3"
+        }
+      ],
+      [
+        "expo-share-intent",
+        {
+          "disableIOS": true,
+          "androidIntentFilters": [
+            "application/epub+zip",
+            "application/pdf",
+            "text/plain",
+            "application/octet-stream"
+          ]
         }
       ],
       "@config-plugins/react-native-webrtc",

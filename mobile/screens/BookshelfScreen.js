@@ -1,12 +1,13 @@
-import React, { useCallback, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View, Text, TouchableOpacity, StyleSheet,
   ActivityIndicator, RefreshControl, Alert, Modal, Animated, ScrollView,
-  Platform, useWindowDimensions,
+  Linking, Platform, useWindowDimensions,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import * as DocumentPicker from 'expo-document-picker';
+import { useShareIntentContext } from 'expo-share-intent';
 import Svg, { Line, Circle, Rect, Defs, LinearGradient as SvgLinearGradient, Stop, Mask, G } from 'react-native-svg';
 import { IconTrash, IconPlus } from '@tabler/icons-react-native';
 import { getLibrary, importFile, importEpub, deleteMyBook } from '../lib/api';
@@ -27,6 +28,36 @@ import KnownIssueNotice from '../components/KnownIssueNotice';
 const MONO_FONT = Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' });
 
 const GRID_SIZE = 64; // 设计稿网格线间距 background-size:64px
+const SUPPORTED_IMPORT_EXTS = ['epub', 'pdf', 'txt'];
+
+function inferImportExt(fileName = '', uri = '', mimeType = '') {
+  const source = `${fileName || ''} ${uri || ''}`.toLowerCase();
+  const cleanSource = source.split('?')[0].split('#')[0];
+  const ext = cleanSource.match(/\.([a-z0-9]+)(?:$|[^a-z0-9])/i)?.[1]?.toLowerCase();
+  if (SUPPORTED_IMPORT_EXTS.includes(ext)) return ext;
+  const mime = (mimeType || '').toLowerCase();
+  if (mime === 'application/epub+zip') return 'epub';
+  if (mime === 'application/pdf') return 'pdf';
+  if (mime === 'text/plain' || mime.startsWith('text/')) return 'txt';
+  return '';
+}
+
+function nameFromUri(uri = '', fallback = 'shared-book') {
+  const cleanUri = (uri || '').split('?')[0].split('#')[0];
+  const last = cleanUri.split('/').filter(Boolean).pop() || fallback;
+  try {
+    return decodeURIComponent(last);
+  } catch {
+    return last || fallback;
+  }
+}
+
+function mimeForImportExt(ext, fallback = '') {
+  if (ext === 'epub') return 'application/epub+zip';
+  if (ext === 'pdf') return 'application/pdf';
+  if (ext === 'txt') return 'text/plain';
+  return fallback || 'application/octet-stream';
+}
 
 // 网格背景：设计稿用CSS repeating-linear-gradient画横竖发丝线，顶部到
 // 30%高度渐隐（mask-image）。RN没有CSS mask-image，用react-native-svg
@@ -276,6 +307,36 @@ function confirmDeleteBook(book, onDeleted) {
 // 后端转换成EPUB后走跟预置书库完全一样的落地流程；EPUB直接走已经存在、
 // 但一直没配手机端入口的/app/books/import。不做自定义进度条/取消这类
 // 复杂交互——原型阶段选个文件、等一下、成功或看清楚报错，够用。
+async function importBookAsset(asset, setImporting, onDone) {
+  const uri = asset?.uri || asset?.path;
+  const fileName = asset?.name || asset?.fileName || nameFromUri(uri);
+  const ext = inferImportExt(fileName, uri, asset?.mimeType);
+  if (!uri) {
+    Alert.alert('导入失败', '没有拿到文件地址，请从原 App 重新分享一次。');
+    return;
+  }
+  if (!SUPPORTED_IMPORT_EXTS.includes(ext)) {
+    Alert.alert('暂不支持这个文件', '目前只能导入 EPUB、PDF 或 TXT 文件。');
+    return;
+  }
+
+  setImporting(true);
+  try {
+    if (ext === 'epub') {
+      await importEpub(uri, fileName);
+    } else {
+      const mimeType = mimeForImportExt(ext, asset?.mimeType);
+      const title = (fileName || '').replace(/\.(pdf|txt)$/i, '');
+      await importFile(uri, fileName, mimeType, title);
+    }
+    onDone();
+  } catch (e) {
+    Alert.alert('导入失败', e.message || '请稍后重试');
+  } finally {
+    setImporting(false);
+  }
+}
+
 async function pickAndImportFile(setImporting, onDone) {
   const result = await DocumentPicker.getDocumentAsync({
     // iOS Files 对某些电子书文件给出的类型不一定是标准MIME；选择器层
@@ -286,28 +347,7 @@ async function pickAndImportFile(setImporting, onDone) {
   });
   if (result.canceled || !result.assets?.[0]) return;
 
-  const asset = result.assets[0];
-  const ext = (asset.name || '').toLowerCase().split('.').pop();
-  if (!['epub', 'pdf', 'txt'].includes(ext)) {
-    Alert.alert('暂不支持这个文件', '目前只能导入 EPUB、PDF 或 TXT 文件。');
-    return;
-  }
-
-  setImporting(true);
-  try {
-    if (ext === 'epub') {
-      await importEpub(asset.uri, asset.name);
-    } else {
-      const mimeType = ext === 'pdf' ? 'application/pdf' : 'text/plain';
-      const title = (asset.name || '').replace(/\.(pdf|txt)$/i, '');
-      await importFile(asset.uri, asset.name, mimeType, title);
-    }
-    onDone();
-  } catch (e) {
-    Alert.alert('导入失败', e.message || '请稍后重试');
-  } finally {
-    setImporting(false);
-  }
+  await importBookAsset(result.assets[0], setImporting, onDone);
 }
 
 function CoverflowShelf({ books, theme, navigation, onDeleted }) {
@@ -344,11 +384,13 @@ export default function BookshelfScreen({ navigation }) {
   const insets = useSafeAreaInsets();
   const { width: screenWidth, height: screenHeight } = useWindowDimensions();
   const { requireAuth } = useAuthGate();
+  const { hasShareIntent, shareIntent, resetShareIntent, error: shareIntentError } = useShareIntentContext();
   const [books, setBooks]   = useState(null); // null = 加载中
   const [error, setError]   = useState('');
   const [refreshing, setRefreshing] = useState(false);
   const [importing, setImporting] = useState(false);
   const [showImportSheet, setShowImportSheet] = useState(false);
+  const handledExternalImportRef = useRef('');
 
   const load = useCallback(async (isRefresh = false) => {
     if (isRefresh) setRefreshing(true);
@@ -365,6 +407,60 @@ export default function BookshelfScreen({ navigation }) {
 
   // 每次进入这个tab都刷新一下（比如刚导入新书、或者从阅读页返回更新了进度）
   useFocusEffect(useCallback(() => { load(); }, [load]));
+
+  const importExternalAsset = useCallback(async (asset, sourceLabel, onConsumed = null) => {
+    const uri = asset?.uri || asset?.path;
+    const fileName = asset?.name || asset?.fileName || nameFromUri(uri);
+    const key = `${sourceLabel}:${uri || ''}:${fileName || ''}:${asset?.size || ''}`;
+    if (!uri || handledExternalImportRef.current === key) return;
+    handledExternalImportRef.current = key;
+    if (!requireAuth('import')) {
+      Alert.alert('登录后再导入', '外部分享来的书需要保存到你的书架。登录后请从原 App 再分享一次。');
+      onConsumed?.();
+      return;
+    }
+    setShowImportSheet(false);
+    await importBookAsset(
+      { ...asset, uri, name: fileName },
+      setImporting,
+      () => load(),
+    );
+    onConsumed?.();
+  }, [load, requireAuth]);
+
+  useEffect(() => {
+    if (Platform.OS !== 'android' || !hasShareIntent) return;
+    const files = shareIntent?.files || [];
+    if (files.length === 0) return;
+    const selected = files.find((file) => inferImportExt(file.fileName, file.path, file.mimeType)) || files[0];
+    importExternalAsset(
+      {
+        uri: selected.path,
+        name: selected.fileName,
+        mimeType: selected.mimeType,
+        size: selected.size,
+      },
+      'share-intent',
+      resetShareIntent,
+    );
+  }, [hasShareIntent, importExternalAsset, resetShareIntent, shareIntent]);
+
+  useEffect(() => {
+    if (Platform.OS !== 'android') return undefined;
+    const handleUrl = (url) => {
+      if (!url || (!url.startsWith('content://') && !url.startsWith('file://'))) return;
+      importExternalAsset({ uri: url, name: nameFromUri(url) }, 'view-intent');
+    };
+    Linking.getInitialURL().then(handleUrl).catch(() => {});
+    const sub = Linking.addEventListener('url', ({ url }) => handleUrl(url));
+    return () => sub.remove();
+  }, [importExternalAsset]);
+
+  useEffect(() => {
+    if (shareIntentError) {
+      Alert.alert('接收文件失败', '请在原 App 中重新使用分享或打开方式发送到 ChatBook。');
+    }
+  }, [shareIntentError]);
 
   const presetBooks = useMemo(() => (books || []).filter((b) => b.source !== 'imported'), [books]);
   const importedBooks = useMemo(() => (books || []).filter((b) => b.source === 'imported'), [books]);
