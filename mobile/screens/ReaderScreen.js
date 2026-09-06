@@ -104,9 +104,12 @@ const READER_FONT_FACE_STYLE_ID = 'chatbook-reader-font-face';
 const READER_SETTINGS_KEY = 'chatbook_reader_typography_settings_v1';
 const READER_MODE_ORDER = ['epub', 'standard'];
 const READER_MODE_LABEL = { epub: '原版', standard: '标准' };
+const READER_DEFAULT_MODE = 'standard';
 const STANDARD_PAGE_MIN_CHARS = 80;
 const STANDARD_PAGE_MAX_CHARS = 430;
 const STANDARD_READING_LINE_HEIGHT = 1.56;
+const STANDARD_PROGRESS_PREFIX = 'standard-progress:';
+const STANDARD_CHAPTER_CACHE_VERSION = 1;
 const READER_LOADING_STAGES = [
   '准备书籍文件',
   '读取目录结构',
@@ -153,6 +156,66 @@ function parseReaderBridgeMessage(event) {
   } catch (_e) {
     return null;
   }
+}
+
+function getStandardChapterCachePath(bookId, chapterId) {
+  return `${FileSystem.documentDirectory}reader_content_cache/v${STANDARD_CHAPTER_CACHE_VERSION}/book_${bookId}/chapter_${chapterId}.json`;
+}
+
+async function readCachedStandardChapter(bookId, chapterId) {
+  const path = getStandardChapterCachePath(bookId, chapterId);
+  const info = await FileSystem.getInfoAsync(path);
+  if (!info.exists) return null;
+  try {
+    const raw = await FileSystem.readAsStringAsync(path);
+    const parsed = JSON.parse(raw);
+    if (!parsed || parsed.version !== STANDARD_CHAPTER_CACHE_VERSION) return null;
+    if (String(parsed.bookId) !== String(bookId) || String(parsed.chapterId) !== String(chapterId)) return null;
+    return parsed.payload || null;
+  } catch (_e) {
+    return null;
+  }
+}
+
+async function writeCachedStandardChapter(bookId, chapterId, payload) {
+  const path = getStandardChapterCachePath(bookId, chapterId);
+  const dir = path.slice(0, path.lastIndexOf('/'));
+  await FileSystem.makeDirectoryAsync(dir, { intermediates: true });
+  await FileSystem.writeAsStringAsync(path, JSON.stringify({
+    version: STANDARD_CHAPTER_CACHE_VERSION,
+    bookId,
+    chapterId,
+    cachedAt: Date.now(),
+    payload,
+  }));
+}
+
+async function getCachedStandardChapterText(bookId, chapterId, options = {}) {
+  const cached = await readCachedStandardChapter(bookId, chapterId);
+  if (cached) return { ...cached, fromCache: true };
+  const data = await getChapterText(bookId, chapterId, options);
+  const payload = {
+    title: data?.title || '',
+    paragraphs: Array.isArray(data?.paragraphs) ? data.paragraphs : [],
+    blocks: normalizeStandardBlocks(data),
+  };
+  writeCachedStandardChapter(bookId, chapterId, payload).catch((e) => {
+    console.warn('[标准阅读缓存] 写入失败', e.message || e);
+  });
+  return { ...payload, fromCache: false };
+}
+
+function parseStandardProgressLocation(value, chapters = []) {
+  const text = String(value || '');
+  if (!text.startsWith(STANDARD_PROGRESS_PREFIX)) return null;
+  const parts = text.slice(STANDARD_PROGRESS_PREFIX.length).split(':');
+  if (parts.length < 2) return null;
+  const chapterId = parts[0];
+  const pageIndex = Number.parseInt(parts[1], 10);
+  if (!Number.isFinite(pageIndex)) return null;
+  const chapterIndex = (chapters || []).findIndex((chapter) => String(chapter.id) === String(chapterId));
+  if (chapterIndex < 0) return null;
+  return { chapterIndex, pageIndex: Math.max(0, pageIndex) };
 }
 
 function jsStringLiteral(value) {
@@ -799,7 +862,7 @@ function ReaderInner({
   const [showFontSizePanel, setShowFontSizePanel] = useState(false);
   const [fontSizePt, setFontSizePt] = useState(FONT_SIZE_DEFAULT);
   const [bodyFontKey, setBodyFontKey] = useState('serif');
-  const [readerMode, setReaderMode] = useState('epub');
+  const [readerMode, setReaderMode] = useState(READER_DEFAULT_MODE);
   const [standardChapterIndex, setStandardChapterIndex] = useState(0);
   const [standardPageIndex, setStandardPageIndex] = useState(0);
   const [standardChapterText, setStandardChapterText] = useState(null);
@@ -819,9 +882,12 @@ function ReaderInner({
   const standardWebViewRef = useRef(null);
   const annotationsRestored = useRef(false);
   const skippedInitialNav = useRef(false);
+  const initialStandardLocationApplied = useRef(false);
+  const pendingStandardPageIndex = useRef(null);
 
   useEffect(() => () => {
     if (standardSelectionTimerRef.current) clearTimeout(standardSelectionTimerRef.current);
+    if (progressTimer.current) clearTimeout(progressTimer.current);
   }, []);
 
   useEffect(() => {
@@ -829,7 +895,14 @@ function ReaderInner({
     setEpubReadyGateOpen(false);
     annotationsRestored.current = false;
     skippedInitialNav.current = false;
+    initialStandardLocationApplied.current = false;
+    pendingStandardPageIndex.current = null;
   }, [epubSrc]);
+
+  useEffect(() => {
+    initialStandardLocationApplied.current = false;
+    pendingStandardPageIndex.current = null;
+  }, [bookId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -841,9 +914,7 @@ function ReaderInner({
         if (BODY_FONT_KEYS.includes(saved.bodyFontKey)) {
           setBodyFontKey(saved.bodyFontKey);
         }
-        if (READER_MODE_ORDER.includes(saved.readerMode)) {
-          setReaderMode(saved.readerMode);
-        }
+        setReaderMode(READER_DEFAULT_MODE);
         if (
           Number.isFinite(saved.fontSizePt) &&
           saved.fontSizePt >= FONT_SIZE_MIN &&
@@ -861,7 +932,7 @@ function ReaderInner({
 
   useEffect(() => {
     if (!readerSettingsLoaded) return;
-    SecureStore.setItemAsync(READER_SETTINGS_KEY, JSON.stringify({ bodyFontKey, fontSizePt, readerMode }))
+    SecureStore.setItemAsync(READER_SETTINGS_KEY, JSON.stringify({ bodyFontKey, fontSizePt, readerMode: READER_DEFAULT_MODE }))
       .catch((e) => console.warn('[阅读器设置] 保存失败', e.message || e));
   }, [readerSettingsLoaded, bodyFontKey, fontSizePt, readerMode]);
 
@@ -903,14 +974,24 @@ function ReaderInner({
     setStandardChapterText(null);
     setStandardPageIndex(0);
     setCurrentSectionTitle(chapter.title || '');
-    getChapterText(bookId, chapter.id, { includeBlocks: true })
+    getCachedStandardChapterText(bookId, chapter.id, { includeBlocks: true })
       .then((data) => {
         if (cancelled) return;
+        console.log(`[标准阅读缓存] 章节${chapter.id} ${data?.fromCache ? '命中' : '写入'}缓存`);
         setStandardChapterText({
           title: data?.title || chapter.title || '',
           paragraphs: Array.isArray(data?.paragraphs) ? data.paragraphs : [],
           blocks: normalizeStandardBlocks(data),
         });
+        if (pendingStandardPageIndex.current !== null) {
+          setStandardPageIndex(pendingStandardPageIndex.current);
+          pendingStandardPageIndex.current = null;
+        }
+        const nextChapter = chapters?.[standardChapterIndex + 1];
+        if (nextChapter?.id) {
+          getCachedStandardChapterText(bookId, nextChapter.id, { includeBlocks: true })
+            .catch((e) => console.warn('[标准阅读缓存] 下一章预热失败', e.message || e));
+        }
       })
       .catch((e) => {
         if (cancelled) return;
@@ -918,6 +999,18 @@ function ReaderInner({
       });
     return () => { cancelled = true; };
   }, [readerMode, chapters, standardChapterIndex, bookId]);
+
+  useEffect(() => {
+    if (readerMode !== 'standard') return;
+    if (initialStandardLocationApplied.current) return;
+    if (!chapters || chapters.length === 0) return;
+    initialStandardLocationApplied.current = true;
+    const loc = parseStandardProgressLocation(initialLocation, chapters);
+    if (!loc) return;
+    pendingStandardPageIndex.current = loc.pageIndex;
+    setStandardChapterIndex(loc.chapterIndex);
+    setCurrentSectionTitle(chapters[loc.chapterIndex]?.title || '');
+  }, [readerMode, initialLocation, chapters]);
 
   // initialAnnotations 要等 Reader 的 onReady 触发（book 真正渲染完成）才能加，
   // 提前调用 addAnnotation 会静默失效，所以不能放进 mount 时的 effect 里。
@@ -1650,6 +1743,19 @@ function ReaderInner({
     return () => clearInterval(timer);
   }, [showReaderGateOverlay, readerLoadingStageIndex]);
 
+  useEffect(() => {
+    if (readerMode !== 'standard' || !readerInteractionReady) return undefined;
+    const chapter = chapters?.[standardChapterIndex];
+    if (!chapter) return undefined;
+    if (progressTimer.current) clearTimeout(progressTimer.current);
+    if (!isLoggedIn()) return undefined;
+    const cfi = `${STANDARD_PROGRESS_PREFIX}${chapter.id}:${standardPageIndex}`;
+    progressTimer.current = setTimeout(() => {
+      updateProgress(bookId, cfi).catch((e) => console.warn('[标准阅读进度上报失败]', e.message));
+    }, PROGRESS_DEBOUNCE_MS);
+    return undefined;
+  }, [readerMode, readerInteractionReady, standardChapterIndex, standardPageIndex, chapters, bookId]);
+
   function closeReaderPanels() {
     if (!readerPanelOpen) return false;
     setShowFontSizePanel(false);
@@ -1777,9 +1883,14 @@ function ReaderInner({
               // 换算成"该从章节正文数组的第几段开始"——不是精确到字，是
               // "大致在你翻到的位置附近开始"，比"永远从头开始"好很多。
               const displayed = readerMode === 'standard' ? null : currentLocation?.start?.displayed;
-              const startFraction = displayed && displayed.total > 1
-                ? Math.max(0, Math.min(1, (displayed.page - 1) / displayed.total))
+              const standardFraction = standardPages.length > 1
+                ? Math.max(0, Math.min(1, standardPageIndex / standardPages.length))
                 : 0;
+              const startFraction = readerMode === 'standard'
+                ? standardFraction
+                : (displayed && displayed.total > 1
+                  ? Math.max(0, Math.min(1, (displayed.page - 1) / displayed.total))
+                  : 0);
               navigation.navigate('Listen', {
                 bookId, bookTitle, author,
                 initialChapterTitle: readerMode === 'standard'
@@ -2182,12 +2293,6 @@ export default function ReaderScreen({ route, navigation }) {
       // 后端已经对访客放开了，不应该被这个账号相关的子请求拖累。改成
       // 访客直接跳过这次请求，给个空数组（访客本来也没有已保存的划线），
       // 不是"请求失败兜底"，是"压根不该发这个请求"。
-      loadEpub()
-        .then((uri) => {
-          setEpubUri(uri);
-          console.log(`[打开诊断] EPUB文件就绪 累计耗时=${Date.now() - tStart}ms`);
-        })
-        .catch((e) => setEpubError(e.message || '加载失败'));
       const [c, h] = await Promise.all([
         getBookContext(bookId),
         isLoggedIn() ? getHighlights(bookId) : Promise.resolve([]),
@@ -2198,7 +2303,7 @@ export default function ReaderScreen({ route, navigation }) {
     } catch (e) {
       setError(e.message || '加载失败');
     }
-  }, [bookId, loadEpub]);
+  }, [bookId]);
 
   useEffect(() => { load(); }, [load]);
 
