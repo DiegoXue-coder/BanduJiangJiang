@@ -700,6 +700,7 @@ function ReaderInner({
   const [themeName, setThemeName] = useState('light');
   const [currentSectionTitle, setCurrentSectionTitle] = useState('');
   const [isReady, setIsReady] = useState(false);
+  const [epubReadyGateOpen, setEpubReadyGateOpen] = useState(false);
   // 阶段十：问AI从"跳转到独立页面"改成"底部弹出面板"，原文全程可见（半遮挡）。
   // chatParams 存这次要问的划线原文+cfi，present() 弹出面板时用。
   const [chatParams, setChatParams] = useState({ selection: '', cfiRange: '' });
@@ -765,12 +766,25 @@ function ReaderInner({
   const progressTimer = useRef(null);
   const standardSelectionTimerRef = useRef(null);
   const standardWebViewRef = useRef(null);
+  const epubReadyGateTimerRef = useRef(null);
   const annotationsRestored = useRef(false);
   const skippedInitialNav = useRef(false);
 
   useEffect(() => () => {
     if (standardSelectionTimerRef.current) clearTimeout(standardSelectionTimerRef.current);
+    if (epubReadyGateTimerRef.current) clearTimeout(epubReadyGateTimerRef.current);
   }, []);
+
+  useEffect(() => {
+    setIsReady(false);
+    setEpubReadyGateOpen(false);
+    annotationsRestored.current = false;
+    skippedInitialNav.current = false;
+    if (epubReadyGateTimerRef.current) {
+      clearTimeout(epubReadyGateTimerRef.current);
+      epubReadyGateTimerRef.current = null;
+    }
+  }, [epubSrc]);
 
   useEffect(() => {
     let cancelled = false;
@@ -876,6 +890,14 @@ function ReaderInner({
   function handleReady() {
     console.log(`[打开诊断] epub.js onReady触发，WebView内部解析耗时=${Date.now() - readerInnerMountedAtRef.current}ms`);
     setIsReady(true);
+    if (epubReadyGateTimerRef.current) clearTimeout(epubReadyGateTimerRef.current);
+    // onReady只说明epub.js能渲染了；首次跳过导航页、主题、字体、点击翻页
+    // 这些注入还需要跟着跑一轮。稍微延后开放交互，避免安卓用户看到蓝色
+    // 原始目录页、或在翻页/字体还没接好时摸到半成品界面。
+    epubReadyGateTimerRef.current = setTimeout(() => {
+      setEpubReadyGateOpen(true);
+      epubReadyGateTimerRef.current = null;
+    }, 950);
     if (annotationsRestored.current) return;
     annotationsRestored.current = true;
     for (const h of initialAnnotations) {
@@ -1208,6 +1230,7 @@ function ReaderInner({
   function handleLocationChange(_total, currentLocation, _progress, currentSection) {
     const cfi = currentLocation?.start?.cfi;
     if (currentSection?.label) setCurrentSectionTitle(currentSection.label.trim());
+    if (!readerInteractionReady) return;
     if (!cfi) return;
     if (progressTimer.current) clearTimeout(progressTimer.current);
     // 续二十三访客模式：访客没有账号，阅读进度不做持久化（跟划线一样，
@@ -1221,6 +1244,7 @@ function ReaderInner({
   }
 
   async function handleHighlight(cfiRange, text, fragments = null) {
+    if (!readerInteractionReady) return false;
     // 续二十三访客模式：划线本来就是"读的过程"里要按账号持久化的数据
     // （访客划线不做转移，见访客流程草案的产品决策），访客点划线不该
     // 打后端一个必然401的请求再弹一个"HTTP 401 ..."的原始报错——直接
@@ -1262,6 +1286,7 @@ function ReaderInner({
   }
 
   function openChat(selectionText = '', cfiRange = '') {
+    if (!readerInteractionReady) return;
     // 续二十三访客模式："问AI"是三个约定的注册引导触发点之一——访客点
     // 这个按钮不弹聊天面板，先弹注册引导。
     if (!requireAuth('ai')) return;
@@ -1276,22 +1301,26 @@ function ReaderInner({
   // （命名不统一是历史遗留：THEMES这个对象阶段十一就有了，theme.js的
   // eyecare是续二十七才加的，两边改名对不上收益不大，就地做一次映射）。
   function selectTheme(next) {
+    if (!readerInteractionReady) return;
     setThemeName(next);
     changeTheme(THEMES[next]);
     setThemeMode(next === 'paper' ? 'eyecare' : next);
   }
 
   function toggleThemePanel() {
+    if (!readerInteractionReady) return;
     setShowFontSizePanel(false);
     setShowThemePanel((v) => !v);
   }
 
   function toggleFontSizePanel() {
+    if (!readerInteractionReady) return;
     setShowThemePanel(false);
     setShowFontSizePanel((v) => !v);
   }
 
   function adjustFontSize(delta) {
+    if (!readerInteractionReady) return;
     setFontSizePt((prev) => {
       const next = Math.min(FONT_SIZE_MAX, Math.max(FONT_SIZE_MIN, prev + delta));
       changeFontSize(`${next}pt`);
@@ -1300,17 +1329,22 @@ function ReaderInner({
   }
 
   function selectBodyFont(key) {
+    if (!readerInteractionReady) return;
     if (!BODY_FONT_KEYS.includes(key)) return;
     setBodyFontKey(key);
   }
 
   function selectReaderMode(mode) {
+    if (!readerInteractionReady) return;
     if (!READER_MODE_ORDER.includes(mode)) return;
     setShowToc(false);
+    setShowFontSizePanel(false);
+    setShowThemePanel(false);
     setReaderMode(mode);
   }
 
   function selectStandardChapter(index) {
+    if (!readerInteractionReady) return;
     setStandardChapterIndex(index);
     setStandardPageIndex(0);
     setShowToc(false);
@@ -1366,6 +1400,13 @@ function ReaderInner({
     setStandardPageIndex((prev) => Math.min(prev, Math.max(0, standardPages.length - 1)));
   }, [standardPages.length]);
 
+  const standardInteractionReady = readerSettingsLoaded && !standardChapterError && !!standardChapterText;
+  const epubInteractionReady = readerSettingsLoaded && !!epubSrc && isReady && epubReadyGateOpen;
+  const readerInteractionReady = readerMode === 'standard' ? standardInteractionReady : epubInteractionReady;
+  const readerLoadingLabel = readerMode === 'standard'
+    ? (!readerSettingsLoaded ? '正在加载阅读设置…' : '正在整理标准模式正文…')
+    : (!epubSrc ? '正在准备原版 EPUB…' : !isReady ? '正在解析 EPUB…' : '正在准备阅读器…');
+  const showReaderGateOverlay = !readerInteractionReady && !standardChapterError && !epubError;
   const readerPanelOpen = showFontSizePanel || showThemePanel;
 
   function closeReaderPanels() {
@@ -1388,6 +1429,7 @@ function ReaderInner({
   }
 
   function goStandardPrev() {
+    if (!readerInteractionReady) return;
     if (closeReaderPanels()) return;
     clearStandardSelection();
     if (standardPageIndex > 0) {
@@ -1401,6 +1443,7 @@ function ReaderInner({
   }
 
   function goStandardNext() {
+    if (!readerInteractionReady) return;
     if (closeReaderPanels()) return;
     clearStandardSelection();
     if (standardPageIndex < standardPages.length - 1) {
@@ -1414,6 +1457,7 @@ function ReaderInner({
   }
 
   function handleStandardWebViewMessage(event) {
+    if (!readerInteractionReady) return;
     let data;
     try {
       data = JSON.parse(event.nativeEvent.data);
@@ -1465,10 +1509,18 @@ function ReaderInner({
         </TouchableOpacity>
         <Text style={[styles.headerTitle, { color: uiTheme.textOnAccent }]} numberOfLines={1}>{visibleChapterTitle}</Text>
         <View style={styles.headerRight}>
-          <TouchableOpacity onPress={toggleFontSizePanel} style={styles.headerBtn}>
+          <TouchableOpacity
+            onPress={toggleFontSizePanel}
+            style={[styles.headerBtn, !readerInteractionReady && styles.headerBtnDisabled]}
+            disabled={!readerInteractionReady}
+          >
             <IconTextSize color={uiTheme.textOnAccent} size={22} strokeWidth={1.75} />
           </TouchableOpacity>
-          <TouchableOpacity onPress={() => setShowToc(true)} style={styles.headerBtn}>
+          <TouchableOpacity
+            onPress={() => setShowToc(true)}
+            style={[styles.headerBtn, !readerInteractionReady && styles.headerBtnDisabled]}
+            disabled={!readerInteractionReady}
+          >
             <IconList color={uiTheme.textOnAccent} size={22} strokeWidth={1.75} />
           </TouchableOpacity>
           <TouchableOpacity
@@ -1495,14 +1547,23 @@ function ReaderInner({
                 startFraction,
               });
             }}
-            style={styles.headerBtn}
+            style={[styles.headerBtn, !readerInteractionReady && styles.headerBtnDisabled]}
+            disabled={!readerInteractionReady}
           >
             <IconHeadphones color={uiTheme.textOnAccent} size={22} strokeWidth={1.75} />
           </TouchableOpacity>
-          <TouchableOpacity onPress={() => openChat()} style={styles.headerBtn}>
+          <TouchableOpacity
+            onPress={() => openChat()}
+            style={[styles.headerBtn, !readerInteractionReady && styles.headerBtnDisabled]}
+            disabled={!readerInteractionReady}
+          >
             <IconMessageCircle color={uiTheme.textOnAccent} size={22} strokeWidth={1.75} />
           </TouchableOpacity>
-          <TouchableOpacity onPress={toggleThemePanel} style={styles.headerBtn}>
+          <TouchableOpacity
+            onPress={toggleThemePanel}
+            style={[styles.headerBtn, !readerInteractionReady && styles.headerBtnDisabled]}
+            disabled={!readerInteractionReady}
+          >
             <IconBrightness color={uiTheme.textOnAccent} size={22} strokeWidth={1.75} />
           </TouchableOpacity>
         </View>
@@ -1735,7 +1796,10 @@ function ReaderInner({
             onDisplayError={(reason) => Alert.alert('加载失败', String(reason))}
             onLocationChange={handleLocationChange}
             onWebViewMessage={handleReaderWebViewMessage}
-            onSelected={(text, cfiRange) => setSelection({ text, cfiRange })}
+            onSelected={(text, cfiRange) => {
+              if (!readerInteractionReady) return;
+              setSelection({ text, cfiRange });
+            }}
             menuItems={[
               {
                 label: '划线',
@@ -1767,9 +1831,15 @@ function ReaderInner({
             onPress={closeReaderPanels}
           />
         )}
+        {showReaderGateOverlay && (
+          <View style={[styles.readerReadyOverlay, { backgroundColor: THEMES[themeName].body.background }]}>
+            <ActivityIndicator size="large" color={uiTheme.accent} />
+            <Text style={[styles.loadingText, { color: uiTheme.textSecondary }]}>{readerLoadingLabel}</Text>
+          </View>
+        )}
       </View>
 
-      {!!activeSelection && (
+      {!!activeSelection && readerInteractionReady && (
         <View style={[styles.selectionBar, { backgroundColor: uiTheme.text, borderRadius: uiTheme.radius }]}>
           <Text style={[styles.selectionBarText, { color: uiTheme.bg }]} numberOfLines={1}>“{activeSelection.text}”</Text>
           <View style={styles.selectionBarActions}>
@@ -1956,9 +2026,18 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12, paddingVertical: 10,
   },
   headerBtn: { padding: 5, minWidth: 32, alignItems: 'center', justifyContent: 'center' },
+  headerBtnDisabled: { opacity: 0.35 },
   headerBtnText: { fontSize: 15, fontWeight: '600' },
 
   readerBody: { flex: 1, position: 'relative' },
+  readerReadyOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 40,
+    elevation: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
+  },
   readerPanelDismissLayer: {
     ...StyleSheet.absoluteFillObject,
     zIndex: 50,
