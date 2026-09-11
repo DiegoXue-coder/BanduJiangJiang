@@ -3,9 +3,14 @@ import * as FileSystem from 'expo-file-system/legacy';
 import * as SecureStore from 'expo-secure-store';
 
 // ── 后端地址 ──────────────────────────────────────────────────────────
-// 手机端新接口(/app/*)直接指向生产环境——书库内容是真实预置书籍，
-// 不像旧的聊天原型那样需要连本机局域网后端做临时联调。
-export const API_BASE = 'https://bandujiangjiang-production.up.railway.app';
+// 2026-09-11 网络抢修：安卓测试机直连 Railway 会超时，先给 App 一个
+// 临时 HTTPS 代理入口。代理只转发到 Railway，不复制数据库或文件数据；
+// 失效时自动回到 Railway，不能把现有生产入口删掉。
+const RAILWAY_API_BASE = 'https://bandujiangjiang-production.up.railway.app';
+const TEMPORARY_PROXY_API_BASE = 'https://wise-moose-appear.loca.lt';
+const API_BASE_CANDIDATES = [TEMPORARY_PROXY_API_BASE, RAILWAY_API_BASE];
+export const API_BASE = RAILWAY_API_BASE;
+const API_PROBE_TIMEOUT_MS = 6_000;
 const DEFAULT_TIMEOUT_MS = 25_000;
 const SAFE_REQUEST_RETRY_COUNT = 2;
 const API_CACHE_DIR = `${FileSystem.documentDirectory}api_cache/`;
@@ -82,6 +87,50 @@ class ApiRequestError extends Error {
     this.path = meta.path || '';
     this.detail = meta.detail || '';
     this.rawMessage = meta.rawMessage || '';
+  }
+}
+
+let selectedApiBase = null;
+let apiBaseSelectionPromise = null;
+
+function getCurrentApiBase() {
+  return selectedApiBase || API_BASE_CANDIDATES[0] || RAILWAY_API_BASE;
+}
+
+async function probeApiBase(base) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), API_PROBE_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${base}/health`, { signal: controller.signal });
+    return res.ok;
+  } catch (_e) {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function selectApiBase({ force = false } = {}) {
+  if (selectedApiBase && !force) return selectedApiBase;
+  if (apiBaseSelectionPromise && !force) return apiBaseSelectionPromise;
+
+  apiBaseSelectionPromise = (async () => {
+    for (const candidate of API_BASE_CANDIDATES) {
+      if (await probeApiBase(candidate)) {
+        selectedApiBase = candidate;
+        console.warn('[API入口选择]', { apiBase: candidate });
+        return candidate;
+      }
+    }
+    selectedApiBase = RAILWAY_API_BASE;
+    console.warn('[API入口选择] 候选入口都不可达，回退Railway', { apiBase: selectedApiBase });
+    return selectedApiBase;
+  })();
+
+  try {
+    return await apiBaseSelectionPromise;
+  } finally {
+    apiBaseSelectionPromise = null;
   }
 }
 
@@ -253,6 +302,7 @@ function notifyAuthExpired() {
  * 错误而不是无限等。导入大文件这类明确慢请求会在调用方传更长的超时。*/
 export async function appFetch(path, options = {}) {
   const { timeoutMs = DEFAULT_TIMEOUT_MS, ...fetchOptions } = options;
+  const apiBase = await selectApiBase();
   const maxAttempts = shouldRetryRequest(fetchOptions) ? SAFE_REQUEST_RETRY_COUNT : 1;
   const headers = {
     'x-extension-token': getExtToken(),
@@ -265,7 +315,7 @@ export async function appFetch(path, options = {}) {
     const controller = timeoutMs ? new AbortController() : null;
     const timer = timeoutMs ? setTimeout(() => controller.abort(), timeoutMs) : null;
     try {
-      res = await fetch(`${API_BASE}${path}`, {
+      res = await fetch(`${apiBase}${path}`, {
         ...fetchOptions, headers,
         ...(controller ? { signal: controller.signal } : {}),
       });
@@ -410,7 +460,7 @@ function toHexToken(token) {
 // ".epub" 子串判断源文件类型，没有的话会内部报错但不会显示出来，界面卡在
 // "正在下载书本"转圈——真机实测踩到的坑，不是猜的。
 export function getBookFileUrl(bookId) {
-  return `${API_BASE}/app/books/${bookId}/file.epub?token=${toHexToken(cachedToken || '')}`;
+  return `${getCurrentApiBase()}/app/books/${bookId}/file.epub?token=${toHexToken(cachedToken || '')}`;
 }
 
 export async function getHighlights(bookId) {
@@ -458,7 +508,7 @@ export async function updateProgress(bookId, cfiLocation) {
 // 返回一个"取消"函数，调用方在组件卸载/用户中断时可以 abort 掉请求。
 export function streamAsk({ context, question, style = 'simple', history = [] }, { onDelta, onDone, onError }) {
   const xhr = new XMLHttpRequest();
-  xhr.open('POST', `${API_BASE}/ask/stream`);
+  xhr.open('POST', `${getCurrentApiBase()}/ask/stream`);
   xhr.setRequestHeader('Content-Type', 'application/json');
   xhr.setRequestHeader('x-extension-token', getExtToken());
   xhr.timeout = 60_000;
@@ -513,7 +563,8 @@ export function streamAsk({ context, question, style = 'simple', history = [] },
 // 问答流程处理，不能因为这一步失败就把用户真实的问题拦掉。
 export async function classifyIntent(text, bookTitle, chapterTitle) {
   try {
-    const res = await fetch(`${API_BASE}/ask/classify-intent`, {
+    const apiBase = await selectApiBase();
+    const res = await fetch(`${apiBase}/ask/classify-intent`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-extension-token': getExtToken() },
       body: JSON.stringify({ text, bookTitle, chapterTitle }),
@@ -529,7 +580,7 @@ export async function classifyIntent(text, bookTitle, chapterTitle) {
 // /tts/play 这个接口本身不带鉴权（跟 /app/books/{id}/file.epub 同理，是要
 // 直接当音频播放地址用的，expo-av 不会带自定义请求头）。
 export function getTtsPlayUrl(text, voice = 'zh-CN-XiaoxiaoNeural', rate = '+0%') {
-  return `${API_BASE}/tts/play?text=${encodeURIComponent(text)}&voice=${encodeURIComponent(voice)}&rate=${encodeURIComponent(rate)}`;
+  return `${getCurrentApiBase()}/tts/play?text=${encodeURIComponent(text)}&voice=${encodeURIComponent(voice)}&rate=${encodeURIComponent(rate)}`;
 }
 
 export async function transcribeAudio(fileUri, uploadAsync, FileSystemUploadType, onTiming = null) {
@@ -540,7 +591,8 @@ export async function transcribeAudio(fileUri, uploadAsync, FileSystemUploadType
   // 翻后端日志才能看出卡在哪一步。
   let result;
   try {
-    result = await uploadAsync(`${API_BASE}/transcribe`, fileUri, {
+    const apiBase = await selectApiBase();
+    result = await uploadAsync(`${apiBase}/transcribe`, fileUri, {
       httpMethod: 'POST',
       uploadType: FileSystemUploadType.BINARY_CONTENT,
       headers: {
@@ -655,5 +707,5 @@ export async function listBugReports() {
 // getBookFileUrl 一样把令牌拼进 query string（后端 _verify_token 本来就
 // 兼容这个兜底）。ExtAuth 令牌是按天算的（当天内不变），直接内联安全。
 export function getBugReportImageUrl(reportId) {
-  return `${API_BASE}/app/bug-reports/${reportId}/image?token=${getExtToken()}`;
+  return `${getCurrentApiBase()}/app/bug-reports/${reportId}/image?token=${getExtToken()}`;
 }
