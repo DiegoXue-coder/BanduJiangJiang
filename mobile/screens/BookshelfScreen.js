@@ -449,6 +449,7 @@ export default function BookshelfScreen({ navigation }) {
       setBooks(data);
     } catch (e) {
       setError(e.message || '加载失败');
+      setBooks((prev) => prev || []);
     } finally {
       if (isRefresh) setRefreshing(false);
     }
@@ -526,25 +527,16 @@ export default function BookshelfScreen({ navigation }) {
 
   const presetBooks = useMemo(() => (books || []).filter((b) => b.source !== 'imported'), [books]);
   const importedBooks = useMemo(() => (books || []).filter((b) => b.source === 'imported'), [books]);
+  const offlineFallback = useMemo(
+    () => (books || []).some((b) => b.offline_cached || b.offline_fallback),
+    [books],
+  );
 
   if (books === null && !error) {
     return (
       <SafeAreaView style={[styles.safe, { backgroundColor: theme.bg }]}>
         <View style={styles.centerBox}>
           <ActivityIndicator size="large" color={theme.accent} />
-        </View>
-      </SafeAreaView>
-    );
-  }
-
-  if (error && books === null) {
-    return (
-      <SafeAreaView style={[styles.safe, { backgroundColor: theme.bg }]}>
-        <View style={styles.centerBox}>
-          <Text style={[styles.errorText, { color: theme.danger }]}>加载失败：{error}</Text>
-          <TouchableOpacity style={[styles.retryBtn, { backgroundColor: theme.accent, borderRadius: theme.radius }]} onPress={() => load()}>
-            <Text style={[styles.retryText, { color: theme.textOnAccent }]}>重试</Text>
-          </TouchableOpacity>
         </View>
       </SafeAreaView>
     );
@@ -572,6 +564,19 @@ export default function BookshelfScreen({ navigation }) {
             {presetBooks.length} 本典籍{'\n'}{importedBooks.length} 本导入
           </Text>
         </View>
+
+        {(error || offlineFallback) && (
+          <View style={styles.networkNotice}>
+            <KnownIssueNotice
+              message={error
+                ? `书架联网失败：${error}`
+                : '当前网络连接不到服务器，已显示本地缓存/预置书壳；AI、导入、同步等联网功能可能暂不可用。'}
+            />
+            <TouchableOpacity style={[styles.retryBtn, { backgroundColor: theme.accent, borderRadius: theme.radius }]} onPress={() => load(true)}>
+              <Text style={[styles.retryText, { color: theme.textOnAccent }]}>重新连接</Text>
+            </TouchableOpacity>
+          </View>
+        )}
 
         <View style={styles.section}>
           <View style={styles.sectionHead}>
@@ -701,6 +706,7 @@ const styles = StyleSheet.create({
   sectionTitle: { fontSize: 14, fontWeight: '600' },
   sectionDot: { width: 6, height: 6, borderRadius: 3 },
   sectionCount: { fontSize: 10 },
+  networkNotice: { paddingHorizontal: 22, marginTop: -6, marginBottom: 14 },
 
   cfCover: {
     width: COVER_W, height: COVER_H,

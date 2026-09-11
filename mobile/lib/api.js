@@ -1,4 +1,5 @@
 import CryptoJS from 'crypto-js';
+import * as FileSystem from 'expo-file-system/legacy';
 import * as SecureStore from 'expo-secure-store';
 
 // ── 后端地址 ──────────────────────────────────────────────────────────
@@ -6,6 +7,18 @@ import * as SecureStore from 'expo-secure-store';
 // 不像旧的聊天原型那样需要连本机局域网后端做临时联调。
 export const API_BASE = 'https://bandujiangjiang-production.up.railway.app';
 const DEFAULT_TIMEOUT_MS = 25_000;
+const SAFE_REQUEST_RETRY_COUNT = 2;
+const API_CACHE_DIR = `${FileSystem.documentDirectory}api_cache/`;
+const LIBRARY_CACHE_PATH = `${API_CACHE_DIR}library.json`;
+const EMERGENCY_PRESET_LIBRARY = [
+  { id: 9, title: '中庸', author: '子思', added_at: '2026-07-26T07:48:35.173782Z', current_cfi_location: '', source: 'preset', offline_fallback: true },
+  { id: 7, title: '大学', author: '曾子', added_at: '2026-07-17T10:49:53.561340Z', current_cfi_location: '', source: 'preset', offline_fallback: true },
+  { id: 6, title: '庄子', author: '庄子', added_at: '2026-07-17T10:49:52.062478Z', current_cfi_location: '', source: 'preset', offline_fallback: true },
+  { id: 5, title: '墨子', author: '墨子', added_at: '2026-07-17T10:35:29.888038Z', current_cfi_location: '', source: 'preset', offline_fallback: true },
+  { id: 4, title: '孟子', author: '孟子', added_at: '2026-07-17T10:35:28.127954Z', current_cfi_location: '', source: 'preset', offline_fallback: true },
+  { id: 3, title: '论语', author: '孔子', added_at: '2026-07-11T10:19:02.126267Z', current_cfi_location: '', source: 'preset', offline_fallback: true },
+  { id: 2, title: '道德经', author: '老子', added_at: '2026-07-11T10:19:00.084726Z', current_cfi_location: '', source: 'preset', offline_fallback: true },
+];
 
 // ── HMAC 会员卡式验证 ────────────────────────────────────────────────
 // 与 extension/content/content.js 用的是同一个密钥、同一套算法
@@ -170,6 +183,36 @@ async function readResponseText(res) {
   }
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function shouldRetryRequest(fetchOptions) {
+  const method = String(fetchOptions.method || 'GET').toUpperCase();
+  return (method === 'GET' || method === 'HEAD') && !fetchOptions.body;
+}
+
+async function readJsonCache(path) {
+  try {
+    const info = await FileSystem.getInfoAsync(path);
+    if (!info.exists) return null;
+    const raw = await FileSystem.readAsStringAsync(path, { encoding: 'utf8' });
+    return JSON.parse(raw);
+  } catch (_e) {
+    return null;
+  }
+}
+
+async function writeJsonCache(path, data) {
+  try {
+    await FileSystem.makeDirectoryAsync(API_CACHE_DIR, { intermediates: true });
+    await FileSystem.writeAsStringAsync(path, JSON.stringify({
+      savedAt: new Date().toISOString(),
+      data,
+    }), { encoding: 'utf8' });
+  } catch (_e) {}
+}
+
 export async function register(username, password) {
   const data = await appFetch('/app/auth/register', {
     method: 'POST',
@@ -210,31 +253,37 @@ function notifyAuthExpired() {
  * 错误而不是无限等。导入大文件这类明确慢请求会在调用方传更长的超时。*/
 export async function appFetch(path, options = {}) {
   const { timeoutMs = DEFAULT_TIMEOUT_MS, ...fetchOptions } = options;
+  const maxAttempts = shouldRetryRequest(fetchOptions) ? SAFE_REQUEST_RETRY_COUNT : 1;
   const headers = {
     'x-extension-token': getExtToken(),
     ...fetchOptions.headers,
   };
   if (cachedToken) headers['Authorization'] = `Bearer ${cachedToken}`;
 
-  const controller = timeoutMs ? new AbortController() : null;
-  const timer = timeoutMs ? setTimeout(() => controller.abort(), timeoutMs) : null;
-
   let res;
-  try {
-    res = await fetch(`${API_BASE}${path}`, {
-      ...fetchOptions, headers,
-      ...(controller ? { signal: controller.signal } : {}),
-    });
-  } catch (e) {
-    const classified = classifyNetworkFailure(e, path);
-    console.warn('[API网络失败]', {
-      kind: classified.kind,
-      path,
-      message: classified.rawMessage,
-    });
-    throw classified;
-  } finally {
-    if (timer) clearTimeout(timer);
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const controller = timeoutMs ? new AbortController() : null;
+    const timer = timeoutMs ? setTimeout(() => controller.abort(), timeoutMs) : null;
+    try {
+      res = await fetch(`${API_BASE}${path}`, {
+        ...fetchOptions, headers,
+        ...(controller ? { signal: controller.signal } : {}),
+      });
+      break;
+    } catch (e) {
+      const classified = classifyNetworkFailure(e, path);
+      console.warn('[API网络失败]', {
+        kind: classified.kind,
+        path,
+        attempt,
+        maxAttempts,
+        message: classified.rawMessage,
+      });
+      if (attempt >= maxAttempts) throw classified;
+      await sleep(700 * attempt);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   if (res.status === 401 && path.startsWith('/app/')) {
@@ -268,7 +317,22 @@ export async function appFetch(path, options = {}) {
 }
 
 export async function getLibrary() {
-  return appFetch('/app/books');
+  try {
+    const data = await appFetch('/app/books');
+    await writeJsonCache(LIBRARY_CACHE_PATH, data);
+    return data;
+  } catch (e) {
+    const cached = await readJsonCache(LIBRARY_CACHE_PATH);
+    if (Array.isArray(cached?.data)) {
+      console.warn('[API缓存兜底] 使用本地书架缓存', {
+        savedAt: cached.savedAt,
+        reason: e.message,
+      });
+      return cached.data.map((book) => ({ ...book, offline_cached: true }));
+    }
+    console.warn('[API缓存兜底] 使用内置预置书壳', { reason: e.message });
+    return EMERGENCY_PRESET_LIBRARY;
+  }
 }
 
 export async function getBookContext(bookId) {
