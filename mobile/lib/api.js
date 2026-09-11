@@ -5,6 +5,7 @@ import * as SecureStore from 'expo-secure-store';
 // 手机端新接口(/app/*)直接指向生产环境——书库内容是真实预置书籍，
 // 不像旧的聊天原型那样需要连本机局域网后端做临时联调。
 export const API_BASE = 'https://bandujiangjiang-production.up.railway.app';
+const DEFAULT_TIMEOUT_MS = 25_000;
 
 // ── HMAC 会员卡式验证 ────────────────────────────────────────────────
 // 与 extension/content/content.js 用的是同一个密钥、同一套算法
@@ -59,26 +60,134 @@ export async function logout() {
   await SecureStore.deleteItemAsync(TOKEN_KEY);
 }
 
+class ApiRequestError extends Error {
+  constructor(message, meta = {}) {
+    super(message);
+    this.name = 'ApiRequestError';
+    this.kind = meta.kind || 'unknown';
+    this.status = meta.status || 0;
+    this.path = meta.path || '';
+    this.detail = meta.detail || '';
+    this.rawMessage = meta.rawMessage || '';
+  }
+}
+
+function getErrorDetailText(detail) {
+  if (!detail) return '';
+  const text = String(detail).trim();
+  if (!text) return '';
+  try {
+    const parsed = JSON.parse(text);
+    if (typeof parsed?.detail === 'string') return parsed.detail;
+    if (Array.isArray(parsed?.detail)) {
+      return parsed.detail
+        .map((item) => item?.msg || item?.message || JSON.stringify(item))
+        .filter(Boolean)
+        .join('；');
+    }
+    if (typeof parsed?.message === 'string') return parsed.message;
+  } catch (_e) {}
+  return text.replace(/\s+/g, ' ').slice(0, 240);
+}
+
+function makeHttpErrorMessage(status, detailText) {
+  if (status === 400) return detailText || '请求内容不符合要求，请检查后重试';
+  if (status === 401) return '登录已失效，请重新登录';
+  if (status === 403) return '没有权限执行这个操作，请确认账号状态';
+  if (status === 404) return detailText || '没有找到对应内容，可能已被删除或暂不可用';
+  if (status === 413) return detailText || '文件太大，请换一本更小的书再试';
+  if (status === 422) return detailText || '提交内容格式不正确，请检查后重试';
+  if (status >= 500) {
+    return detailText
+      ? `服务器暂时出错，请稍后重试（诊断：HTTP ${status} ${detailText}）`
+      : `服务器暂时出错，请稍后重试（诊断：HTTP ${status}）`;
+  }
+  return `${detailText || '请求失败'}（诊断：HTTP ${status}）`;
+}
+
+function classifyNetworkFailure(error, path) {
+  const raw = `${error?.name || ''} ${error?.message || ''}`.trim();
+  const lower = raw.toLowerCase();
+  if (error?.name === 'AbortError' || lower.includes('aborted')) {
+    return new ApiRequestError('请求超时：服务器或当前网络响应太慢，请切换网络后重试（诊断：timeout）', {
+      kind: 'timeout',
+      path,
+      rawMessage: raw,
+    });
+  }
+  if (
+    lower.includes('ssl') ||
+    lower.includes('tls') ||
+    lower.includes('certificate') ||
+    lower.includes('certpath') ||
+    lower.includes('trust anchor')
+  ) {
+    return new ApiRequestError('安全连接失败：手机到服务器的 SSL/TLS 连接没有建立成功，请切换网络、关闭代理/VPN 后重试（诊断：tls）', {
+      kind: 'tls',
+      path,
+      rawMessage: raw,
+    });
+  }
+  if (
+    lower.includes('dns') ||
+    lower.includes('enotfound') ||
+    lower.includes('eai_again') ||
+    lower.includes('unable to resolve host') ||
+    lower.includes('name_not_resolved')
+  ) {
+    return new ApiRequestError('找不到服务器地址：当前网络可能 DNS 解析失败，请切换 Wi-Fi/热点或稍后重试（诊断：dns）', {
+      kind: 'dns',
+      path,
+      rawMessage: raw,
+    });
+  }
+  if (
+    lower.includes('failed to connect') ||
+    lower.includes('connection refused') ||
+    lower.includes('connection reset') ||
+    lower.includes('connection closed') ||
+    lower.includes('network request failed') ||
+    lower.includes('network connection failed')
+  ) {
+    return new ApiRequestError('连接服务器失败：手机能上网不代表能连到 ChatBook 后端，请切换网络后重试（诊断：connect）', {
+      kind: 'connect',
+      path,
+      rawMessage: raw,
+    });
+  }
+  return new ApiRequestError(`网络请求失败：请切换网络后重试（诊断：unknown ${raw || 'no-message'}）`, {
+    kind: 'unknown',
+    path,
+    rawMessage: raw,
+  });
+}
+
+async function readResponseText(res) {
+  try {
+    return await res.text();
+  } catch (_e) {
+    return '';
+  }
+}
+
 export async function register(username, password) {
-  const res = await fetch(`${API_BASE}/app/auth/register`, {
+  const data = await appFetch('/app/auth/register', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username, password }),
+    timeoutMs: DEFAULT_TIMEOUT_MS,
   });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
   await setToken(data.token);
   return data;
 }
 
 export async function login(username, password) {
-  const res = await fetch(`${API_BASE}/app/auth/login`, {
+  const data = await appFetch('/app/auth/login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username, password }),
+    timeoutMs: DEFAULT_TIMEOUT_MS,
   });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
   await setToken(data.token);
   return data;
 }
@@ -94,14 +203,13 @@ function notifyAuthExpired() {
  * x-extension-token 一直带（插件同款接口要用），登录后额外带
  * Authorization（/app/* 接口靠这个识别真实用户）。
  *
- * timeoutMs（可选）：RN 的 fetch 本身没有默认超时，服务器如果因为某个
+ * timeoutMs（可选，默认25秒）：RN 的 fetch 本身没有默认超时，服务器如果因为某个
  * 请求处理异常久（或连接中途卡死）不回应，调用方会一直转圈、既不报成功
  * 也不报失败——阶段十五PDF导入真机反馈踩到的坑，验收标准明确要求"不允许
  * 无提示卡死"，所以这里补一个可选的AbortController超时，超时就抛出清晰
- * 错误而不是无限等。默认不设（大多数接口本来就很快，不用额外加超时逻辑
- * 的复杂度），只有明确可能耗时的调用方（比如导入大文件）会传这个参数。*/
+ * 错误而不是无限等。导入大文件这类明确慢请求会在调用方传更长的超时。*/
 export async function appFetch(path, options = {}) {
-  const { timeoutMs, ...fetchOptions } = options;
+  const { timeoutMs = DEFAULT_TIMEOUT_MS, ...fetchOptions } = options;
   const headers = {
     'x-extension-token': getExtToken(),
     ...fetchOptions.headers,
@@ -118,10 +226,13 @@ export async function appFetch(path, options = {}) {
       ...(controller ? { signal: controller.signal } : {}),
     });
   } catch (e) {
-    if (e.name === 'AbortError') {
-      throw new Error('请求超时，请检查网络或稍后重试');
-    }
-    throw e;
+    const classified = classifyNetworkFailure(e, path);
+    console.warn('[API网络失败]', {
+      kind: classified.kind,
+      path,
+      message: classified.rawMessage,
+    });
+    throw classified;
   } finally {
     if (timer) clearTimeout(timer);
   }
@@ -130,10 +241,30 @@ export async function appFetch(path, options = {}) {
     notifyAuthExpired();
   }
   if (!res.ok) {
-    const detail = await res.text().catch(() => '');
-    throw new Error(`HTTP ${res.status} ${detail}`.trim());
+    const detail = await readResponseText(res);
+    const detailText = getErrorDetailText(detail);
+    const error = new ApiRequestError(makeHttpErrorMessage(res.status, detailText), {
+      kind: 'http',
+      status: res.status,
+      path,
+      detail: detailText,
+    });
+    console.warn('[API HTTP失败]', {
+      status: res.status,
+      path,
+      detail: detailText,
+    });
+    throw error;
   }
-  return res.json();
+  try {
+    return await res.json();
+  } catch (e) {
+    throw new ApiRequestError('服务器返回内容格式异常，请稍后重试（诊断：invalid-json）', {
+      kind: 'invalid-json',
+      path,
+      rawMessage: e.message || String(e),
+    });
+  }
 }
 
 export async function getLibrary() {
@@ -266,6 +397,7 @@ export function streamAsk({ context, question, style = 'simple', history = [] },
   xhr.open('POST', `${API_BASE}/ask/stream`);
   xhr.setRequestHeader('Content-Type', 'application/json');
   xhr.setRequestHeader('x-extension-token', getExtToken());
+  xhr.timeout = 60_000;
 
   let readIndex = 0;
   let buffer = '';
@@ -293,9 +425,18 @@ export function streamAsk({ context, question, style = 'simple', history = [] },
     }
   };
 
-  xhr.onerror = () => onError(new Error('网络请求失败'));
+  xhr.onerror = () => onError(classifyNetworkFailure(new Error('XMLHttpRequest Network request failed'), '/ask/stream'));
+  xhr.ontimeout = () => onError(classifyNetworkFailure({ name: 'AbortError', message: 'XMLHttpRequest timeout' }, '/ask/stream'));
   xhr.onload = () => {
-    if (xhr.status >= 400) onError(new Error(`HTTP ${xhr.status}`));
+    if (xhr.status >= 400) {
+      const detailText = getErrorDetailText(xhr.responseText);
+      onError(new ApiRequestError(makeHttpErrorMessage(xhr.status, detailText), {
+        kind: 'http',
+        status: xhr.status,
+        path: '/ask/stream',
+        detail: detailText,
+      }));
+    }
   };
 
   xhr.send(JSON.stringify({ context, question, style, history }));
@@ -344,7 +485,8 @@ export async function transcribeAudio(fileUri, uploadAsync, FileSystemUploadType
       },
     });
   } catch (e) {
-    throw new Error(`上传失败（网络层面）：${e.message}`);
+    const classified = classifyNetworkFailure(new Error(`uploadAsync ${e.message || e}`), '/transcribe');
+    throw new Error(`上传失败：${classified.message}`);
   }
   if (result.status && result.status >= 400) {
     throw new Error(`HTTP ${result.status} ${result.body || ''}`.trim());
