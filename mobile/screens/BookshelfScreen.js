@@ -59,6 +59,13 @@ function nameFromUri(uri = '', fallback = 'shared-book') {
   return normalizeImportFileName(last, fallback);
 }
 
+function externalImportKeyForAsset(asset, uri, fileName) {
+  const normalizedUri = String(uri || '').trim();
+  if (normalizedUri) return `uri:${normalizedUri}`;
+  const normalizedName = normalizeImportFileName(fileName);
+  return `file:${normalizedName}:${asset?.size || ''}:${asset?.mimeType || ''}`;
+}
+
 function safeCacheName(fileName = 'shared-book') {
   const cleaned = String(fileName || 'shared-book').replace(/[\\/:*?"<>|]/g, '_').trim();
   return cleaned || 'shared-book';
@@ -438,7 +445,8 @@ export default function BookshelfScreen({ navigation }) {
   const [refreshing, setRefreshing] = useState(false);
   const [importing, setImporting] = useState(false);
   const [showImportSheet, setShowImportSheet] = useState(false);
-  const handledExternalImportRef = useRef('');
+  const handledExternalImportKeysRef = useRef(new Set());
+  const externalImportInFlightRef = useRef(false);
   const lastExternalImportAtRef = useRef(0);
 
   const load = useCallback(async (isRefresh = false) => {
@@ -458,25 +466,33 @@ export default function BookshelfScreen({ navigation }) {
   // 每次进入这个tab都刷新一下（比如刚导入新书、或者从阅读页返回更新了进度）
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
-  const importExternalAsset = useCallback(async (asset, sourceLabel, onConsumed = null) => {
+  const importExternalAsset = useCallback(async (asset, onConsumed = null) => {
     const uri = asset?.uri || asset?.path;
     const fileName = asset?.name || asset?.fileName || nameFromUri(uri);
-    const key = `${sourceLabel}:${uri || ''}:${fileName || ''}:${asset?.size || ''}`;
-    if (!uri || handledExternalImportRef.current === key) return;
-    handledExternalImportRef.current = key;
-    lastExternalImportAtRef.current = Date.now();
-    if (!requireAuth('import')) {
-      Alert.alert('登录后再导入', '外部分享来的书需要保存到你的书架。登录后请从原 App 再分享一次。');
+    const key = externalImportKeyForAsset(asset, uri, fileName);
+    if (!uri || externalImportInFlightRef.current || handledExternalImportKeysRef.current.has(key)) {
       onConsumed?.();
       return;
     }
-    setShowImportSheet(false);
-    await importBookAsset(
-      { ...asset, uri, name: fileName },
-      setImporting,
-      () => load(),
-    );
+    externalImportInFlightRef.current = true;
+    handledExternalImportKeysRef.current.add(key);
+    lastExternalImportAtRef.current = Date.now();
     onConsumed?.();
+    if (!requireAuth('import')) {
+      Alert.alert('登录后再导入', '外部分享来的书需要保存到你的书架。登录后请从原 App 再分享一次。');
+      externalImportInFlightRef.current = false;
+      return;
+    }
+    setShowImportSheet(false);
+    try {
+      await importBookAsset(
+        { ...asset, uri, name: fileName },
+        setImporting,
+        () => load(),
+      );
+    } finally {
+      externalImportInFlightRef.current = false;
+    }
   }, [load, requireAuth]);
 
   useEffect(() => {
@@ -491,7 +507,6 @@ export default function BookshelfScreen({ navigation }) {
         mimeType: selected.mimeType,
         size: selected.size,
       },
-      'share-intent',
       resetShareIntent,
     );
   }, [hasShareIntent, importExternalAsset, resetShareIntent, shareIntent]);
@@ -500,7 +515,7 @@ export default function BookshelfScreen({ navigation }) {
     if (Platform.OS !== 'android') return undefined;
     const handleUrl = (url) => {
       if (!url || (!url.startsWith('content://') && !url.startsWith('file://'))) return;
-      importExternalAsset({ uri: url, name: nameFromUri(url) }, 'view-intent');
+      importExternalAsset({ uri: url, name: nameFromUri(url) });
     };
     Linking.getInitialURL().then(handleUrl).catch(() => {});
     const sub = Linking.addEventListener('url', ({ url }) => handleUrl(url));
