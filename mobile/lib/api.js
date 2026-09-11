@@ -7,8 +7,9 @@ import * as SecureStore from 'expo-secure-store';
 // 临时 HTTPS 代理入口。代理只转发到 Railway，不复制数据库或文件数据；
 // 失效时自动回到 Railway，不能把现有生产入口删掉。
 const RAILWAY_API_BASE = 'https://bandujiangjiang-production.up.railway.app';
+const TENCENT_API_BASE = 'http://203.195.211.137';
 const TEMPORARY_PROXY_API_BASE = 'https://steps-fioricet-coins-antenna.trycloudflare.com';
-const API_BASE_CANDIDATES = [TEMPORARY_PROXY_API_BASE, RAILWAY_API_BASE];
+const API_BASE_CANDIDATES = [TENCENT_API_BASE, TEMPORARY_PROXY_API_BASE, RAILWAY_API_BASE];
 export const API_BASE = RAILWAY_API_BASE;
 const API_PROBE_TIMEOUT_MS = 6_000;
 const DEFAULT_TIMEOUT_MS = 25_000;

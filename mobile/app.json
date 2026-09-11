@@ -20,6 +20,7 @@
     },
     "android": {
       "package": "com.diegoxue.bandujiangjiang",
+      "usesCleartextTraffic": true,
       "intentFilters": [
         {
           "action": "VIEW",

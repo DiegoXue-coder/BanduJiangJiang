@@ -1,3 +1,15 @@
+const { withAndroidManifest } = require('@expo/config-plugins');
+
+function withCleartextTraffic(config) {
+  return withAndroidManifest(config, (modConfig) => {
+    const application = modConfig.modResults.manifest.application?.[0];
+    if (application?.$) {
+      application.$['android:usesCleartextTraffic'] = 'true';
+    }
+    return modConfig;
+  });
+}
+
 // 多机联调：EXPO_PUBLIC_ENGINEER_LABEL在mobile/.env.local里各机器自己设
 // （该文件已在.gitignore的.env*.local规则里，两台机器互不覆盖）。
 // 设了这个变量时，把它拼进App显示名字——这样Expo Go的项目列表/最近打开
@@ -9,5 +21,5 @@ module.exports = ({ config }) => {
   if (label) {
     config.name = `${config.name}（${label}）`;
   }
-  return config;
+  return withCleartextTraffic(config);
 };
