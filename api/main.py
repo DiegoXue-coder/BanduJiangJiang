@@ -36,7 +36,7 @@ import ebooklib
 from ebooklib import epub
 from pypdf import PdfReader
 import pdfplumber
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, UnicodeDammit
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -151,6 +151,14 @@ async def init_db():
         await conn.execute(
             "ALTER TABLE books ADD COLUMN IF NOT EXISTS imported_by BIGINT REFERENCES users(id)"
         )
+        await conn.execute(
+            "ALTER TABLE books ADD COLUMN IF NOT EXISTS import_fingerprint TEXT NOT NULL DEFAULT ''"
+        )
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_books_imported_by_fingerprint
+            ON books (imported_by, import_fingerprint)
+            WHERE source = 'imported' AND import_fingerprint <> ''
+        """)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS chapters (
                 id          BIGSERIAL PRIMARY KEY,
@@ -1001,6 +1009,15 @@ def _resolve_epub_image(book: "epub.EpubBook", doc_item, img_tag) -> str | None:
         ext = "jpg"
     return f"{ext}:{base64.b64encode(data).decode('ascii')}"
 
+def _decode_epub_html(content: bytes) -> str:
+    """EPUB来源很杂，老中文书常见GBK/Big5，不能一律按UTF-8硬解。"""
+    if isinstance(content, str):
+        return content
+    detected = UnicodeDammit(content, is_html=True)
+    if detected.unicode_markup:
+        return detected.unicode_markup
+    return content.decode("utf-8", errors="replace")
+
 def _epub_doc_to_marker_paragraphs(book: "epub.EpubBook", doc_item, soup) -> list[str]:
     """把一篇EPUB文档解析成marker化的段落列表：标题(h1~h6)/表格/图片分别
     转成_HEADING_MARKER/_TABLE_MARKER/_IMAGE_MARKER开头的特殊段落，跟PDF
@@ -1193,7 +1210,7 @@ def _epub_doc_item_to_paragraphs_or_none(book: "epub.EpubBook", item) -> list[st
     避免两处复制粘贴同一段逻辑、以后改一处漏改另一处。提取不到内容、或者
     识别出这篇文档本身是目录/地标页，返回None，调用方跳过这个模块。"""
     try:
-        html_content = item.get_content().decode("utf-8", errors="replace")
+        html_content = _decode_epub_html(item.get_content())
     except Exception:
         return None
     soup = BeautifulSoup(html_content, "html.parser")
@@ -1354,7 +1371,7 @@ def _epub_book_to_chapters(book: "epub.EpubBook") -> list[tuple[str, list[str]]]
     chapters: list[tuple[str, list[str]]] = []
     for idx, item in enumerate(doc_items):
         try:
-            html_content = item.get_content().decode("utf-8", errors="replace")
+            html_content = _decode_epub_html(item.get_content())
         except Exception:
             continue
         soup = BeautifulSoup(html_content, "html.parser")
@@ -2780,6 +2797,7 @@ async def app_login(body: AuthRequest):
 async def _insert_book_and_chapters(
     user_id: int, title: str, author: str, file_path: str,
     chapter_titles: list[str], source: str = "preset",
+    import_fingerprint: str = "",
 ) -> BookOut:
     """把已经落地成EPUB文件的一本书写入 books + chapters，两个入口共用：
     直接上传EPUB（app_import_book）、PDF/TXT转换后落地EPUB（app_import_file，
@@ -2791,10 +2809,10 @@ async def _insert_book_and_chapters(
     async with pool.acquire() as conn:
         async with conn.transaction():
             book_row = await conn.fetchrow("""
-                INSERT INTO books (user_id, title, author, file_path, source, imported_by)
-                VALUES ($1, $2, $3, $4, $5, $6)
+                INSERT INTO books (user_id, title, author, file_path, source, imported_by, import_fingerprint)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
                 RETURNING id, added_at
-            """, user_id, title, author, file_path, source, imported_by)
+            """, user_id, title, author, file_path, source, imported_by, import_fingerprint or "")
             book_id = book_row["id"]
 
             for idx, chapter_title in enumerate(chapter_titles):
@@ -2804,6 +2822,22 @@ async def _insert_book_and_chapters(
                 """, book_id, idx, chapter_title)
 
     return BookOut(id=book_id, title=title, author=author, added_at=book_row["added_at"], source=source)
+
+async def _find_existing_imported_book(user_id: int, import_fingerprint: str) -> BookOut | None:
+    if not import_fingerprint:
+        return None
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT id, title, author, added_at, source
+            FROM books
+            WHERE source = 'imported'
+              AND imported_by = $1
+              AND import_fingerprint = $2
+            ORDER BY added_at DESC
+            LIMIT 1
+        """, user_id, import_fingerprint)
+    return BookOut(**dict(row)) if row else None
 
 @app.post("/app/books/import", response_model=BookOut)
 async def app_import_book(
@@ -2823,6 +2857,11 @@ async def app_import_book(
     raw = await file.read()
     if len(raw) > MAX_EPUB_BYTES:
         raise HTTPException(status_code=413, detail="文件过大，请控制在 50MB 以内")
+
+    import_fingerprint = hashlib.sha256(raw).hexdigest() if source == "imported" else ""
+    existing = await _find_existing_imported_book(user_id, import_fingerprint)
+    if existing:
+        return existing
 
     file_path = os.path.join(EPUB_STORAGE_DIR, f"{uuid.uuid4().hex}.epub")
     with open(file_path, "wb") as f:
@@ -2858,7 +2897,11 @@ async def app_import_book(
     else:
         chapter_titles = _extract_chapter_titles(book_epub)
 
-    return await _insert_book_and_chapters(user_id, title, author, file_path, chapter_titles, source=source)
+    return await _insert_book_and_chapters(
+        user_id, title, author, file_path, chapter_titles,
+        source=source,
+        import_fingerprint=import_fingerprint,
+    )
 
 MAX_IMPORT_FILE_BYTES = 30 * 1024 * 1024  # 30MB，PDF/TXT原型用，比EPUB上限低一档
 
@@ -2884,6 +2927,11 @@ async def app_import_file(
     raw = await file.read()
     if len(raw) > MAX_IMPORT_FILE_BYTES:
         raise HTTPException(status_code=413, detail="文件过大，请控制在 30MB 以内")
+
+    import_fingerprint = hashlib.sha256(raw).hexdigest()
+    existing = await _find_existing_imported_book(user_id, import_fingerprint)
+    if existing:
+        return existing
 
     # PDF提取文字（pypdf逐页同步调用）和EPUB打包都是CPU密集的同步代码，真实
     # PDF（尤其带自定义字体/复杂排版的）比这次开发时用的简单测试PDF慢得多，
@@ -2912,7 +2960,9 @@ async def app_import_file(
         raise HTTPException(status_code=400, detail=f"生成EPUB失败: {e}")
 
     return await _insert_book_and_chapters(
-        user_id, book_title, book_author, file_path, chapter_titles, source="imported",
+        user_id, book_title, book_author, file_path, chapter_titles,
+        source="imported",
+        import_fingerprint=import_fingerprint,
     )
 
 @app.post("/app/books/{book_id}/replace", response_model=BookOut)
@@ -3173,7 +3223,7 @@ async def app_get_chapter_text(book_id: int, chapter_id: int, include_blocks: bo
         if idx < 0 or idx >= len(doc_items):
             return [], []
         item = doc_items[idx]
-        html_content = item.get_content().decode("utf-8", errors="replace")
+        html_content = _decode_epub_html(item.get_content())
         soup = BeautifulSoup(html_content, "html.parser")
         for tag in soup(["script", "style"]):
             tag.decompose()

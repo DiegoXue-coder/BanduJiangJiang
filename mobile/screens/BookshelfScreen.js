@@ -30,6 +30,7 @@ const MONO_FONT = Platform.select({ ios: 'Menlo', android: 'monospace', default:
 
 const GRID_SIZE = 64; // 设计稿网格线间距 background-size:64px
 const SUPPORTED_IMPORT_EXTS = ['epub', 'pdf', 'txt'];
+const EXTERNAL_IMPORT_COOLDOWN_MS = 45 * 1000;
 
 function normalizeImportFileName(fileName = '', fallback = 'shared-book') {
   const raw = String(fileName || fallback);
@@ -470,13 +471,15 @@ export default function BookshelfScreen({ navigation }) {
     const uri = asset?.uri || asset?.path;
     const fileName = asset?.name || asset?.fileName || nameFromUri(uri);
     const key = externalImportKeyForAsset(asset, uri, fileName);
-    if (!uri || externalImportInFlightRef.current || handledExternalImportKeysRef.current.has(key)) {
+    const now = Date.now();
+    const inCooldown = now - lastExternalImportAtRef.current < EXTERNAL_IMPORT_COOLDOWN_MS;
+    if (!uri || externalImportInFlightRef.current || handledExternalImportKeysRef.current.has(key) || inCooldown) {
       onConsumed?.();
       return;
     }
     externalImportInFlightRef.current = true;
     handledExternalImportKeysRef.current.add(key);
-    lastExternalImportAtRef.current = Date.now();
+    lastExternalImportAtRef.current = now;
     onConsumed?.();
     if (!requireAuth('import')) {
       Alert.alert('登录后再导入', '外部分享来的书需要保存到你的书架。登录后请从原 App 再分享一次。');
