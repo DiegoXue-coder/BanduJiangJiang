@@ -31,6 +31,16 @@ const MONO_FONT = Platform.select({ ios: 'Menlo', android: 'monospace', default:
 const GRID_SIZE = 64; // 设计稿网格线间距 background-size:64px
 const SUPPORTED_IMPORT_EXTS = ['epub', 'pdf', 'txt'];
 
+function normalizeImportFileName(fileName = '', fallback = 'shared-book') {
+  const raw = String(fileName || fallback);
+  let decoded = raw;
+  try {
+    decoded = decodeURIComponent(raw);
+  } catch {}
+  const last = decoded.split(/[\\/]/).filter(Boolean).pop() || fallback;
+  return last.trim() || fallback;
+}
+
 function inferImportExt(fileName = '', uri = '', mimeType = '') {
   const source = `${fileName || ''} ${uri || ''}`.toLowerCase();
   const cleanSource = source.split('?')[0].split('#')[0];
@@ -46,17 +56,18 @@ function inferImportExt(fileName = '', uri = '', mimeType = '') {
 function nameFromUri(uri = '', fallback = 'shared-book') {
   const cleanUri = (uri || '').split('?')[0].split('#')[0];
   const last = cleanUri.split('/').filter(Boolean).pop() || fallback;
-  try {
-    const decoded = decodeURIComponent(last);
-    return decoded.split(/[\\/]/).filter(Boolean).pop() || fallback;
-  } catch {
-    return last || fallback;
-  }
+  return normalizeImportFileName(last, fallback);
 }
 
 function safeCacheName(fileName = 'shared-book') {
   const cleaned = String(fileName || 'shared-book').replace(/[\\/:*?"<>|]/g, '_').trim();
   return cleaned || 'shared-book';
+}
+
+function fileNameWithExt(fileName, ext) {
+  const normalized = normalizeImportFileName(fileName);
+  if (!ext || normalized.toLowerCase().endsWith(`.${ext}`)) return normalized;
+  return `${normalized.replace(/\.+$/g, '')}.${ext}`;
 }
 
 function mimeForImportExt(ext, fallback = '') {
@@ -66,13 +77,31 @@ function mimeForImportExt(ext, fallback = '') {
   return fallback || 'application/octet-stream';
 }
 
-async function prepareImportUri(uri, fileName) {
-  if (Platform.OS !== 'android' || !uri?.startsWith('content://')) return uri;
+async function prepareImportAsset(uri, fileName, ext, mimeType) {
+  const normalizedName = fileNameWithExt(fileName, ext);
+  if (Platform.OS !== 'android' || !uri?.startsWith('content://')) {
+    return { uri, fileName: normalizedName, mimeType };
+  }
   const cacheDir = FileSystem.cacheDirectory;
-  if (!cacheDir) return uri;
-  const targetUri = `${cacheDir}external-import-${Date.now()}-${safeCacheName(fileName)}`;
+  if (!cacheDir) return { uri, fileName: normalizedName, mimeType };
+  const targetUri = `${cacheDir}external-import-${Date.now()}-${safeCacheName(normalizedName)}`;
   await FileSystem.copyAsync({ from: uri, to: targetUri });
-  return targetUri;
+  return { uri: targetUri, fileName: normalizedName, mimeType };
+}
+
+async function detectImportExtFromContent(uri) {
+  if (!uri?.startsWith('file://')) return '';
+  try {
+    const head = await FileSystem.readAsStringAsync(uri, {
+      encoding: FileSystem.EncodingType.Base64,
+      position: 0,
+      length: 8,
+    });
+    // EPUB 是 ZIP 包；部分安卓来源会丢文件名/MIME，只能先按 ZIP 兜底走
+    // EPUB 导入，真正不是 EPUB 的文件会由后端解析阶段给出失败原因。
+    if (head?.startsWith('UEsD')) return 'epub';
+  } catch {}
+  return '';
 }
 
 // 网格背景：设计稿用CSS repeating-linear-gradient画横竖发丝线，顶部到
@@ -325,26 +354,28 @@ function confirmDeleteBook(book, onDeleted) {
 // 复杂交互——原型阶段选个文件、等一下、成功或看清楚报错，够用。
 async function importBookAsset(asset, setImporting, onDone) {
   const uri = asset?.uri || asset?.path;
-  const fileName = asset?.name || asset?.fileName || nameFromUri(uri);
-  const ext = inferImportExt(fileName, uri, asset?.mimeType);
+  const fileName = normalizeImportFileName(asset?.name || asset?.fileName || nameFromUri(uri));
+  let ext = inferImportExt(fileName, uri, asset?.mimeType);
   if (!uri) {
     Alert.alert('导入失败', '没有拿到文件地址，请从原 App 重新分享一次。');
-    return;
-  }
-  if (!SUPPORTED_IMPORT_EXTS.includes(ext)) {
-    Alert.alert('暂不支持这个文件', '目前只能导入 EPUB、PDF 或 TXT 文件。');
     return;
   }
 
   setImporting(true);
   try {
-    const importUri = await prepareImportUri(uri, fileName);
+    const prepared = await prepareImportAsset(uri, fileName, ext, asset?.mimeType);
+    ext = ext || await detectImportExtFromContent(prepared.uri);
+    if (!SUPPORTED_IMPORT_EXTS.includes(ext)) {
+      Alert.alert('暂不支持这个文件', '目前只能导入 EPUB、PDF 或 TXT 文件。');
+      return;
+    }
+    const importFileName = fileNameWithExt(prepared.fileName, ext);
     if (ext === 'epub') {
-      await importEpub(importUri, fileName);
+      await importEpub(prepared.uri, importFileName);
     } else {
       const mimeType = mimeForImportExt(ext, asset?.mimeType);
-      const title = (fileName || '').replace(/\.(pdf|txt)$/i, '');
-      await importFile(importUri, fileName, mimeType, title);
+      const title = (importFileName || '').replace(/\.(pdf|txt)$/i, '');
+      await importFile(prepared.uri, importFileName, mimeType, title);
     }
     onDone();
   } catch (e) {
