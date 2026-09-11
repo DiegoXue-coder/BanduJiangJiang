@@ -310,6 +310,7 @@ export async function appFetch(path, options = {}) {
     ...fetchOptions.headers,
   };
   if (cachedToken) headers['Authorization'] = `Bearer ${cachedToken}`;
+  const canRetrySafeRequest = shouldRetryRequest(fetchOptions);
 
   let res;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -320,6 +321,16 @@ export async function appFetch(path, options = {}) {
         ...fetchOptions, headers,
         ...(controller ? { signal: controller.signal } : {}),
       });
+      if (
+        canRetrySafeRequest
+        && attempt < maxAttempts
+        && [500, 502, 503, 504].includes(res.status)
+      ) {
+        const detail = await readResponseText(res);
+        console.warn('[API HTTP重试]', { status: res.status, path, attempt, detail });
+        await sleep(700 * attempt);
+        continue;
+      }
       break;
     } catch (e) {
       const classified = classifyNetworkFailure(e, path);

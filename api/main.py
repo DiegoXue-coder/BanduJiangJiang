@@ -51,7 +51,7 @@ async def get_pool() -> asyncpg.Pool:
     if _pool is None:
         # statement_cache_size=0 required for Supabase Transaction Pooler (PgBouncer)
         _pool = await asyncpg.create_pool(
-            DATABASE_URL, min_size=1, max_size=5, statement_cache_size=0, timeout=10
+            DATABASE_URL, min_size=1, max_size=2, statement_cache_size=0, timeout=25
         )
     return _pool
 
