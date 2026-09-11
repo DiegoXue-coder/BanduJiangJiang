@@ -760,7 +760,7 @@ function TocNode({ item, depth, pathKey, expandedToc, toggleTocExpanded, onSelec
 
 function ReaderInner({
   bookId, bookTitle, author, initialLocation, initialAnnotations, navigation,
-  jumpToCfi, jumpNonce, epubSrc, epubError, chapters,
+  jumpToCfi, jumpNonce, epubSrc, epubError, chapters, bookSource,
 }) {
   const windowSize = useWindowDimensions();
   // 1号任务诊断打点：这里挂载即代表epubUri（Base64字符串）已经通过RN桥
@@ -862,7 +862,8 @@ function ReaderInner({
   const [showFontSizePanel, setShowFontSizePanel] = useState(false);
   const [fontSizePt, setFontSizePt] = useState(FONT_SIZE_DEFAULT);
   const [bodyFontKey, setBodyFontKey] = useState('serif');
-  const [readerMode, setReaderMode] = useState(READER_DEFAULT_MODE);
+  const defaultReaderMode = bookSource === 'imported' ? 'epub' : READER_DEFAULT_MODE;
+  const [readerMode, setReaderMode] = useState(defaultReaderMode);
   const [standardChapterIndex, setStandardChapterIndex] = useState(0);
   const [standardPageIndex, setStandardPageIndex] = useState(0);
   const [standardChapterText, setStandardChapterText] = useState(null);
@@ -914,7 +915,7 @@ function ReaderInner({
         if (BODY_FONT_KEYS.includes(saved.bodyFontKey)) {
           setBodyFontKey(saved.bodyFontKey);
         }
-        setReaderMode(READER_DEFAULT_MODE);
+        setReaderMode(defaultReaderMode);
         if (
           Number.isFinite(saved.fontSizePt) &&
           saved.fontSizePt >= FONT_SIZE_MIN &&
@@ -928,7 +929,7 @@ function ReaderInner({
         if (!cancelled) setReaderSettingsLoaded(true);
       });
     return () => { cancelled = true; };
-  }, []);
+  }, [defaultReaderMode]);
 
   useEffect(() => {
     if (!readerSettingsLoaded) return;
@@ -2347,6 +2348,7 @@ export default function ReaderScreen({ route, navigation }) {
       epubSrc={epubUri}
       epubError={epubError}
       chapters={ctx.chapters}
+      bookSource={ctx.source}
     />
   );
 }

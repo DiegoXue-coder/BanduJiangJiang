@@ -593,6 +593,7 @@ class BookContextOut(BaseModel):
     author: str
     chapters: list[ChapterOut]
     current_cfi_location: str = ""
+    source: str = "preset"
 
 class HighlightIn(BaseModel):
     chapter_id: int | None = None
@@ -1020,6 +1021,12 @@ def _decode_epub_html(content: bytes) -> str:
     if detected.unicode_markup:
         return detected.unicode_markup
     return content.decode("utf-8", errors="replace")
+
+def _looks_mojibake_text(text: str) -> bool:
+    if not text:
+        return False
+    suspicious = sum(1 for ch in text if ch == "\ufffd" or "\u0370" <= ch <= "\u03ff" or "\u0530" <= ch <= "\u058f")
+    return suspicious >= max(1, len(text) // 6)
 
 def _epub_doc_to_marker_paragraphs(book: "epub.EpubBook", doc_item, soup) -> list[str]:
     """把一篇EPUB文档解析成marker化的段落列表：标题(h1~h6)/表格/图片分别
@@ -2874,29 +2881,26 @@ async def app_import_book(
         book_epub = epub.read_epub(file_path)
         title  = (book_epub.get_metadata("DC", "title")   or [("", {})])[0][0] or file.filename
         author = (book_epub.get_metadata("DC", "creator") or [("", {})])[0][0] or ""
+        if source == "imported" and _looks_mojibake_text(title):
+            title = os.path.splitext(file.filename or "")[0] or title
+        if source == "imported" and _looks_mojibake_text(author):
+            author = ""
     except Exception as e:
         os.remove(file_path)
         raise HTTPException(status_code=400, detail=f"EPUB 解析失败: {e}")
 
     if source == "imported":
-        # 用户自己上传的epub来源五花八门，不能假设跟预置书库一样干净——
-        # 真机反馈过选不了字、目录/正文颜色不跟随深色模式（原书自带CSS跟
-        # 阅读器主题冲突）。统一走跟PDF/TXT导入一样的"提取重建"，见
-        # _epub_book_to_chapters注释。HTML解析+重新生成EPUB是CPU密集的
-        # 同步代码，包一层to_thread（跟PDF导入同样的教训，不重复踩坑）。
-        try:
-            chapters = await asyncio.to_thread(_epub_book_to_chapters, book_epub)
-            if not chapters:
-                raise ValueError("没有提取到可用的正文内容")
-            clean_file_path = os.path.join(EPUB_STORAGE_DIR, f"{uuid.uuid4().hex}.epub")
-            chapter_titles = await asyncio.to_thread(
-                _build_epub_from_sections, clean_file_path, title, author, chapters
+        # 用户上传的商业EPUB里常见字体映射/私有码位/复杂CSS。直接抽文本再重建
+        # 会破坏原书渲染能力，导致其他阅读器可读、ChatBook导入后空白或乱码。
+        # 因此 EPUB 导入的阅读文件保留原包；标准阅读/听书/AI 所需的纯文本提取
+        # 后续另做兼容，不能再以牺牲原版阅读为代价。
+        chapter_titles = _extract_chapter_titles(book_epub)
+        if not chapter_titles:
+            doc_count = sum(
+                1 for idref, _ in book_epub.spine
+                if (book_epub.get_item_with_id(idref) is not None)
             )
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"EPUB 内容提取失败: {e}")
-        finally:
-            os.remove(file_path)
-        file_path = clean_file_path
+            chapter_titles = [f"第{idx + 1}章" for idx in range(max(1, doc_count))]
     else:
         chapter_titles = _extract_chapter_titles(book_epub)
 
@@ -3183,6 +3187,7 @@ async def app_get_book_context(book_id: int, user_id: int | None = OptionalUser)
         id=book["id"], title=book["title"], author=book["author"],
         chapters=[ChapterOut(**dict(c)) for c in chapters],
         current_cfi_location=progress["current_cfi_location"] if progress else "",
+        source=book["source"],
     )
 
 @app.get("/app/books/{book_id}/chapters/{chapter_id}/text")
