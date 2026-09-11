@@ -51,7 +51,7 @@ async def get_pool() -> asyncpg.Pool:
     if _pool is None:
         # statement_cache_size=0 required for Supabase Transaction Pooler (PgBouncer)
         _pool = await asyncpg.create_pool(
-            DATABASE_URL, min_size=1, max_size=5, statement_cache_size=0
+            DATABASE_URL, min_size=1, max_size=5, statement_cache_size=0, timeout=10
         )
     return _pool
 
@@ -260,7 +260,10 @@ async def init_db():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await init_db()
+    try:
+        await asyncio.wait_for(init_db(), timeout=25)
+    except Exception as e:
+        print(f"[DB] 启动初始化暂时失败，服务先启动：{type(e).__name__}: {e}")
     yield
     if _pool:
         await _pool.close()
