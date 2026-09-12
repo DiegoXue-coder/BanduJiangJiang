@@ -1731,7 +1731,7 @@ function ReaderInner({
   }, [standardPages.length]);
 
   const standardInteractionReady = readerSettingsLoaded && !standardChapterError && !!standardChapterText;
-  const epubInteractionReady = readerSettingsLoaded && !!epubSrc && isReady && epubReadyGateOpen;
+  const epubInteractionReady = readerSettingsLoaded && !!epubSrc && isReady;
   const readerInteractionReady = readerMode === 'standard' ? standardInteractionReady : epubInteractionReady;
   const readerLoadingStageIndex = readerMode === 'standard'
     ? (!readerSettingsLoaded ? 1 : !standardChapterText ? 2 : 3)
@@ -1739,7 +1739,9 @@ function ReaderInner({
   const readerLoadingLabel = readerMode === 'standard'
     ? (!readerSettingsLoaded ? '正在读取你的阅读设置' : '正在整理正文内容')
     : (!epubSrc ? '正在准备书籍文件' : !isReady ? '正在解析书籍内容' : '正在应用阅读样式');
-  const showReaderGateOverlay = !readerInteractionReady && !standardChapterError && !epubError;
+  const showReaderGateOverlay = readerMode === 'standard'
+    ? (!readerInteractionReady && !standardChapterError && !epubError)
+    : (!epubSrc && !epubError);
   const readerPanelOpen = showFontSizePanel || showThemePanel;
 
   useEffect(() => {
@@ -2126,7 +2128,7 @@ function ReaderInner({
         ) : (
           <View
             pointerEvents={readerInteractionReady ? 'auto' : 'none'}
-            style={[styles.epubReaderHost, !readerInteractionReady && styles.readerHostHidden]}
+            style={styles.epubReaderHost}
           >
             <Reader
               src={epubSrc}
