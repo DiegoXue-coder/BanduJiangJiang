@@ -227,7 +227,7 @@ const COVER_H = 148;
 const ITEM_GAP = 14; // 设计稿用-18px负margin做重叠，RN动画版改成正向间距，效果更稳定
 const STRIDE = COVER_W + ITEM_GAP;
 
-function CoverItem({ book, index, scrollX, onPress, onDeleted, theme }) {
+function CoverItem({ book, index, scrollX, onPress, onDeleted, deleting = false, theme }) {
   const isImported = book.source === 'imported';
   const hasProgress = !!book.current_cfi_location;
   // scrollX=index*STRIDE正好是这个item在屏幕正中间的那一刻——sidePad在
@@ -258,11 +258,14 @@ function CoverItem({ book, index, scrollX, onPress, onDeleted, theme }) {
           )}
           {isImported && (
             <TouchableOpacity
-              style={styles.cfDeleteBtn}
+              style={[styles.cfDeleteBtn, deleting && styles.cfDeleteBtnDisabled]}
               hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              disabled={deleting}
               onPress={() => confirmDeleteBook(book, onDeleted)}
             >
-              <IconTrash color="rgba(255,255,255,.85)" size={13} strokeWidth={2} />
+              {deleting
+                ? <ActivityIndicator size="small" color="rgba(255,255,255,.85)" />
+                : <IconTrash color="rgba(255,255,255,.85)" size={13} strokeWidth={2} />}
             </TouchableOpacity>
           )}
           <Text style={[styles.cfTitle, { fontFamily: FONTS.serifBold }]} numberOfLines={2}>{book.title}</Text>
@@ -344,10 +347,18 @@ function confirmDeleteBook(book, onDeleted) {
       {
         text: '删除', style: 'destructive',
         onPress: async () => {
+          let removedLocally = false;
           try {
+            onDeleted(book, { optimistic: true });
+            removedLocally = true;
             await deleteMyBook(book.id);
-            onDeleted();
+            onDeleted(book, { confirmed: true });
           } catch (e) {
+            if (e?.status === 404 || /不存在|not found/i.test(e?.message || '')) {
+              onDeleted(book, { confirmed: true });
+              return;
+            }
+            onDeleted(book, { failed: true, restore: removedLocally });
             Alert.alert('删除失败', e.message || '请稍后重试');
           }
         },
@@ -406,7 +417,7 @@ async function pickAndImportFile(setImporting, onDone) {
   await importBookAsset(result.assets[0], setImporting, onDone);
 }
 
-function CoverflowShelf({ books, theme, navigation, onDeleted }) {
+function CoverflowShelf({ books, theme, navigation, onDeleted, deletingBookIds }) {
   const { width: screenWidth } = useWindowDimensions();
   const sidePad = Math.max(22, (screenWidth - COVER_W) / 2);
   const scrollX = useRef(new Animated.Value(0)).current;
@@ -428,6 +439,7 @@ function CoverflowShelf({ books, theme, navigation, onDeleted }) {
           scrollX={scrollX}
           theme={theme}
           onPress={() => navigation.navigate('Reader', { bookId: book.id })}
+          deleting={deletingBookIds?.has?.(book.id)}
           onDeleted={onDeleted}
         />
       ))}
@@ -446,6 +458,7 @@ export default function BookshelfScreen({ navigation }) {
   const [refreshing, setRefreshing] = useState(false);
   const [importing, setImporting] = useState(false);
   const [showImportSheet, setShowImportSheet] = useState(false);
+  const [deletingBookIds, setDeletingBookIds] = useState(() => new Set());
   const handledExternalImportKeysRef = useRef(new Set());
   const externalImportInFlightRef = useRef(false);
   const lastExternalImportAtRef = useRef(0);
@@ -463,6 +476,30 @@ export default function BookshelfScreen({ navigation }) {
       if (isRefresh) setRefreshing(false);
     }
   }, []);
+
+  const handleDeletedBook = useCallback((book, state = {}) => {
+    if (!book?.id) return;
+    if (state.optimistic) {
+      setDeletingBookIds((prev) => new Set(prev).add(book.id));
+      setBooks((prev) => (prev || []).filter((item) => item.id !== book.id));
+      return;
+    }
+    if (state.failed) {
+      setDeletingBookIds((prev) => {
+        const next = new Set(prev);
+        next.delete(book.id);
+        return next;
+      });
+      if (state.restore) load();
+      return;
+    }
+    setDeletingBookIds((prev) => {
+      const next = new Set(prev);
+      next.delete(book.id);
+      return next;
+    });
+    setBooks((prev) => (prev || []).filter((item) => item.id !== book.id));
+  }, [load]);
 
   // 每次进入这个tab都刷新一下（比如刚导入新书、或者从阅读页返回更新了进度）
   useFocusEffect(useCallback(() => { load(); }, [load]));
@@ -605,7 +642,7 @@ export default function BookshelfScreen({ navigation }) {
             <Text style={[styles.sectionCount, { color: theme.textMuted, fontFamily: MONO_FONT }]}>官方精校 · {presetBooks.length}</Text>
           </View>
           {presetBooks.length > 0 && (
-            <CoverflowShelf books={presetBooks} theme={theme} navigation={navigation} onDeleted={() => load()} />
+            <CoverflowShelf books={presetBooks} theme={theme} navigation={navigation} onDeleted={handleDeletedBook} deletingBookIds={deletingBookIds} />
           )}
         </View>
 
@@ -626,11 +663,14 @@ export default function BookshelfScreen({ navigation }) {
                     <View style={styles.cfSpine} />
                     <View style={styles.cfImportBadge}><Text style={styles.cfImportBadgeText}>IMPORT</Text></View>
                     <TouchableOpacity
-                      style={styles.cfDeleteBtn}
+                      style={[styles.cfDeleteBtn, deletingBookIds.has(book.id) && styles.cfDeleteBtnDisabled]}
                       hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                      onPress={() => confirmDeleteBook(book, () => load())}
+                      disabled={deletingBookIds.has(book.id)}
+                      onPress={() => confirmDeleteBook(book, handleDeletedBook)}
                     >
-                      <IconTrash color="rgba(255,255,255,.85)" size={13} strokeWidth={2} />
+                      {deletingBookIds.has(book.id)
+                        ? <ActivityIndicator size="small" color="rgba(255,255,255,.85)" />
+                        : <IconTrash color="rgba(255,255,255,.85)" size={13} strokeWidth={2} />}
                     </TouchableOpacity>
                     <Text style={[styles.cfTitle, { fontFamily: FONTS.serifBold }]} numberOfLines={2}>{book.title}</Text>
                   </View>
@@ -743,6 +783,7 @@ const styles = StyleSheet.create({
   },
   cfImportBadgeText: { fontSize: 7, letterSpacing: 0.5, color: 'rgba(255,255,255,.85)', fontFamily: MONO_FONT },
   cfDeleteBtn: { position: 'absolute', top: 8, left: 8, padding: 2 },
+  cfDeleteBtnDisabled: { opacity: 0.45 },
 
   addTile: {
     width: COVER_W, height: COVER_H,

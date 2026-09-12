@@ -110,6 +110,7 @@ const STANDARD_PAGE_MAX_CHARS = 430;
 const STANDARD_READING_LINE_HEIGHT = 1.56;
 const STANDARD_PROGRESS_PREFIX = 'standard-progress:';
 const STANDARD_CHAPTER_CACHE_VERSION = 1;
+const EPUB_FILE_CACHE_VERSION = 2;
 const READER_LOADING_STAGES = [
   '准备书籍文件',
   '读取目录结构',
@@ -1232,6 +1233,9 @@ function ReaderInner({
 
   useEffect(() => {
     if (readerMode !== 'epub' || !isReady || epubReadyGateOpen) return undefined;
+    const fallback = setTimeout(() => {
+      openEpubReadyGate('ready-fallback');
+    }, 2200);
     let tries = 0;
     const probe = () => {
       tries += 1;
@@ -1293,11 +1297,15 @@ function ReaderInner({
     const timer = setInterval(() => {
       if (tries >= 18) {
         clearInterval(timer);
+        openEpubReadyGate('probe-timeout');
         return;
       }
       probe();
     }, 700);
-    return () => clearInterval(timer);
+    return () => {
+      clearTimeout(fallback);
+      clearInterval(timer);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [readerMode, isReady, epubReadyGateOpen]);
 
@@ -2128,7 +2136,7 @@ function ReaderInner({
               defaultTheme={THEMES.light}
               initialLocation={initialLocation || undefined}
               onReady={handleReady}
-              onDisplayError={(reason) => Alert.alert('加载失败', String(reason))}
+              onDisplayError={(reason) => setEpubError(String(reason || 'EPUB显示失败'))}
               onLocationChange={handleLocationChange}
               onWebViewMessage={handleReaderWebViewMessage}
               onSelected={(text, cfiRange) => {
@@ -2264,15 +2272,27 @@ export default function ReaderScreen({ route, navigation }) {
   const loadEpub = useCallback(async () => {
     const t0 = Date.now();
     const dir = FileSystem.documentDirectory + 'epub_cache/';
-    const localUri = dir + `book_${bookId}.epub`;
+    const localUri = dir + `book_${bookId}_v${EPUB_FILE_CACHE_VERSION}.epub`;
     const info = await FileSystem.getInfoAsync(localUri);
-    if (!info.exists) {
+    if (info.exists && !info.size) {
+      await FileSystem.deleteAsync(localUri, { idempotent: true }).catch(() => {});
+    }
+    const currentInfo = await FileSystem.getInfoAsync(localUri);
+    if (!currentInfo.exists) {
       await FileSystem.makeDirectoryAsync(dir, { intermediates: true });
-      await FileSystem.downloadAsync(getBookFileUrl(bookId), localUri);
+      const result = await FileSystem.downloadAsync(getBookFileUrl(bookId), localUri);
+      if (result.status && result.status >= 400) {
+        await FileSystem.deleteAsync(localUri, { idempotent: true }).catch(() => {});
+        throw new Error(`EPUB下载失败：HTTP ${result.status}`);
+      }
       const dlInfo = await FileSystem.getInfoAsync(localUri);
+      if (!dlInfo.exists || !dlInfo.size) {
+        await FileSystem.deleteAsync(localUri, { idempotent: true }).catch(() => {});
+        throw new Error('EPUB下载失败：文件为空');
+      }
       console.log(`[打开诊断] EPUB下载完成 耗时=${Date.now() - t0}ms 文件大小=${dlInfo.size}bytes`);
     } else {
-      console.log(`[打开诊断] EPUB本地已缓存 跳过下载 文件大小=${info.size}bytes`);
+      console.log(`[打开诊断] EPUB本地已缓存 跳过下载 文件大小=${currentInfo.size}bytes`);
     }
     const t1 = Date.now();
     const b64 = await FileSystem.readAsStringAsync(localUri, { encoding: FileSystem.EncodingType.Base64 });
@@ -2307,6 +2327,21 @@ export default function ReaderScreen({ route, navigation }) {
   }, [bookId]);
 
   useEffect(() => { load(); }, [load]);
+
+  useEffect(() => {
+    if (!ctx) return undefined;
+    let cancelled = false;
+    setEpubError('');
+    setEpubUri(null);
+    loadEpub()
+      .then((b64) => {
+        if (!cancelled) setEpubUri(b64);
+      })
+      .catch((e) => {
+        if (!cancelled) setEpubError(e.message || '书籍文件准备失败');
+      });
+    return () => { cancelled = true; };
+  }, [ctx, loadEpub]);
 
   if (error) {
     return (
