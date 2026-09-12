@@ -435,7 +435,7 @@ export async function importEpub(fileUri, fileName) {
   return appFetch('/app/books/import', {
     method: 'POST',
     body: formData,
-    timeoutMs: 60_000,
+    timeoutMs: 180_000,
   });
 }
 
