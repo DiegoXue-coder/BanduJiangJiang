@@ -1,6 +1,7 @@
 import CryptoJS from 'crypto-js';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as SecureStore from 'expo-secure-store';
+import { Platform } from 'react-native';
 
 // ── 后端地址 ──────────────────────────────────────────────────────────
 // 2026-09-11 网络抢修：安卓测试机直连 Railway 会超时，先给 App 一个
@@ -9,7 +10,9 @@ import * as SecureStore from 'expo-secure-store';
 const RAILWAY_API_BASE = 'https://bandujiangjiang-production.up.railway.app';
 const TENCENT_API_BASE = 'http://203.195.211.137';
 const TEMPORARY_PROXY_API_BASE = 'https://steps-fioricet-coins-antenna.trycloudflare.com';
-const API_BASE_CANDIDATES = [TENCENT_API_BASE, TEMPORARY_PROXY_API_BASE, RAILWAY_API_BASE];
+const ANDROID_API_BASE_CANDIDATES = [TENCENT_API_BASE, TEMPORARY_PROXY_API_BASE, RAILWAY_API_BASE];
+const IOS_API_BASE_CANDIDATES = [RAILWAY_API_BASE];
+const API_BASE_CANDIDATES = Platform.OS === 'ios' ? IOS_API_BASE_CANDIDATES : ANDROID_API_BASE_CANDIDATES;
 export const API_BASE = RAILWAY_API_BASE;
 const API_PROBE_TIMEOUT_MS = 6_000;
 const DEFAULT_TIMEOUT_MS = 25_000;
