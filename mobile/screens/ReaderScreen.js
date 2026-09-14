@@ -111,6 +111,7 @@ const STANDARD_READING_LINE_HEIGHT = 1.56;
 const STANDARD_PROGRESS_PREFIX = 'standard-progress:';
 const STANDARD_CHAPTER_CACHE_VERSION = 1;
 const EPUB_FILE_CACHE_VERSION = 2;
+const EPUB_BASE64_MEMORY_CACHE = new Map();
 const READER_LOADING_STAGES = [
   '准备书籍文件',
   '读取目录结构',
@@ -161,6 +162,10 @@ function parseReaderBridgeMessage(event) {
 
 function getStandardChapterCachePath(bookId, chapterId) {
   return `${FileSystem.documentDirectory}reader_content_cache/v${STANDARD_CHAPTER_CACHE_VERSION}/book_${bookId}/chapter_${chapterId}.json`;
+}
+
+function getEpubMemoryCacheKey(bookId, fileInfo) {
+  return `${bookId}:${fileInfo?.size || 0}:${fileInfo?.modificationTime || 0}:v${EPUB_FILE_CACHE_VERSION}`;
 }
 
 async function readCachedStandardChapter(bookId, chapterId) {
@@ -916,7 +921,15 @@ function ReaderInner({
         if (BODY_FONT_KEYS.includes(saved.bodyFontKey)) {
           setBodyFontKey(saved.bodyFontKey);
         }
-        setReaderMode(defaultReaderMode);
+        if (THEME_ORDER.includes(saved.themeName)) {
+          setThemeName(saved.themeName);
+          setThemeMode(saved.themeName === 'paper' ? 'eyecare' : saved.themeName);
+        }
+        if (bookSource !== 'imported' && READER_MODE_ORDER.includes(saved.readerMode)) {
+          setReaderMode(saved.readerMode);
+        } else {
+          setReaderMode(defaultReaderMode);
+        }
         if (
           Number.isFinite(saved.fontSizePt) &&
           saved.fontSizePt >= FONT_SIZE_MIN &&
@@ -930,13 +943,13 @@ function ReaderInner({
         if (!cancelled) setReaderSettingsLoaded(true);
       });
     return () => { cancelled = true; };
-  }, [defaultReaderMode]);
+  }, [bookSource, defaultReaderMode]);
 
   useEffect(() => {
     if (!readerSettingsLoaded) return;
-    SecureStore.setItemAsync(READER_SETTINGS_KEY, JSON.stringify({ bodyFontKey, fontSizePt, readerMode: READER_DEFAULT_MODE }))
+    SecureStore.setItemAsync(READER_SETTINGS_KEY, JSON.stringify({ bodyFontKey, fontSizePt, themeName, readerMode }))
       .catch((e) => console.warn('[阅读器设置] 保存失败', e.message || e));
-  }, [readerSettingsLoaded, bodyFontKey, fontSizePt, readerMode]);
+  }, [readerSettingsLoaded, bodyFontKey, fontSizePt, themeName, readerMode]);
 
   useEffect(() => {
     setStandardSavedHighlights(
@@ -1044,6 +1057,16 @@ function ReaderInner({
   // 以内嵌data URL的方式注入到EPUB正文document，先保证字形确实可见。
   useEffect(() => {
     if (!isReady) return;
+    if (Platform.OS === 'android') {
+      const currentOpt = BODY_FONT_OPTIONS.find((o) => o.key === bodyFontKey) || BODY_FONT_OPTIONS[0];
+      setFontAssetReport([{
+        family: currentOpt.family,
+        ok: true,
+        skippedDataUrl: true,
+        note: 'Android EPUB 使用轻量 CSS 字体族，不注入大体积字体文件',
+      }]);
+      return;
+    }
     let cancelled = false;
     const currentOpt = BODY_FONT_OPTIONS.find((o) => o.key === bodyFontKey) || BODY_FONT_OPTIONS[0];
     Asset.fromModule(FONT_ASSETS[currentOpt.asset]).downloadAsync()
@@ -1318,25 +1341,55 @@ function ReaderInner({
     if (!isReady) return;
     const opt = BODY_FONT_OPTIONS.find((o) => o.key === bodyFontKey) || BODY_FONT_OPTIONS[0];
     const overrideCss = buildReaderFontOverrideCss(opt.cssFamily, opt.profile);
-    changeFontFamily(opt.cssFamily);
+    if (Platform.OS !== 'android') {
+      changeFontFamily(opt.cssFamily);
+    }
     injectJavascript(`
       (function() {
         try {
           var id = ${jsStringLiteral(READER_FONT_STYLE_ID)};
           var family = ${jsStringLiteral(opt.cssFamily)};
           var overrideCss = ${jsStringLiteral(overrideCss)};
+          function installStyle(doc) {
+            if (!doc || !doc.head) return;
+            var style = doc.getElementById(id);
+            if (!style) {
+              style = doc.createElement('style');
+              style.id = id;
+              doc.head.appendChild(style);
+            }
+            style.innerHTML = overrideCss;
+          }
+          function getReaderRendition() {
+            if (typeof rendition !== 'undefined' && rendition) return rendition;
+            if (window.rendition) return window.rendition;
+            return null;
+          }
+          function applyEverywhere() {
+            installStyle(document);
+            var r = getReaderRendition();
+            if (r && typeof r.getContents === 'function') {
+              r.getContents().forEach(function(contents) {
+                installStyle(contents && contents.document);
+              });
+            }
+          }
           window.__chatbookReaderFontFamily = family;
           window.__chatbookReaderFontCss = overrideCss;
           if (typeof window.__chatbookApplyReaderFont === 'function') {
             window.__chatbookApplyReaderFont(family);
           } else {
-            var style = document.getElementById(id);
-            if (!style) {
-              style = document.createElement('style');
-              style.id = id;
-              document.head.appendChild(style);
+            window.__chatbookApplyReaderFont = function() {
+              applyEverywhere();
+            };
+            var readerRendition = getReaderRendition();
+            if (!window.__chatbookLightFontRenderedHook && readerRendition && typeof readerRendition.on === 'function') {
+              window.__chatbookLightFontRenderedHook = true;
+              readerRendition.on('rendered', function(section, contents) {
+                installStyle(contents && contents.document);
+              });
             }
-            style.innerHTML = overrideCss;
+            applyEverywhere();
           }
         } catch (e) {}
       })();
@@ -1396,7 +1449,7 @@ function ReaderInner({
           if (!doc || doc.__chatbookAndroidSelectionGuard) return;
           doc.__chatbookAndroidSelectionGuard = true;
           var startX = 0, startY = 0, startAt = 0;
-          var qualified = false, rejected = false, timer = null;
+          var qualified = false, rejected = false, timer = null, clearUntil = 0;
           function postClear() {
             try {
               var bridge = window.ReactNativeWebView || (window.parent && window.parent.ReactNativeWebView);
@@ -1413,6 +1466,13 @@ function ReaderInner({
             } catch (e) {}
             postClear();
           }
+          function scheduleClear(duration) {
+            clearUntil = Date.now() + duration;
+            clearSelection();
+            setTimeout(clearSelection, 60);
+            setTimeout(clearSelection, 180);
+            setTimeout(clearSelection, 420);
+          }
           doc.addEventListener('touchstart', function(e) {
             clearTimeout(timer);
             var touch = e.changedTouches && e.changedTouches[0];
@@ -1426,21 +1486,21 @@ function ReaderInner({
             startAt = Date.now();
             qualified = false;
             rejected = false;
-            timer = setTimeout(function() { qualified = !rejected; }, 720);
+            timer = setTimeout(function() { qualified = !rejected; }, 760);
           }, { passive: true, capture: true });
           doc.addEventListener('touchmove', function(e) {
             if (qualified || rejected) return;
             var touch = e.changedTouches && e.changedTouches[0];
             if (!touch) return;
-            if (Math.abs(touch.clientX - startX) > 10 || Math.abs(touch.clientY - startY) > 10) {
+            if (Math.abs(touch.clientX - startX) > 6 || Math.abs(touch.clientY - startY) > 6) {
               rejected = true;
               clearTimeout(timer);
-              clearSelection();
+              scheduleClear(900);
             }
           }, { passive: true, capture: true });
           doc.addEventListener('touchend', function() {
             clearTimeout(timer);
-            if (rejected || !qualified || Date.now() - startAt < 720) clearSelection();
+            if (rejected || !qualified || Date.now() - startAt < 760) scheduleClear(900);
             qualified = false;
             rejected = false;
           }, { passive: true, capture: true });
@@ -1448,8 +1508,13 @@ function ReaderInner({
             clearTimeout(timer);
             qualified = false;
             rejected = true;
-            clearSelection();
+            scheduleClear(900);
           }, { passive: true, capture: true });
+          doc.addEventListener('selectionchange', function() {
+            if (rejected || Date.now() < clearUntil) {
+              clearSelection();
+            }
+          }, true);
         }
         try {
           var readerRendition = getReaderRendition();
@@ -1652,7 +1717,6 @@ function ReaderInner({
     if (!readerInteractionReady) return;
     setFontSizePt((prev) => {
       const next = Math.min(FONT_SIZE_MAX, Math.max(FONT_SIZE_MIN, prev + delta));
-      changeFontSize(`${next}pt`);
       return next;
     });
   }
@@ -2279,7 +2343,7 @@ export default function ReaderScreen({ route, navigation }) {
     if (info.exists && !info.size) {
       await FileSystem.deleteAsync(localUri, { idempotent: true }).catch(() => {});
     }
-    const currentInfo = await FileSystem.getInfoAsync(localUri);
+    let currentInfo = await FileSystem.getInfoAsync(localUri);
     if (!currentInfo.exists) {
       await FileSystem.makeDirectoryAsync(dir, { intermediates: true });
       const result = await FileSystem.downloadAsync(getBookFileUrl(bookId), localUri);
@@ -2293,11 +2357,23 @@ export default function ReaderScreen({ route, navigation }) {
         throw new Error('EPUB下载失败：文件为空');
       }
       console.log(`[打开诊断] EPUB下载完成 耗时=${Date.now() - t0}ms 文件大小=${dlInfo.size}bytes`);
+      currentInfo = dlInfo;
     } else {
       console.log(`[打开诊断] EPUB本地已缓存 跳过下载 文件大小=${currentInfo.size}bytes`);
     }
+    const memoryCacheKey = getEpubMemoryCacheKey(bookId, currentInfo);
+    const cachedBase64 = EPUB_BASE64_MEMORY_CACHE.get(memoryCacheKey);
+    if (cachedBase64) {
+      console.log(`[打开诊断] EPUB Base64内存缓存命中 累计耗时=${Date.now() - t0}ms 编码后字符数=${cachedBase64.length}`);
+      return cachedBase64;
+    }
     const t1 = Date.now();
     const b64 = await FileSystem.readAsStringAsync(localUri, { encoding: FileSystem.EncodingType.Base64 });
+    EPUB_BASE64_MEMORY_CACHE.set(memoryCacheKey, b64);
+    if (EPUB_BASE64_MEMORY_CACHE.size > 3) {
+      const oldestKey = EPUB_BASE64_MEMORY_CACHE.keys().next().value;
+      EPUB_BASE64_MEMORY_CACHE.delete(oldestKey);
+    }
     console.log(`[打开诊断] Base64编码完成 耗时=${Date.now() - t1}ms 编码后字符数=${b64.length}`);
     return b64;
   }, [bookId]);
