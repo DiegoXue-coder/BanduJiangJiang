@@ -193,6 +193,11 @@ const HF_NO_SPEECH_TIMEOUT_MS = 4000;
 // 安全上限：防止识别一直不停（比如背景持续有人在说话），录到这个时长
 // 强制截止，不会无限录下去。
 const HF_MAX_UTTERANCE_MS = 25000;
+// 手动长按说话时，用户的手指才是主要端点信号：按住就持续收音，松手才
+// 送去识别。VAD 在这条路径只做日志/诊断，不再因为 1 秒左右的自然停顿
+// 替用户结束问题；仍保留硬上限，避免误触后无限录音。
+const HF_MANUAL_HOLD_MAX_MS = MAX_RECORDING_MS;
+const HF_MANUAL_HOLD_MIN_MS = 350;
 // 2026-09-05真机复测后统一成"手动按住说话"：iOS最初是为了解决常驻录音
 // 压低外放音量，Android虽然技术上能常驻监听，但用户反馈环境噪音容易误
 // 触发，而且两端交互不一致。测试阶段先把两端都收敛成可控模式：听书时不
@@ -1119,14 +1124,18 @@ export default function ListenScreen({ route, navigation }) {
       if (perm !== 'granted') return null;
       await enableRecordingAudioMode();
       const recording = new Audio.Recording();
+      const manualHoldMode = MANUAL_HOLD_TO_TALK && voiceHoldActiveRef.current;
       let speechEverDetected = false;
       let silenceMs = 0;
       let elapsedMs = 0;
       let settled = false;
+      let finishReason = '';
+      let recordingStartedAt = 0;
       const donePromise = new Promise((resolve) => {
-        hfListenResolveRef.current = () => {
+        hfListenResolveRef.current = (reason = 'external') => {
           if (settled) return;
           settled = true;
+          finishReason = reason;
           resolve();
         };
       });
@@ -1141,21 +1150,36 @@ export default function ListenScreen({ route, navigation }) {
         } else {
           silenceMs += HF_METER_INTERVAL_MS;
         }
-        const shouldStop = (speechEverDetected && silenceMs >= HF_SILENCE_END_MS)
-          || (!speechEverDetected && elapsedMs >= HF_NO_SPEECH_TIMEOUT_MS)
-          || elapsedMs >= HF_MAX_UTTERANCE_MS;
-        if (shouldStop) hfListenResolveRef.current?.();
+        const shouldStop = manualHoldMode
+          ? elapsedMs >= HF_MANUAL_HOLD_MAX_MS
+          : (speechEverDetected && silenceMs >= HF_SILENCE_END_MS)
+            || (!speechEverDetected && elapsedMs >= HF_NO_SPEECH_TIMEOUT_MS)
+            || elapsedMs >= HF_MAX_UTTERANCE_MS;
+        if (shouldStop) {
+          const reason = manualHoldMode
+            ? 'manual_max_duration'
+            : elapsedMs >= HF_MAX_UTTERANCE_MS
+              ? 'vad_max_duration'
+              : speechEverDetected
+                ? 'vad_silence'
+                : 'vad_no_speech';
+          hfListenResolveRef.current?.(reason);
+        }
       });
       await recording.prepareToRecordAsync({ ...Audio.RecordingOptionsPresets.HIGH_QUALITY, isMeteringEnabled: true });
       await recording.startAsync();
+      recordingStartedAt = Date.now();
       markHfTiming('正式录音已开始', 'recording_started');
+      console.log(`[免提诊断] 正式录音开始 mode=${manualHoldMode ? 'manual_hold' : 'vad'} hold=${voiceHoldActiveRef.current}`);
       hfRecordingRef.current = recording;
       if (MANUAL_HOLD_TO_TALK && !voiceHoldActiveRef.current) {
-        setTimeout(() => { hfListenResolveRef.current?.(); }, 0);
+        setTimeout(() => { hfListenResolveRef.current?.('manual_released_before_start'); }, 0);
       }
       // 双保险：万一某些机型metering回调不触发/触发不及时，硬性上限兜底，
       // 不会无限录下去。
-      hfListenTimerRef.current = setTimeout(() => { hfListenResolveRef.current?.(); }, HF_MAX_UTTERANCE_MS + 1500);
+      hfListenTimerRef.current = setTimeout(() => {
+        hfListenResolveRef.current?.(manualHoldMode ? 'manual_timer_max' : 'timer_max');
+      }, (manualHoldMode ? HF_MANUAL_HOLD_MAX_MS : HF_MAX_UTTERANCE_MS) + 1500);
       await donePromise;
       voiceHoldActiveRef.current = false;
       if (hfListenTimerRef.current) {
@@ -1168,10 +1192,16 @@ export default function ListenScreen({ route, navigation }) {
       hfRecordingRef.current = null;
       if (!rec) return null;
       await rec.stopAndUnloadAsync();
-      markHfTiming(`端点检测结束 speech=${speechEverDetected} elapsed=${elapsedMs}ms`, 'endpoint_end');
+      const wallElapsedMs = recordingStartedAt ? Date.now() - recordingStartedAt : elapsedMs;
+      markHfTiming(`录音结束 reason=${finishReason || 'unknown'} mode=${manualHoldMode ? 'manual_hold' : 'vad'} speech=${speechEverDetected} elapsed=${wallElapsedMs}ms`, 'endpoint_end');
+      console.log(`[免提诊断] 录音结束 reason=${finishReason || 'unknown'} mode=${manualHoldMode ? 'manual_hold' : 'vad'} speech=${speechEverDetected} meterElapsed=${elapsedMs}ms wallElapsed=${wallElapsedMs}ms`);
       const uri = rec.getURI();
       await restorePlaybackAudioMode();
-      if (!speechEverDetected) return null; // 全程没有真的检测到声音，不浪费一次识别请求
+      if (!manualHoldMode && !speechEverDetected) return null; // 自动监听全程没检测到声音，不浪费一次识别请求
+      if (manualHoldMode && wallElapsedMs < HF_MANUAL_HOLD_MIN_MS) {
+        markHfTiming(`手动长按过短，跳过ASR elapsed=${wallElapsedMs}ms`);
+        return null;
+      }
       markHfTiming('开始ASR识别', 'asr_start');
       const text = await transcribeAudio(
         uri,
@@ -1555,10 +1585,11 @@ export default function ListenScreen({ route, navigation }) {
     setHfText('');
   }
 
-  function handleVoiceModeMicLongPress() {
+  function handleVoiceModeMicPressIn() {
     if (MANUAL_HOLD_TO_TALK) {
       if (hfStage === 'listening' || hfStage === 'thinking') return;
       voiceHoldActiveRef.current = true;
+      console.log(`[免提诊断] mic pressIn stage=${hfStage || 'idle'} muted=${handsFreeMuted} phase=${phase}`);
       if (hfStage === 'replying') {
         setHandsFreeMuted(false);
         startHandsFreeTurn(true);
@@ -1577,8 +1608,9 @@ export default function ListenScreen({ route, navigation }) {
     if (!MANUAL_HOLD_TO_TALK) return;
     if (!voiceHoldActiveRef.current && hfStage !== 'listening') return;
     voiceHoldActiveRef.current = false;
+    console.log(`[免提诊断] mic pressOut stage=${hfStage || 'idle'} resolve=${!!hfListenResolveRef.current}`);
     setHandsFreeMuted(true);
-    hfListenResolveRef.current?.();
+    hfListenResolveRef.current?.('manual_release');
   }
 
   function handleVoiceModeStatusPress() {
@@ -2165,8 +2197,7 @@ export default function ListenScreen({ route, navigation }) {
                             !handsFreeMuted && styles.voiceModeMicBtnActive,
                             handsFreeMuted && styles.voiceModeMicBtnMuted,
                           ]}
-                          onLongPress={handleVoiceModeMicLongPress}
-                          delayLongPress={260}
+                          onPressIn={handleVoiceModeMicPressIn}
                           onPressOut={handleVoiceModeMicPressOut}
                           accessibilityLabel={manualAskLabel}
                         >
