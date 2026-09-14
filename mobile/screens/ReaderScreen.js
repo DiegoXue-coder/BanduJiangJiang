@@ -46,12 +46,12 @@ const BODY_FONT_OPTIONS = [
   {
     key: 'sans',
     label: '黑体',
-    family: 'SourceHanSansSCBold',
-    cssFamily: '"SourceHanSansSCBold", "PingFang SC", "Heiti SC", sans-serif',
-    previewFamily: Platform.select({ ios: 'PingFang SC', android: FONTS.sansBold, default: FONTS.sansBold }),
-    checkFamilies: ['PingFang SC', 'Heiti SC', 'SourceHanSansSCBold'],
-    asset: FONTS.sansBold,
-    profile: { weight: 700 },
+    family: 'SourceHanSansSC',
+    cssFamily: '"SourceHanSansSC", "PingFang SC", "Heiti SC", sans-serif',
+    previewFamily: Platform.select({ ios: 'PingFang SC', android: FONTS.sansRegular, default: FONTS.sansRegular }),
+    checkFamilies: ['PingFang SC', 'Heiti SC', 'SourceHanSansSC'],
+    asset: FONTS.sansRegular,
+    profile: { weight: 400 },
     previewText: '黑',
   },
   {
@@ -112,6 +112,7 @@ const STANDARD_PROGRESS_PREFIX = 'standard-progress:';
 const STANDARD_CHAPTER_CACHE_VERSION = 1;
 const EPUB_FILE_CACHE_VERSION = 2;
 const EPUB_BASE64_MEMORY_CACHE = new Map();
+const FONT_BASE64_MEMORY_CACHE = new Map();
 const READER_LOADING_STAGES = [
   '准备书籍文件',
   '读取目录结构',
@@ -226,6 +227,30 @@ function parseStandardProgressLocation(value, chapters = []) {
 
 function jsStringLiteral(value) {
   return JSON.stringify(String(value ?? ''));
+}
+
+async function loadFontAssetBase64(fontName) {
+  const cached = FONT_BASE64_MEMORY_CACHE.get(fontName);
+  if (cached) return { ...cached, fromCache: true };
+  const asset = await Asset.fromModule(FONT_ASSETS[fontName]).downloadAsync();
+  const url = asset.localUri || asset.uri;
+  const base64 = await FileSystem.readAsStringAsync(url, {
+    encoding: FileSystem.EncodingType.Base64,
+  });
+  const result = {
+    url,
+    localUri: asset.localUri,
+    uri: asset.uri,
+    byteLength: Math.round(base64.length * 0.75),
+    base64,
+    fromCache: false,
+  };
+  FONT_BASE64_MEMORY_CACHE.set(fontName, result);
+  if (FONT_BASE64_MEMORY_CACHE.size > BODY_FONT_OPTIONS.length) {
+    const oldestKey = FONT_BASE64_MEMORY_CACHE.keys().next().value;
+    FONT_BASE64_MEMORY_CACHE.delete(oldestKey);
+  }
+  return result;
 }
 
 function buildReaderFontOverrideCss(cssFamily, profile = {}) {
@@ -962,13 +987,9 @@ function ReaderInner({
   useEffect(() => {
     let cancelled = false;
     const currentOpt = BODY_FONT_OPTIONS.find((o) => o.key === bodyFontKey) || BODY_FONT_OPTIONS[0];
-    Asset.fromModule(FONT_ASSETS[currentOpt.asset]).downloadAsync()
-      .then(async (asset) => {
-        const url = asset.localUri || asset.uri;
-        return FileSystem.readAsStringAsync(url, { encoding: FileSystem.EncodingType.Base64 });
-      })
-      .then((base64) => {
-        if (!cancelled) setStandardFontBase64(base64);
+    loadFontAssetBase64(currentOpt.asset)
+      .then((result) => {
+        if (!cancelled) setStandardFontBase64(result.base64);
       })
       .catch((e) => {
         console.warn('[标准阅读字体] 加载失败', e.message || e);
@@ -1057,31 +1078,18 @@ function ReaderInner({
   // 以内嵌data URL的方式注入到EPUB正文document，先保证字形确实可见。
   useEffect(() => {
     if (!isReady) return;
-    if (Platform.OS === 'android') {
-      const currentOpt = BODY_FONT_OPTIONS.find((o) => o.key === bodyFontKey) || BODY_FONT_OPTIONS[0];
-      setFontAssetReport([{
-        family: currentOpt.family,
-        ok: true,
-        skippedDataUrl: true,
-        note: 'Android EPUB 使用轻量 CSS 字体族，不注入大体积字体文件',
-      }]);
-      return;
-    }
     let cancelled = false;
     const currentOpt = BODY_FONT_OPTIONS.find((o) => o.key === bodyFontKey) || BODY_FONT_OPTIONS[0];
-    Asset.fromModule(FONT_ASSETS[currentOpt.asset]).downloadAsync()
-      .then(async (asset) => {
-        const url = asset.localUri || asset.uri;
-        const base64 = await FileSystem.readAsStringAsync(url, {
-          encoding: FileSystem.EncodingType.Base64,
-        });
+    loadFontAssetBase64(currentOpt.asset)
+      .then((fontAsset) => {
         return {
           family: currentOpt.family,
-          url,
-          localUri: asset.localUri,
-          uri: asset.uri,
-          byteLength: Math.round(base64.length * 0.75),
-          base64,
+          url: fontAsset.url,
+          localUri: fontAsset.localUri,
+          uri: fontAsset.uri,
+          byteLength: fontAsset.byteLength,
+          base64: fontAsset.base64,
+          fromCache: fontAsset.fromCache,
           ok: true,
         };
       })
@@ -1092,73 +1100,73 @@ function ReaderInner({
         error: e.message || String(e),
       }))
       .then((result) => {
-      if (cancelled) return;
-      setFontAssetReport([result]);
-      if (!result.ok || !result.base64) return;
-      const rules = `@font-face { font-family: "${currentOpt.family}"; src: url("data:font/truetype;charset=utf-8;base64,${result.base64}") format("truetype"); font-weight: ${currentOpt.profile.weight || 400}; font-style: normal; }`;
-      const currentCss = buildReaderFontOverrideCss(currentOpt.cssFamily, currentOpt.profile);
-      injectJavascript(`
-        (function() {
-          try {
-            var faceId = ${jsStringLiteral(READER_FONT_FACE_STYLE_ID)};
-            var overrideId = ${jsStringLiteral(READER_FONT_STYLE_ID)};
-            var faceCss = ${jsStringLiteral(rules)};
-            function installStyle(doc, id, css) {
-              if (!doc || !doc.head) return;
-              var style = doc.getElementById(id);
-              if (!style) {
-                style = doc.createElement('style');
-                style.id = id;
-                doc.head.appendChild(style);
+        if (cancelled) return;
+        setFontAssetReport([result]);
+        if (!result.ok || !result.base64) return;
+        const rules = `@font-face { font-family: "${currentOpt.family}"; src: url("data:font/truetype;charset=utf-8;base64,${result.base64}") format("truetype"); font-weight: ${currentOpt.profile.weight || 400}; font-style: normal; }`;
+        const currentCss = buildReaderFontOverrideCss(currentOpt.cssFamily, currentOpt.profile);
+        injectJavascript(`
+          (function() {
+            try {
+              var faceId = ${jsStringLiteral(READER_FONT_FACE_STYLE_ID)};
+              var overrideId = ${jsStringLiteral(READER_FONT_STYLE_ID)};
+              var faceCss = ${jsStringLiteral(rules)};
+              function installStyle(doc, id, css) {
+                if (!doc || !doc.head) return;
+                var style = doc.getElementById(id);
+                if (!style) {
+                  style = doc.createElement('style');
+                  style.id = id;
+                  doc.head.appendChild(style);
+                }
+                style.innerHTML = css;
               }
-              style.innerHTML = css;
-            }
-            function installFontFace(doc) {
-              installStyle(doc, faceId, faceCss);
-            }
-            function applyFont(doc, family) {
-              installFontFace(doc);
-              installStyle(
-                doc,
-                overrideId,
-                window.__chatbookReaderFontCss || ${jsStringLiteral(currentCss)}
-              );
-            }
-            function getReaderRendition() {
-              if (typeof rendition !== 'undefined' && rendition) return rendition;
-              if (window.rendition) return window.rendition;
-              return null;
-            }
-            window.__chatbookApplyReaderFont = function(cssFamily) {
-              applyFont(document, cssFamily);
-              var r = getReaderRendition();
-              if (r && typeof r.getContents === 'function') {
-                r.getContents().forEach(function(contents) {
-                  applyFont(contents && contents.document, cssFamily);
+              function installFontFace(doc) {
+                installStyle(doc, faceId, faceCss);
+              }
+              function applyFont(doc, family) {
+                installFontFace(doc);
+                installStyle(
+                  doc,
+                  overrideId,
+                  window.__chatbookReaderFontCss || ${jsStringLiteral(currentCss)}
+                );
+              }
+              function getReaderRendition() {
+                if (typeof rendition !== 'undefined' && rendition) return rendition;
+                if (window.rendition) return window.rendition;
+                return null;
+              }
+              window.__chatbookApplyReaderFont = function(cssFamily) {
+                applyFont(document, cssFamily);
+                var r = getReaderRendition();
+                if (r && typeof r.getContents === 'function') {
+                  r.getContents().forEach(function(contents) {
+                    applyFont(contents && contents.document, cssFamily);
+                  });
+                }
+                console.log('[字体诊断] 已应用正文字体 ' + cssFamily);
+              };
+              var readerRendition = getReaderRendition();
+              if (!window.__chatbookFontRenderedHook && readerRendition && typeof readerRendition.on === 'function') {
+                window.__chatbookFontRenderedHook = true;
+                readerRendition.on('rendered', function(section, contents) {
+                  var family = window.__chatbookReaderFontFamily || ${jsStringLiteral(currentOpt.cssFamily)};
+                  if (contents && contents.document) {
+                    applyFont(contents.document, family);
+                  } else {
+                    window.__chatbookApplyReaderFont(family);
+                  }
                 });
               }
-              console.log('[字体诊断] 已应用正文字体 ' + cssFamily);
-            };
-            var readerRendition = getReaderRendition();
-            if (!window.__chatbookFontRenderedHook && readerRendition && typeof readerRendition.on === 'function') {
-              window.__chatbookFontRenderedHook = true;
-              readerRendition.on('rendered', function(section, contents) {
-                var family = window.__chatbookReaderFontFamily || ${jsStringLiteral(currentOpt.cssFamily)};
-                if (contents && contents.document) {
-                  applyFont(contents.document, family);
-                } else {
-                  window.__chatbookApplyReaderFont(family);
-                }
-              });
-            }
-            window.__chatbookReaderFontFamily = ${jsStringLiteral(currentOpt.cssFamily)};
-            window.__chatbookReaderFontCss = ${jsStringLiteral(currentCss)};
-            window.__chatbookApplyReaderFont(window.__chatbookReaderFontFamily);
-          } catch (e) {}
-        })();
-        true;
-      `);
-    });
+              window.__chatbookReaderFontFamily = ${jsStringLiteral(currentOpt.cssFamily)};
+              window.__chatbookReaderFontCss = ${jsStringLiteral(currentCss)};
+              window.__chatbookApplyReaderFont(window.__chatbookReaderFontFamily);
+            } catch (e) {}
+          })();
+          true;
+        `);
+      });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isReady, bodyFontKey]);
@@ -1434,13 +1442,17 @@ function ReaderInner({
     `);
   }, [isReady, themeName]);
 
-  // 安卓 Chromium 在翻页/滑动过程中偶尔会先生成原生文字选区。把一次
-  // 触摸先归类：720ms 内移动超过 10px 就视为翻页并清掉误选；稳定长按
-  // 达到门槛后才允许继续拖动选区手柄。iOS 不注入，保持原有行为。
+  // 安卓 Chromium 的文本选择比 iOS WebKit 更容易在慢滑/点按时抢先触发。
+  // 只在事后 clearSelection() 不够稳，因为选区可能在 touchend 之后才出现。
+  // 改为阅读器常用策略：默认锁住 user-select；单指稳定按住超过阈值后，
+  // 才临时开放浏览器原生选字。这样滑动翻页和长按选字先在入口处分流。
   useEffect(() => {
     if (!isReady || Platform.OS !== 'android') return;
     injectJavascript(`
       (function() {
+        var STYLE_ID = 'chatbook-android-selection-lock-style';
+        var LOCK_CLASS = 'chatbook-selection-locked';
+        var ENABLE_CLASS = 'chatbook-selection-enabled';
         function getReaderRendition() {
           if (typeof rendition !== 'undefined' && rendition) return rendition;
           return window.rendition || null;
@@ -1449,7 +1461,49 @@ function ReaderInner({
           if (!doc || doc.__chatbookAndroidSelectionGuard) return;
           doc.__chatbookAndroidSelectionGuard = true;
           var startX = 0, startY = 0, startAt = 0;
-          var qualified = false, rejected = false, timer = null, clearUntil = 0;
+          var qualified = false, rejected = false, timer = null, lockTimer = null, clearUntil = 0;
+          function installLockStyle() {
+            if (!doc.head || doc.getElementById(STYLE_ID)) return;
+            var style = doc.createElement('style');
+            style.id = STYLE_ID;
+            style.innerHTML =
+              'html.' + LOCK_CLASS + ', html.' + LOCK_CLASS + ' body, html.' + LOCK_CLASS + ' body *:not(input):not(textarea){' +
+              '-webkit-user-select:none !important;user-select:none !important;-webkit-touch-callout:none !important;' +
+              '}' +
+              'html.' + ENABLE_CLASS + ', html.' + ENABLE_CLASS + ' body, html.' + ENABLE_CLASS + ' body *:not(input):not(textarea){' +
+              '-webkit-user-select:text !important;user-select:text !important;-webkit-touch-callout:default !important;' +
+              '}';
+            doc.head.appendChild(style);
+          }
+          function hasSelection() {
+            try {
+              var view = doc.defaultView;
+              var selected = view && view.getSelection ? view.getSelection() : null;
+              return !!(selected && selected.rangeCount && String(selected).trim());
+            } catch (e) {
+              return false;
+            }
+          }
+          function lockSelection() {
+            clearTimeout(timer);
+            clearTimeout(lockTimer);
+            if (doc.documentElement) {
+              doc.documentElement.classList.remove(ENABLE_CLASS);
+              doc.documentElement.classList.add(LOCK_CLASS);
+            }
+          }
+          function enableSelection() {
+            if (doc.documentElement) {
+              doc.documentElement.classList.remove(LOCK_CLASS);
+              doc.documentElement.classList.add(ENABLE_CLASS);
+            }
+          }
+          function scheduleLockIfIdle(delay) {
+            clearTimeout(lockTimer);
+            lockTimer = setTimeout(function() {
+              if (!hasSelection()) lockSelection();
+            }, delay);
+          }
           function postClear() {
             try {
               var bridge = window.ReactNativeWebView || (window.parent && window.parent.ReactNativeWebView);
@@ -1468,25 +1522,34 @@ function ReaderInner({
           }
           function scheduleClear(duration) {
             clearUntil = Date.now() + duration;
+            lockSelection();
             clearSelection();
             setTimeout(clearSelection, 60);
             setTimeout(clearSelection, 180);
             setTimeout(clearSelection, 420);
           }
+          installLockStyle();
+          lockSelection();
           doc.addEventListener('touchstart', function(e) {
             clearTimeout(timer);
+            clearTimeout(lockTimer);
             var touch = e.changedTouches && e.changedTouches[0];
             if (!touch || (e.touches && e.touches.length !== 1)) {
               rejected = true;
               qualified = false;
+              lockSelection();
               return;
             }
+            lockSelection();
             startX = touch.clientX;
             startY = touch.clientY;
             startAt = Date.now();
             qualified = false;
             rejected = false;
-            timer = setTimeout(function() { qualified = !rejected; }, 760);
+            timer = setTimeout(function() {
+              qualified = !rejected;
+              if (qualified) enableSelection();
+            }, 520);
           }, { passive: true, capture: true });
           doc.addEventListener('touchmove', function(e) {
             if (qualified || rejected) return;
@@ -1500,7 +1563,11 @@ function ReaderInner({
           }, { passive: true, capture: true });
           doc.addEventListener('touchend', function() {
             clearTimeout(timer);
-            if (rejected || !qualified || Date.now() - startAt < 760) scheduleClear(900);
+            if (rejected || !qualified || Date.now() - startAt < 520) {
+              scheduleClear(900);
+            } else {
+              scheduleLockIfIdle(900);
+            }
             qualified = false;
             rejected = false;
           }, { passive: true, capture: true });
@@ -1513,6 +1580,10 @@ function ReaderInner({
           doc.addEventListener('selectionchange', function() {
             if (rejected || Date.now() < clearUntil) {
               clearSelection();
+            } else if (hasSelection()) {
+              enableSelection();
+            } else {
+              scheduleLockIfIdle(300);
             }
           }, true);
         }
