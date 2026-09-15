@@ -868,7 +868,9 @@ function ReaderInner({
   const [showFontSizePanel, setShowFontSizePanel] = useState(false);
   const [fontSizePt, setFontSizePt] = useState(FONT_SIZE_DEFAULT);
   const [bodyFontKey, setBodyFontKey] = useState('serif');
-  const defaultReaderMode = bookSource === 'imported' ? 'epub' : READER_DEFAULT_MODE;
+  const defaultReaderMode = Platform.OS === 'android'
+    ? READER_DEFAULT_MODE
+    : (bookSource === 'imported' ? 'epub' : READER_DEFAULT_MODE);
   const [readerMode, setReaderMode] = useState(defaultReaderMode);
   const [standardChapterIndex, setStandardChapterIndex] = useState(0);
   const [standardPageIndex, setStandardPageIndex] = useState(0);
@@ -2423,6 +2425,11 @@ export default function ReaderScreen({ route, navigation }) {
 
   useEffect(() => {
     if (!ctx) return undefined;
+    if (Platform.OS === 'android') {
+      setEpubError('');
+      setEpubUri(null);
+      return undefined;
+    }
     let cancelled = false;
     setEpubError('');
     setEpubUri(null);
