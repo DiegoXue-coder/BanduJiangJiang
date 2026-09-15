@@ -1585,11 +1585,11 @@ export default function ListenScreen({ route, navigation }) {
     setHfText('');
   }
 
-  function handleVoiceModeMicPressIn() {
+  function handleVoiceModeMicResponderGrant() {
     if (MANUAL_HOLD_TO_TALK) {
       if (hfStage === 'listening' || hfStage === 'thinking') return;
       voiceHoldActiveRef.current = true;
-      console.log(`[免提诊断] mic pressIn stage=${hfStage || 'idle'} muted=${handsFreeMuted} phase=${phase}`);
+      console.log(`[免提诊断] mic responderGrant stage=${hfStage || 'idle'} muted=${handsFreeMuted} phase=${phase}`);
       if (hfStage === 'replying') {
         setHandsFreeMuted(false);
         startHandsFreeTurn(true);
@@ -1604,13 +1604,17 @@ export default function ListenScreen({ route, navigation }) {
     setHandsFreeMuted((v) => !v);
   }
 
-  function handleVoiceModeMicPressOut() {
+  function handleVoiceModeMicResponderRelease() {
     if (!MANUAL_HOLD_TO_TALK) return;
     if (!voiceHoldActiveRef.current && hfStage !== 'listening') return;
     voiceHoldActiveRef.current = false;
-    console.log(`[免提诊断] mic pressOut stage=${hfStage || 'idle'} resolve=${!!hfListenResolveRef.current}`);
+    console.log(`[免提诊断] mic responderRelease stage=${hfStage || 'idle'} resolve=${!!hfListenResolveRef.current}`);
     setHandsFreeMuted(true);
     hfListenResolveRef.current?.('manual_release');
+  }
+
+  function handleVoiceModeMicResponderTerminate() {
+    console.log(`[免提诊断] mic responderTerminate stage=${hfStage || 'idle'} resolve=${!!hfListenResolveRef.current}`);
   }
 
   function handleVoiceModeStatusPress() {
@@ -2191,20 +2195,25 @@ export default function ListenScreen({ route, navigation }) {
                         )}
                       </TouchableOpacity>
                       <View style={styles.voiceModeActions}>
-                        <TouchableOpacity
+                        <View
                           style={[
                             styles.voiceModeRoundBtn,
                             !handsFreeMuted && styles.voiceModeMicBtnActive,
                             handsFreeMuted && styles.voiceModeMicBtnMuted,
                           ]}
-                          onPressIn={handleVoiceModeMicPressIn}
-                          onPressOut={handleVoiceModeMicPressOut}
+                          onStartShouldSetResponder={() => true}
+                          onMoveShouldSetResponder={() => true}
+                          onResponderGrant={handleVoiceModeMicResponderGrant}
+                          onResponderRelease={handleVoiceModeMicResponderRelease}
+                          onResponderTerminate={handleVoiceModeMicResponderTerminate}
+                          accessible
+                          accessibilityRole="button"
                           accessibilityLabel={manualAskLabel}
                         >
                           {handsFreeMuted
                             ? <IconMicrophoneOff color={EMBER.paperDim} size={28} strokeWidth={2.2} />
                             : <IconMicrophone color={EMBER.ink} size={30} strokeWidth={2.2} />}
-                        </TouchableOpacity>
+                        </View>
                         <TouchableOpacity
                           style={[styles.voiceModeRoundBtn, styles.voiceModeExitBtn]}
                           onPress={() => setHandsFreeEnabled(false)}
