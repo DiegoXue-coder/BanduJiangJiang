@@ -12,7 +12,21 @@ const TENCENT_API_BASE = 'http://203.195.211.137';
 const TEMPORARY_PROXY_API_BASE = 'https://steps-fioricet-coins-antenna.trycloudflare.com';
 const ANDROID_API_BASE_CANDIDATES = [TENCENT_API_BASE, TEMPORARY_PROXY_API_BASE, RAILWAY_API_BASE];
 const IOS_API_BASE_CANDIDATES = [RAILWAY_API_BASE];
-const API_BASE_CANDIDATES = Platform.OS === 'ios' ? IOS_API_BASE_CANDIDATES : ANDROID_API_BASE_CANDIDATES;
+// 开发者开关（2026-09-20）：人在海外开发时，自动选择会因为"腾讯云能连上但很慢"
+// 一直选到腾讯云（悉尼导入书要160秒）。这里允许手动锁定服务器：
+// auto=按候选顺序探测（默认，国内用户走这个）/ tencent / railway。
+// 锁定后不再探测和回退，连不上就老实报错，避免测的不是自己以为的那台。
+// iOS 只有 Railway 一个入口（ATS 拦明文HTTP），开关对 iOS 不生效。
+const API_MODE_KEY = 'bandu_api_mode';
+const API_MODES = ['auto', 'tencent', 'railway'];
+let apiMode = 'auto';
+
+function getApiBaseCandidates() {
+  if (Platform.OS === 'ios') return IOS_API_BASE_CANDIDATES;
+  if (apiMode === 'tencent') return [TENCENT_API_BASE];
+  if (apiMode === 'railway') return [RAILWAY_API_BASE];
+  return ANDROID_API_BASE_CANDIDATES;
+}
 export const API_BASE = RAILWAY_API_BASE;
 const API_PROBE_TIMEOUT_MS = 6_000;
 const DEFAULT_TIMEOUT_MS = 25_000;
@@ -51,6 +65,10 @@ let cachedToken = null;
 /** App 启动时调一次：把 SecureStore 里存的 token 读进内存缓存，返回它
  * （null 表示没登录过/已登出）。*/
 export async function loadStoredToken() {
+  try {
+    const mode = await SecureStore.getItemAsync(API_MODE_KEY);
+    if (API_MODES.includes(mode)) apiMode = mode;
+  } catch (_e) {}
   cachedToken = await SecureStore.getItemAsync(TOKEN_KEY);
   return cachedToken;
 }
@@ -98,7 +116,7 @@ let selectedApiBase = null;
 let apiBaseSelectionPromise = null;
 
 function getCurrentApiBase() {
-  return selectedApiBase || API_BASE_CANDIDATES[0] || RAILWAY_API_BASE;
+  return selectedApiBase || getApiBaseCandidates()[0] || RAILWAY_API_BASE;
 }
 
 async function probeApiBase(base) {
@@ -118,17 +136,24 @@ async function selectApiBase({ force = false } = {}) {
   if (selectedApiBase && !force) return selectedApiBase;
   if (apiBaseSelectionPromise && !force) return apiBaseSelectionPromise;
 
+  const modeAtStart = apiMode;
   apiBaseSelectionPromise = (async () => {
-    for (const candidate of API_BASE_CANDIDATES) {
+    const candidates = getApiBaseCandidates();
+    if (Platform.OS !== 'ios' && modeAtStart !== 'auto') {
+      selectedApiBase = candidates[0];
+      console.warn('[API入口选择] 开发者手动锁定', { apiBase: selectedApiBase, mode: modeAtStart });
+      return selectedApiBase;
+    }
+    for (const candidate of candidates) {
       if (await probeApiBase(candidate)) {
-        selectedApiBase = candidate;
+        if (apiMode === modeAtStart) selectedApiBase = candidate;
         console.warn('[API入口选择]', { apiBase: candidate });
         return candidate;
       }
     }
-    selectedApiBase = RAILWAY_API_BASE;
-    console.warn('[API入口选择] 候选入口都不可达，回退Railway', { apiBase: selectedApiBase });
-    return selectedApiBase;
+    if (apiMode === modeAtStart) selectedApiBase = RAILWAY_API_BASE;
+    console.warn('[API入口选择] 候选入口都不可达，回退Railway', { apiBase: RAILWAY_API_BASE });
+    return RAILWAY_API_BASE;
   })();
 
   try {
@@ -136,6 +161,37 @@ async function selectApiBase({ force = false } = {}) {
   } finally {
     apiBaseSelectionPromise = null;
   }
+}
+
+/** 开发者开关：读当前模式 / 解析当前实际连的服务器（界面显示用）。*/
+export function getApiMode() {
+  return apiMode;
+}
+export async function resolveApiBase() {
+  return selectApiBase();
+}
+export function describeApiBase(base) {
+  if (base === TENCENT_API_BASE) return '腾讯云（国内）';
+  if (base === RAILWAY_API_BASE) return 'Railway（海外）';
+  return base;
+}
+
+/** 切换服务器。两台服务器的账号、书ID、数据库互相独立（没有同步），所以切换
+ * 必须：清掉本地缓存（书ID会撞车）+ 退出登录（旧token对另一台无效）。切完
+ * 后调用方要提示用户完全关闭重开App，清空内存里上一台的数据。*/
+export async function setApiMode(mode) {
+  if (!API_MODES.includes(mode) || mode === apiMode) return;
+  apiMode = mode;
+  selectedApiBase = null;
+  apiBaseSelectionPromise = null;
+  await SecureStore.setItemAsync(API_MODE_KEY, mode);
+  const dirs = [
+    API_CACHE_DIR,
+    `${FileSystem.documentDirectory}reader_content_cache/`,
+    `${FileSystem.documentDirectory}epub_cache/`,
+  ];
+  await Promise.all(dirs.map((dir) => FileSystem.deleteAsync(dir, { idempotent: true }).catch(() => {})));
+  await logout();
 }
 
 function getErrorDetailText(detail) {
