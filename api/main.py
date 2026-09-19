@@ -168,6 +168,16 @@ async def init_db():
             )
         """)
         await conn.execute("""
+            CREATE TABLE IF NOT EXISTS standard_chapters (
+                id          BIGSERIAL PRIMARY KEY,
+                book_id     BIGINT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+                order_index INTEGER NOT NULL,
+                title       TEXT NOT NULL DEFAULT '',
+                content     JSONB NOT NULL,
+                UNIQUE (book_id, order_index)
+            )
+        """)
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS highlights (
                 id               BIGSERIAL PRIMARY KEY,
                 user_id          BIGINT NOT NULL REFERENCES users(id),
@@ -592,6 +602,7 @@ class BookContextOut(BaseModel):
     title: str
     author: str
     chapters: list[ChapterOut]
+    standard_chapters: list[ChapterOut] = []
     current_cfi_location: str = ""
     source: str = "preset"
 
@@ -2804,10 +2815,98 @@ async def app_login(body: AuthRequest):
         raise HTTPException(status_code=401, detail="用户名或密码错误")
     return AuthResponse(token=_make_jwt(row["id"], username), user_id=row["id"], username=username)
 
+def _markers_to_standard_content(markers: list[str]) -> tuple[list[str], list[dict]]:
+    paragraphs, blocks = [], []
+    for marker in markers:
+        if marker.startswith(_TABLE_MARKER):
+            soup = BeautifulSoup(marker[len(_TABLE_MARKER):], "html.parser")
+            rows = _html_table_to_rows(soup)
+            if rows:
+                blocks.append({"type": "table", "rows": rows})
+        elif marker.startswith(_IMAGE_MARKER):
+            try:
+                ext, data = marker[len(_IMAGE_MARKER):].split(":", 1)
+                media_type = _IMAGE_EXT_MEDIA_TYPE.get(ext, "image/jpeg")
+                blocks.append({"type": "image", "ext": ext, "uri": f"data:{media_type};base64,{data}"})
+            except ValueError:
+                continue
+        elif marker.startswith(_HEADING_MARKER):
+            try:
+                level, text = marker[len(_HEADING_MARKER):].split("\x00", 1)
+            except ValueError:
+                continue
+            if text.strip():
+                paragraphs.append(text)
+                blocks.append({"type": "heading", "level": min(max(int(level), 1), 6), "text": text})
+        elif marker.strip():
+            paragraphs.append(marker)
+            blocks.append({"type": "text", "text": marker})
+    return paragraphs, blocks
+
+
+def _build_standard_reading_chapters(file_path: str) -> list[dict]:
+    """Read spine documents once; TOC labels are not positional chapter content."""
+    book = epub.read_epub(file_path)
+    doc_items = [
+        item for item in (book.get_item_with_id(idref) for idref, _ in book.spine)
+        if item is not None and item.get_type() == ebooklib.ITEM_DOCUMENT
+        and not isinstance(item, epub.EpubNav)
+    ]
+    chapters = []
+    for item in doc_items:
+        soup = BeautifulSoup(_decode_epub_html(item.get_content()), "html.parser")
+        for tag in soup(["script", "style"]):
+            tag.decompose()
+        if _is_toc_like_document(soup):
+            continue
+        heading = soup.find(["h1", "h2", "h3"])
+        title = heading.get_text(" ", strip=True) if heading else ""
+        markers = _epub_doc_to_marker_paragraphs(book, item, soup)
+        paragraphs, blocks = _markers_to_standard_content(markers)
+        body = soup.body or soup
+        full_text = body.get_text(" ", strip=True)
+        extracted_chars = sum(len(p) for p in paragraphs)
+        if full_text and extracted_chars < len(full_text) * 0.6:
+            # Many imported EPUBs use div/span instead of p. Keep their text readable.
+            paragraphs = [full_text]
+            blocks = [{"type": "text", "text": full_text}] + [b for b in blocks if b["type"] in ("image", "table")]
+        if not any(b["type"] == "text" and b["text"].strip() for b in blocks) and not any(
+            b["type"] in ("image", "table") for b in blocks
+        ):
+            continue
+        chapters.append({
+            "title": title or f"第{len(chapters) + 1}章",
+            "paragraphs": paragraphs,
+            "blocks": blocks,
+        })
+    return chapters
+
+
+async def _ensure_standard_reading_chapters(book_id: int, file_path: str) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("SELECT pg_advisory_xact_lock($1)", book_id)
+            if await conn.fetchval("SELECT EXISTS(SELECT 1 FROM standard_chapters WHERE book_id = $1)", book_id):
+                return
+            try:
+                chapters = await asyncio.to_thread(_build_standard_reading_chapters, file_path)
+            except Exception as exc:
+                raise HTTPException(status_code=422, detail="EPUB 正文解析失败，请检查文件是否加密或损坏") from exc
+            if not chapters:
+                raise HTTPException(status_code=422, detail="这本 EPUB 未提取到可阅读正文，请检查文件是否加密或损坏")
+            for index, content in enumerate(chapters):
+                await conn.execute("""
+                    INSERT INTO standard_chapters (book_id, order_index, title, content)
+                    VALUES ($1, $2, $3, $4::jsonb)
+                """, book_id, index, content["title"], json.dumps(content, ensure_ascii=False))
+
+
 async def _insert_book_and_chapters(
     user_id: int, title: str, author: str, file_path: str,
     chapter_titles: list[str], source: str = "preset",
     import_fingerprint: str = "",
+    standard_content: list[dict] | None = None,
 ) -> BookOut:
     """把已经落地成EPUB文件的一本书写入 books + chapters，两个入口共用：
     直接上传EPUB（app_import_book）、PDF/TXT转换后落地EPUB（app_import_file，
@@ -2830,6 +2929,11 @@ async def _insert_book_and_chapters(
                     INSERT INTO chapters (book_id, order_index, title)
                     VALUES ($1, $2, $3)
                 """, book_id, idx, chapter_title)
+            for idx, content in enumerate(standard_content or []):
+                await conn.execute("""
+                    INSERT INTO standard_chapters (book_id, order_index, title, content)
+                    VALUES ($1, $2, $3, $4::jsonb)
+                """, book_id, idx, content["title"], json.dumps(content, ensure_ascii=False))
 
     return BookOut(id=book_id, title=title, author=author, added_at=book_row["added_at"], source=source)
 
@@ -2901,13 +3005,23 @@ async def app_import_book(
                 if (book_epub.get_item_with_id(idref) is not None)
             )
             chapter_titles = [f"第{idx + 1}章" for idx in range(max(1, doc_count))]
+        try:
+            standard_content = await asyncio.to_thread(_build_standard_reading_chapters, file_path)
+        except Exception as exc:
+            os.remove(file_path)
+            raise HTTPException(status_code=422, detail="EPUB 正文解析失败，请检查文件是否加密或损坏") from exc
+        if not standard_content:
+            os.remove(file_path)
+            raise HTTPException(status_code=422, detail="这本 EPUB 未提取到可阅读正文，请检查文件是否加密或损坏")
     else:
         chapter_titles = _extract_chapter_titles(book_epub)
+        standard_content = None
 
     return await _insert_book_and_chapters(
         user_id, title, author, file_path, chapter_titles,
         source=source,
         import_fingerprint=import_fingerprint,
+        standard_content=standard_content,
     )
 
 MAX_IMPORT_FILE_BYTES = 30 * 1024 * 1024  # 30MB，PDF/TXT原型用，比EPUB上限低一档
@@ -3165,16 +3279,27 @@ async def app_get_book_context(book_id: int, user_id: int | None = OptionalUser)
     pool = await get_pool()
     async with pool.acquire() as conn:
         book = await conn.fetchrow("""
-            SELECT id, title, author, source, imported_by FROM books WHERE id = $1
+            SELECT id, title, author, source, imported_by, file_path FROM books WHERE id = $1
         """, book_id)
         if not book:
             raise HTTPException(status_code=404, detail="书本不存在")
         _assert_book_readable(book, user_id)
 
+    # Existing imports predate the stable standard-reading chapters.
+    if book["source"] == "imported":
+        if not os.path.isfile(book["file_path"]):
+            raise HTTPException(status_code=404, detail="书本文件不存在")
+        await _ensure_standard_reading_chapters(book_id, book["file_path"])
+
+    async with pool.acquire() as conn:
         chapters = await conn.fetch("""
             SELECT id, order_index, title FROM chapters
             WHERE book_id = $1 ORDER BY order_index
         """, book_id)
+        standard_chapters = await conn.fetch("""
+            SELECT id, order_index, title FROM standard_chapters
+            WHERE book_id = $1 ORDER BY order_index
+        """, book_id) if book["source"] == "imported" else []
 
         progress = None
         if user_id is not None:
@@ -3186,9 +3311,26 @@ async def app_get_book_context(book_id: int, user_id: int | None = OptionalUser)
     return BookContextOut(
         id=book["id"], title=book["title"], author=book["author"],
         chapters=[ChapterOut(**dict(c)) for c in chapters],
+        standard_chapters=[ChapterOut(**dict(c)) for c in standard_chapters],
         current_cfi_location=progress["current_cfi_location"] if progress else "",
         source=book["source"],
     )
+
+
+@app.get("/app/books/{book_id}/standard-chapters/{chapter_id}/text")
+async def app_get_standard_chapter_text(book_id: int, chapter_id: int, user_id: int | None = OptionalUser):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        book = await conn.fetchrow("SELECT source, imported_by FROM books WHERE id = $1", book_id)
+        if not book:
+            raise HTTPException(status_code=404, detail="书本不存在")
+        _assert_book_readable(book, user_id)
+        row = await conn.fetchrow("""
+            SELECT content FROM standard_chapters WHERE book_id = $1 AND id = $2
+        """, book_id, chapter_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="标准阅读章节不存在")
+    return row["content"]
 
 @app.get("/app/books/{book_id}/chapters/{chapter_id}/text")
 async def app_get_chapter_text(book_id: int, chapter_id: int, include_blocks: bool = False, user_id: int | None = OptionalUser):

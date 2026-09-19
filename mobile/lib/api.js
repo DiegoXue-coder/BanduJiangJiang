@@ -401,7 +401,11 @@ export async function getLibrary() {
 }
 
 export async function getBookContext(bookId) {
-  return appFetch(`/app/books/${bookId}/context`);
+  return appFetch(`/app/books/${bookId}/context`, { timeoutMs: 120_000 });
+}
+
+export async function getStandardChapterText(bookId, chapterId) {
+  return appFetch(`/app/books/${bookId}/standard-chapters/${chapterId}/text`, { timeoutMs: 60_000 });
 }
 
 // 阶段十七：听书功能用，按章节拿逐段正文文字（不是epub文件本身，是后端

@@ -13,7 +13,7 @@ import { Asset } from 'expo-asset';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as SecureStore from 'expo-secure-store';
 import {
-  getBookContext, getBookFileUrl, getHighlights, saveHighlight, updateProgress, isLoggedIn, getChapterText,
+  getBookContext, getBookFileUrl, getHighlights, saveHighlight, updateProgress, isLoggedIn, getChapterText, getStandardChapterText,
 } from '../lib/api';
 import { useTheme, setThemeMode } from '../theme';
 import { FONT_ASSETS, FONTS } from '../fonts';
@@ -109,7 +109,8 @@ const STANDARD_PAGE_MIN_CHARS = 80;
 const STANDARD_PAGE_MAX_CHARS = 430;
 const STANDARD_READING_LINE_HEIGHT = 1.56;
 const STANDARD_PROGRESS_PREFIX = 'standard-progress:';
-const STANDARD_CHAPTER_CACHE_VERSION = 1;
+const STANDARD_CHAPTER_CACHE_VERSION = 2;
+const STANDARD_CHAPTER_MEMORY_CACHE = new Map();
 const EPUB_FILE_CACHE_VERSION = 2;
 const EPUB_BASE64_MEMORY_CACHE = new Map();
 const READER_LOADING_STAGES = [
@@ -160,16 +161,16 @@ function parseReaderBridgeMessage(event) {
   }
 }
 
-function getStandardChapterCachePath(bookId, chapterId) {
-  return `${FileSystem.documentDirectory}reader_content_cache/v${STANDARD_CHAPTER_CACHE_VERSION}/book_${bookId}/chapter_${chapterId}.json`;
+function getStandardChapterCachePath(bookId, chapterId, mode = 'original') {
+  return `${FileSystem.documentDirectory}reader_content_cache/v${STANDARD_CHAPTER_CACHE_VERSION}/book_${bookId}/${mode}_${chapterId}.json`;
 }
 
 function getEpubMemoryCacheKey(bookId, fileInfo) {
   return `${bookId}:${fileInfo?.size || 0}:${fileInfo?.modificationTime || 0}:v${EPUB_FILE_CACHE_VERSION}`;
 }
 
-async function readCachedStandardChapter(bookId, chapterId) {
-  const path = getStandardChapterCachePath(bookId, chapterId);
+async function readCachedStandardChapter(bookId, chapterId, mode = 'original') {
+  const path = getStandardChapterCachePath(bookId, chapterId, mode);
   const info = await FileSystem.getInfoAsync(path);
   if (!info.exists) return null;
   try {
@@ -177,14 +178,15 @@ async function readCachedStandardChapter(bookId, chapterId) {
     const parsed = JSON.parse(raw);
     if (!parsed || parsed.version !== STANDARD_CHAPTER_CACHE_VERSION) return null;
     if (String(parsed.bookId) !== String(bookId) || String(parsed.chapterId) !== String(chapterId)) return null;
-    return parsed.payload || null;
+    const payload = parsed.payload || null;
+    return normalizeStandardBlocks(payload).length ? payload : null;
   } catch (_e) {
     return null;
   }
 }
 
-async function writeCachedStandardChapter(bookId, chapterId, payload) {
-  const path = getStandardChapterCachePath(bookId, chapterId);
+async function writeCachedStandardChapter(bookId, chapterId, payload, mode = 'original') {
+  const path = getStandardChapterCachePath(bookId, chapterId, mode);
   const dir = path.slice(0, path.lastIndexOf('/'));
   await FileSystem.makeDirectoryAsync(dir, { intermediates: true });
   await FileSystem.writeAsStringAsync(path, JSON.stringify({
@@ -197,18 +199,67 @@ async function writeCachedStandardChapter(bookId, chapterId, payload) {
 }
 
 async function getCachedStandardChapterText(bookId, chapterId, options = {}) {
-  const cached = await readCachedStandardChapter(bookId, chapterId);
-  if (cached) return { ...cached, fromCache: true };
-  const data = await getChapterText(bookId, chapterId, options);
+  const mode = options.standard ? 'standard' : 'original';
+  const memoryKey = `${mode}:${bookId}:${chapterId}`;
+  const memory = STANDARD_CHAPTER_MEMORY_CACHE.get(memoryKey);
+  if (memory) return { ...memory, fromCache: true };
+  const cached = await readCachedStandardChapter(bookId, chapterId, mode);
+  if (cached) {
+    STANDARD_CHAPTER_MEMORY_CACHE.set(memoryKey, cached);
+    if (STANDARD_CHAPTER_MEMORY_CACHE.size > 10) {
+      STANDARD_CHAPTER_MEMORY_CACHE.delete(STANDARD_CHAPTER_MEMORY_CACHE.keys().next().value);
+    }
+    return { ...cached, fromCache: true };
+  }
+  const data = options.standard
+    ? await getStandardChapterText(bookId, chapterId)
+    : await getChapterText(bookId, chapterId, options);
   const payload = {
     title: data?.title || '',
     paragraphs: Array.isArray(data?.paragraphs) ? data.paragraphs : [],
     blocks: normalizeStandardBlocks(data),
   };
-  writeCachedStandardChapter(bookId, chapterId, payload).catch((e) => {
-    console.warn('[标准阅读缓存] 写入失败', e.message || e);
-  });
+  if (!payload.blocks.length) throw new Error('章节没有可阅读内容');
+  await writeCachedStandardChapter(bookId, chapterId, payload, mode);
+  STANDARD_CHAPTER_MEMORY_CACHE.set(memoryKey, payload);
+  if (STANDARD_CHAPTER_MEMORY_CACHE.size > 10) {
+    STANDARD_CHAPTER_MEMORY_CACHE.delete(STANDARD_CHAPTER_MEMORY_CACHE.keys().next().value);
+  }
   return { ...payload, fromCache: false };
+}
+
+async function prepareImportedStandardBook(bookId, chapters, onProgress) {
+  if (!chapters?.length) throw new Error('没有找到可阅读章节');
+  const manifestPath = `${FileSystem.documentDirectory}reader_content_cache/v${STANDARD_CHAPTER_CACHE_VERSION}/book_${bookId}/manifest.json`;
+  const chapterIds = chapters.map((chapter) => String(chapter.id));
+  try {
+    const manifest = JSON.parse(await FileSystem.readAsStringAsync(manifestPath));
+    if (JSON.stringify(manifest.chapterIds) === JSON.stringify(chapterIds)) {
+      onProgress(chapters.length, chapters.length);
+      await getCachedStandardChapterText(bookId, chapters[0].id, { standard: true });
+      if (chapters[1]) await getCachedStandardChapterText(bookId, chapters[1].id, { standard: true });
+      return;
+    }
+  } catch (_e) {
+    // First open or an incomplete previous download.
+  }
+  let nextIndex = 0;
+  let completed = 0;
+  onProgress(0, chapters.length);
+  async function worker() {
+    while (nextIndex < chapters.length) {
+      const chapter = chapters[nextIndex++];
+      await getCachedStandardChapterText(bookId, chapter.id, { standard: true });
+      completed += 1;
+      onProgress(completed, chapters.length);
+    }
+  }
+  const results = await Promise.allSettled(Array.from({ length: Math.min(4, chapters.length) }, () => worker()));
+  const failure = results.find((result) => result.status === 'rejected');
+  if (failure) throw failure.reason;
+  await FileSystem.writeAsStringAsync(manifestPath, JSON.stringify({ chapterIds }));
+  await getCachedStandardChapterText(bookId, chapters[0].id, { standard: true });
+  if (chapters[1]) await getCachedStandardChapterText(bookId, chapters[1].id, { standard: true });
 }
 
 function parseStandardProgressLocation(value, chapters = []) {
@@ -766,7 +817,7 @@ function TocNode({ item, depth, pathKey, expandedToc, toggleTocExpanded, onSelec
 
 function ReaderInner({
   bookId, bookTitle, author, initialLocation, initialAnnotations, navigation,
-  jumpToCfi, jumpNonce, epubSrc, epubError, chapters, bookSource,
+  jumpToCfi, jumpNonce, epubSrc, epubError, chapters, standardChapters, bookSource,
 }) {
   const windowSize = useWindowDimensions();
   // 1号任务诊断打点：这里挂载即代表epubUri（Base64字符串）已经通过RN桥
@@ -868,7 +919,9 @@ function ReaderInner({
   const [showFontSizePanel, setShowFontSizePanel] = useState(false);
   const [fontSizePt, setFontSizePt] = useState(FONT_SIZE_DEFAULT);
   const [bodyFontKey, setBodyFontKey] = useState('serif');
-  const defaultReaderMode = Platform.OS === 'android'
+  const readingChapters = Platform.OS === 'android' && bookSource === 'imported' ? standardChapters : chapters;
+  const hasStandardChapters = Array.isArray(readingChapters) && readingChapters.length > 0;
+  const defaultReaderMode = Platform.OS === 'android' && hasStandardChapters
     ? READER_DEFAULT_MODE
     : (bookSource === 'imported' ? 'epub' : READER_DEFAULT_MODE);
   const [readerMode, setReaderMode] = useState(defaultReaderMode);
@@ -962,6 +1015,10 @@ function ReaderInner({
   }, [initialAnnotations]);
 
   useEffect(() => {
+    if (Platform.OS === 'android' && bookSource === 'imported') {
+      setStandardFontBase64('');
+      return undefined;
+    }
     let cancelled = false;
     const currentOpt = BODY_FONT_OPTIONS.find((o) => o.key === bodyFontKey) || BODY_FONT_OPTIONS[0];
     Asset.fromModule(FONT_ASSETS[currentOpt.asset]).downloadAsync()
@@ -977,36 +1034,40 @@ function ReaderInner({
         if (!cancelled) setStandardFontBase64('');
       });
     return () => { cancelled = true; };
-  }, [bodyFontKey]);
+  }, [bodyFontKey, bookSource]);
 
   useEffect(() => {
     if (readerMode !== 'standard') return;
-    const chapter = chapters?.[standardChapterIndex];
+    const chapter = readingChapters?.[standardChapterIndex];
     if (!chapter) {
-      setStandardChapterText({ title: '', paragraphs: [], blocks: [] });
+      setStandardChapterError('没有找到可阅读章节');
       return;
     }
     let cancelled = false;
     setStandardChapterError('');
-    setStandardChapterText(null);
+    const cacheMode = bookSource === 'imported' && Platform.OS === 'android' ? 'standard' : 'original';
+    const memory = STANDARD_CHAPTER_MEMORY_CACHE.get(`${cacheMode}:${bookId}:${chapter.id}`);
+    setStandardChapterText(memory ? { ...memory, title: memory.title || chapter.title || '' } : null);
     setStandardPageIndex(0);
     setCurrentSectionTitle(chapter.title || '');
-    getCachedStandardChapterText(bookId, chapter.id, { includeBlocks: true })
+    getCachedStandardChapterText(bookId, chapter.id, { includeBlocks: true, standard: bookSource === 'imported' && Platform.OS === 'android' })
       .then((data) => {
         if (cancelled) return;
+        const blocks = normalizeStandardBlocks(data);
+        if (!blocks.length) throw new Error('章节没有可阅读内容');
         console.log(`[标准阅读缓存] 章节${chapter.id} ${data?.fromCache ? '命中' : '写入'}缓存`);
         setStandardChapterText({
           title: data?.title || chapter.title || '',
           paragraphs: Array.isArray(data?.paragraphs) ? data.paragraphs : [],
-          blocks: normalizeStandardBlocks(data),
+          blocks,
         });
         if (pendingStandardPageIndex.current !== null) {
           setStandardPageIndex(pendingStandardPageIndex.current);
           pendingStandardPageIndex.current = null;
         }
-        const nextChapter = chapters?.[standardChapterIndex + 1];
+        const nextChapter = readingChapters?.[standardChapterIndex + 1];
         if (nextChapter?.id) {
-          getCachedStandardChapterText(bookId, nextChapter.id, { includeBlocks: true })
+          getCachedStandardChapterText(bookId, nextChapter.id, { includeBlocks: true, standard: bookSource === 'imported' && Platform.OS === 'android' })
             .catch((e) => console.warn('[标准阅读缓存] 下一章预热失败', e.message || e));
         }
       })
@@ -1015,19 +1076,19 @@ function ReaderInner({
         setStandardChapterError(e.message || '章节加载失败');
       });
     return () => { cancelled = true; };
-  }, [readerMode, chapters, standardChapterIndex, bookId]);
+  }, [readerMode, readingChapters, standardChapterIndex, bookId, bookSource]);
 
   useEffect(() => {
     if (readerMode !== 'standard') return;
     if (initialStandardLocationApplied.current) return;
-    if (!chapters || chapters.length === 0) return;
+    if (!readingChapters || readingChapters.length === 0) return;
     initialStandardLocationApplied.current = true;
-    const loc = parseStandardProgressLocation(initialLocation, chapters);
+    const loc = parseStandardProgressLocation(initialLocation, readingChapters);
     if (!loc) return;
     pendingStandardPageIndex.current = loc.pageIndex;
     setStandardChapterIndex(loc.chapterIndex);
-    setCurrentSectionTitle(chapters[loc.chapterIndex]?.title || '');
-  }, [readerMode, initialLocation, chapters]);
+    setCurrentSectionTitle(readingChapters[loc.chapterIndex]?.title || '');
+  }, [readerMode, initialLocation, readingChapters]);
 
   // initialAnnotations 要等 Reader 的 onReady 触发（book 真正渲染完成）才能加，
   // 提前调用 addAnnotation 会静默失效，所以不能放进 mount 时的 effect 里。
@@ -1761,7 +1822,7 @@ function ReaderInner({
   }
 
   function makeStandardCfi(paragraphIndex) {
-    const chapter = chapters?.[standardChapterIndex];
+    const chapter = readingChapters?.[standardChapterIndex];
     return `standard:${chapter?.id || 'unknown'}:${paragraphIndex}`;
   }
 
@@ -1778,7 +1839,7 @@ function ReaderInner({
     [standardChapterText, fontSizePt, windowSize.width, windowSize.height],
   );
   const standardPage = standardPages[Math.min(standardPageIndex, standardPages.length - 1)] || [];
-  const standardChapterId = chapters?.[standardChapterIndex]?.id || '';
+  const standardChapterId = readingChapters?.[standardChapterIndex]?.id || '';
   const standardPageHtml = useMemo(() => buildStandardPageHtml({
     blocks: standardPage,
     fontFamily: bodyFont.family,
@@ -1804,7 +1865,7 @@ function ReaderInner({
     standardChapterId,
   ]);
   const visibleChapterTitle = readerMode === 'standard'
-    ? (standardChapterText?.title || chapters?.[standardChapterIndex]?.title || bookTitle)
+    ? (standardChapterText?.title || readingChapters?.[standardChapterIndex]?.title || bookTitle)
     : (currentSectionTitle || bookTitle);
 
   useEffect(() => {
@@ -1837,7 +1898,7 @@ function ReaderInner({
 
   useEffect(() => {
     if (readerMode !== 'standard' || !readerInteractionReady) return undefined;
-    const chapter = chapters?.[standardChapterIndex];
+    const chapter = readingChapters?.[standardChapterIndex];
     if (!chapter) return undefined;
     if (progressTimer.current) clearTimeout(progressTimer.current);
     if (!isLoggedIn()) return undefined;
@@ -1846,7 +1907,7 @@ function ReaderInner({
       updateProgress(bookId, cfi).catch((e) => console.warn('[标准阅读进度上报失败]', e.message));
     }, PROGRESS_DEBOUNCE_MS);
     return undefined;
-  }, [readerMode, readerInteractionReady, standardChapterIndex, standardPageIndex, chapters, bookId]);
+  }, [readerMode, readerInteractionReady, standardChapterIndex, standardPageIndex, readingChapters, bookId]);
 
   function closeReaderPanels() {
     if (!readerPanelOpen) return false;
@@ -1889,8 +1950,8 @@ function ReaderInner({
       setStandardPageIndex((prev) => Math.min(standardPages.length - 1, prev + 1));
       return;
     }
-    if (standardChapterIndex < (chapters?.length || 0) - 1) {
-      setStandardChapterIndex((prev) => Math.min((chapters?.length || 1) - 1, prev + 1));
+    if (standardChapterIndex < (readingChapters?.length || 0) - 1) {
+      setStandardChapterIndex((prev) => Math.min((readingChapters?.length || 1) - 1, prev + 1));
       setStandardPageIndex(0);
     }
   }
@@ -1986,7 +2047,7 @@ function ReaderInner({
               navigation.navigate('Listen', {
                 bookId, bookTitle, author,
                 initialChapterTitle: readerMode === 'standard'
-                  ? chapters?.[standardChapterIndex]?.title
+                  ? readingChapters?.[standardChapterIndex]?.title
                   : currentSectionTitle,
                 startFraction,
               });
@@ -2127,7 +2188,7 @@ function ReaderInner({
               展开/收起，不是只写死渲染一层subitems。 */}
           {readerMode === 'standard' ? (
             <FlatList
-              data={chapters || []}
+              data={readingChapters || []}
               keyExtractor={(item, idx) => String(item.id || idx)}
               contentContainerStyle={styles.tocListContent}
               renderItem={({ item, index }) => (
@@ -2341,6 +2402,7 @@ export default function ReaderScreen({ route, navigation }) {
   const [epubUri, setEpubUri] = useState(null);
   const [epubError, setEpubError] = useState('');
   const [error, setError] = useState('');
+  const [preparation, setPreparation] = useState(null);
 
   // 安卓真机+模拟器排查过"打开卡死在Opening、RN层无报错"的问题——真根因是
   // @epubjs-react-native/core内嵌进WebView执行的那段标注(annotation)相关JS
@@ -2414,6 +2476,11 @@ export default function ReaderScreen({ route, navigation }) {
         isLoggedIn() ? getHighlights(bookId) : Promise.resolve([]),
       ]);
       console.log(`[打开诊断] context+highlights就绪 累计耗时=${Date.now() - tStart}ms`);
+      if (Platform.OS === 'android' && c.source === 'imported') {
+        await prepareImportedStandardBook(bookId, c.standard_chapters, (done, total) => {
+          setPreparation({ done, total });
+        });
+      }
       setCtx(c);
       setHighlights(h);
     } catch (e) {
@@ -2425,7 +2492,7 @@ export default function ReaderScreen({ route, navigation }) {
 
   useEffect(() => {
     if (!ctx) return undefined;
-    if (Platform.OS === 'android') {
+    if (Platform.OS === 'android' && ctx.source === 'imported') {
       setEpubError('');
       setEpubUri(null);
       return undefined;
@@ -2461,8 +2528,11 @@ export default function ReaderScreen({ route, navigation }) {
       <SafeAreaView style={[styles.safe, { backgroundColor: theme.bg }]}>
         <View style={styles.centerBox}>
           <ReaderLoadingProgress
-            stageIndex={ctx ? 1 : 0}
-            subtitle={ctx ? '正在读取目录结构' : '正在准备书籍文件'}
+            stageIndex={preparation ? 2 : 0}
+            subtitle={preparation
+              ? `正在保存正文 ${preparation.done}/${preparation.total} 章`
+              : '正在准备书籍正文'}
+            percent={preparation ? Math.round(preparation.done / preparation.total * 100) : undefined}
             theme={theme}
           />
         </View>
@@ -2483,14 +2553,15 @@ export default function ReaderScreen({ route, navigation }) {
       epubSrc={epubUri}
       epubError={epubError}
       chapters={ctx.chapters}
+      standardChapters={ctx.standard_chapters}
       bookSource={ctx.source}
     />
   );
 }
 
-function ReaderLoadingProgress({ stageIndex, tick = 0, title = '正在准备阅读体验', subtitle, theme }) {
+function ReaderLoadingProgress({ stageIndex, tick = 0, title = '正在准备阅读体验', subtitle, percent, theme }) {
   const activeIndex = Math.max(0, Math.min(READER_LOADING_STAGES.length - 1, stageIndex));
-  const pct = getReaderLoadingPercent(activeIndex, tick);
+  const pct = Number.isFinite(percent) ? percent : getReaderLoadingPercent(activeIndex, tick);
   const waitingLonger = tick >= 12 && activeIndex >= 2 && activeIndex < READER_LOADING_STAGES.length - 1;
   return (
     <View style={styles.loadingProgressBox}>
