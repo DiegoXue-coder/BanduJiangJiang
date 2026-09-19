@@ -2882,6 +2882,16 @@ def _build_standard_reading_chapters(file_path: str) -> list[dict]:
     return chapters
 
 
+def _jsonb_to_object(value):
+    """asyncpg 默认把 JSONB 列读成 str（本项目连接池没配 JSON 解码器）。直接
+    return 会被 FastAPI 再编码一次，手机端拿到的是一整段字符串而不是对象，
+    读不到 blocks，表现为“章节没有可阅读内容”（2026-09-19 在腾讯云用真实
+    《原则》复现）。这里统一还原成对象；已经是对象就原样返回。"""
+    if isinstance(value, (str, bytes)):
+        return json.loads(value)
+    return value
+
+
 async def _ensure_standard_reading_chapters(book_id: int, file_path: str) -> None:
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -3330,7 +3340,7 @@ async def app_get_standard_chapter_text(book_id: int, chapter_id: int, user_id: 
         """, book_id, chapter_id)
     if not row:
         raise HTTPException(status_code=404, detail="标准阅读章节不存在")
-    return row["content"]
+    return _jsonb_to_object(row["content"])
 
 @app.get("/app/books/{book_id}/chapters/{chapter_id}/text")
 async def app_get_chapter_text(book_id: int, chapter_id: int, include_blocks: bool = False, user_id: int | None = OptionalUser):

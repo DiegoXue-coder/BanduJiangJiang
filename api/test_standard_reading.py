@@ -4,7 +4,20 @@ import unittest
 
 from ebooklib import epub
 
-from api.main import _build_standard_reading_chapters
+from api.main import _build_standard_reading_chapters, _jsonb_to_object
+
+
+class JsonbReturnFormatTests(unittest.TestCase):
+    def test_jsonb_string_becomes_object(self):
+        # asyncpg 默认把 JSONB 读成 str；接口必须还原成对象，否则手机端读不到 blocks
+        raw = '{"title": "第1章", "blocks": [{"type": "text", "text": "正文"}], "paragraphs": ["正文"]}'
+        result = _jsonb_to_object(raw)
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result["blocks"][0]["text"], "正文")
+
+    def test_object_is_returned_unchanged(self):
+        value = {"blocks": [{"type": "text", "text": "正文"}]}
+        self.assertIs(_jsonb_to_object(value), value)
 
 
 class StandardReadingExtractionTests(unittest.TestCase):

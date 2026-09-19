@@ -405,7 +405,13 @@ export async function getBookContext(bookId) {
 }
 
 export async function getStandardChapterText(bookId, chapterId) {
-  return appFetch(`/app/books/${bookId}/standard-chapters/${chapterId}/text`, { timeoutMs: 60_000 });
+  const data = await appFetch(`/app/books/${bookId}/standard-chapters/${chapterId}/text`, { timeoutMs: 60_000 });
+  // 旧版后端把 JSONB 当字符串返回（2026-09-19 腾讯云复现），这里兼容：
+  // 拿到字符串就解析成对象，新版后端返回对象时原样使用。
+  if (typeof data === 'string') {
+    try { return JSON.parse(data); } catch (_e) { return data; }
+  }
+  return data;
 }
 
 // 阶段十七：听书功能用，按章节拿逐段正文文字（不是epub文件本身，是后端
