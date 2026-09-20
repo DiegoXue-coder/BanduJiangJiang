@@ -25,7 +25,7 @@ import {
   IconX,
 } from '@tabler/icons-react-native';
 import {
-  getBookContext, getChapterText, getTtsPlayUrl, transcribeAudio,
+  getBookContext, getChapterText, getStandardChapterText, getTtsPlayUrl, transcribeAudio,
   streamAsk, saveHighlight, saveQaHistory, classifyIntent, submitVoiceLatencyMetric,
 } from '../lib/api';
 import { useAuthGate } from '../lib/authGate';
@@ -491,11 +491,11 @@ export default function ListenScreen({ route, navigation }) {
   // "下一句开始播放就用新设置"，不用整个重启听书。
   const rateRef = useRef(rate);
   const voiceRef = useRef(voice);
-  const chapterJumpingRef = useRef(false);
   useEffect(() => { rateRef.current = rate; }, [rate]);
   useEffect(() => { voiceRef.current = voice; }, [voice]);
 
   const chaptersRef = useRef([]); // 已经过滤掉"目录"章节的列表
+  const standardChaptersRef = useRef(false);
   const paragraphCacheRef = useRef({}); // chapterId -> string[]
   const epochRef = useRef(0); // 每次打断/停止自增，让还没awaitresolve的加载能认出自己过期
   const soundRef = useRef(null);
@@ -676,25 +676,29 @@ export default function ListenScreen({ route, navigation }) {
   }
 
   async function stopSound() {
-    if (soundRef.current) {
-      await soundRef.current.stopAsync().catch(() => {});
-      await soundRef.current.unloadAsync().catch(() => {});
-      soundRef.current = null;
+    const sound = soundRef.current;
+    soundRef.current = null;
+    if (sound) {
+      await sound.stopAsync().catch(() => {});
+      await sound.unloadAsync().catch(() => {});
     }
     // 打断/停止听书时，预取好但还没用上的下一段音频也要一并释放，
     // 不然这份资源没人管，白占着。
-    if (preparedRef.current) {
-      preparedRef.current.promise.then((s) => s.unloadAsync().catch(() => {})).catch(() => {});
-      preparedRef.current = null;
+    const prepared = preparedRef.current;
+    preparedRef.current = null;
+    if (prepared) {
+      prepared.promise.then((s) => s.unloadAsync().catch(() => {})).catch(() => {});
     }
   }
 
   async function playOneParagraph(text, epoch, onAudioStart, presetSoundPromise, progressMeta = null) {
     let sound = null;
     const t0 = Date.now();
+    if (epoch !== epochRef.current) return;
     if (!hfAmbientRecordingRef.current && !hfRecordingRef.current && !recordingRef.current) {
       await restorePlaybackAudioMode().catch(() => {});
     }
+    if (epoch !== epochRef.current) return;
     if (presetSoundPromise) {
       try {
         sound = await presetSoundPromise;
@@ -718,7 +722,7 @@ export default function ListenScreen({ route, navigation }) {
     soundRef.current = sound;
     let audioStarted = false;
     const notifyAudioStart = () => {
-      if (audioStarted) return;
+      if (audioStarted || epoch !== epochRef.current || soundRef.current !== sound) return;
       audioStarted = true;
       onAudioStart?.();
     };
@@ -730,7 +734,8 @@ export default function ListenScreen({ route, navigation }) {
         resolve();
       };
       sound.setOnPlaybackStatusUpdate((s) => {
-        if (s.isLoaded && progressMeta && s.durationMillis > 0 && s.positionMillis >= 0) {
+        if (epoch === epochRef.current && soundRef.current === sound
+            && s.isLoaded && progressMeta && s.durationMillis > 0 && s.positionMillis >= 0) {
           const ratio = Math.max(0, Math.min(1, s.positionMillis / s.durationMillis));
           const baseOffset = progressMeta.baseOffset || 0;
           const playTextLength = progressMeta.playTextLength || progressMeta.sourceLength || 0;
@@ -752,6 +757,14 @@ export default function ListenScreen({ route, navigation }) {
     });
   }
 
+  async function loadNarrationParagraphs(chapter) {
+    const data = standardChaptersRef.current
+      ? await getStandardChapterText(bookId, chapter.id)
+      : await getChapterText(bookId, chapter.id);
+    const paragraphs = Array.isArray(data?.paragraphs) ? data.paragraphs : [];
+    return mergeParagraphsForNarration(paragraphs);
+  }
+
   // 从指定位置开始顺序朗读，直到打断（epoch变化）或全书听完。
   // 录音/问答打断后会按当前音频播放比例估一个段内字位，恢复时从该字位
   // 前面少量回退继续读，避免每次都从合并段落开头重读。
@@ -767,8 +780,7 @@ export default function ListenScreen({ route, navigation }) {
         setPhase('loading-chapter');
         setChapterTitle(chapter.title);
         try {
-          const data = await getChapterText(bookId, chapter.id);
-          paragraphs = mergeParagraphsForNarration(data.paragraphs || []);
+          paragraphs = await loadNarrationParagraphs(chapter);
           // 临时诊断：真机反馈"只听到'前言'两个字，后面都没有了"，加日志
           // 确认到底是"这一章后端就只返回了一段"，还是"返回了多段但播放
           // 循环提前退出"，不能靠猜。排查完就删。
@@ -819,7 +831,7 @@ export default function ListenScreen({ route, navigation }) {
         const shouldResumeWithinParagraph = resumeProgress.chapterIdx === ci
           && resumeProgress.paragraphIdx === pi
           && resumeProgress.charOffset > RESUME_CHAR_BACKTRACK
-          && resumeProgress.charOffset < paragraphs[pi].length - RESUME_CHAR_BACKTRACK;
+          && resumeProgress.charOffset <= paragraphs[pi].length;
         const resumeSlice = shouldResumeWithinParagraph
           ? getResumeSlice(paragraphs[pi], resumeProgress.charOffset)
           : { text: paragraphs[pi], startOffset: 0 };
@@ -874,17 +886,22 @@ export default function ListenScreen({ route, navigation }) {
             playTextLength: textToPlay.length,
           });
           console.log(`[听书诊断] 播放完成 章节="${chapter.title}" 第${pi + 1}/${paragraphs.length}段`);
-          paragraphProgressRef.current = { chapterIdx: ci, paragraphIdx: pi, charOffset: 0 };
         } catch (e) {
           console.log(`[听书诊断] 播放出错，跳过这段：${e.message}`);
         }
-        if (soundRef.current) {
-          soundRef.current.unloadAsync().catch(() => {});
+        if (epoch !== epochRef.current) return;
+        const finishedSound = soundRef.current;
+        if (finishedSound) {
           soundRef.current = null;
+          finishedSound.setOnPlaybackStatusUpdate(null);
+          finishedSound.unloadAsync().catch(() => {});
         }
-        if (epoch !== epochRef.current) {
-          console.log(`[听书诊断] 播完这段后epoch已过期，循环退出`);
-          return;
+        if (pi + 1 < paragraphs.length) {
+          posRef.current = { chapterIdx: ci, paragraphIdx: pi + 1 };
+          paragraphProgressRef.current = { chapterIdx: ci, paragraphIdx: pi + 1, charOffset: 0 };
+        } else if (ci + 1 < chapters.length) {
+          posRef.current = { chapterIdx: ci + 1, paragraphIdx: 0 };
+          paragraphProgressRef.current = { chapterIdx: ci + 1, paragraphIdx: 0, charOffset: 0 };
         }
         pi += 1;
       }
@@ -948,7 +965,9 @@ export default function ListenScreen({ route, navigation }) {
     restorePlaybackAudioMode().catch(() => {});
     getBookContext(bookId).then((ctx) => {
       if (cancelled) return;
-      const filtered = (ctx.chapters || []).filter((c) => !isTocChapter(c.title));
+      standardChaptersRef.current = ctx.source === 'imported' && (ctx.standard_chapters || []).length > 0;
+      const sourceChapters = standardChaptersRef.current ? ctx.standard_chapters : ctx.chapters;
+      const filtered = (sourceChapters || []).filter((c) => !isTocChapter(c.title));
       chaptersRef.current = filtered;
       if (filtered.length === 0) {
         setErrorMsg('这本书没有可朗读的章节');
@@ -970,17 +989,17 @@ export default function ListenScreen({ route, navigation }) {
       const startFractionValue = typeof startFraction === 'number' && startFraction > 0 ? startFraction : 0;
       if (startFractionValue > 0) {
         const targetChapter = filtered[targetChapterIdx];
-        getChapterText(bookId, targetChapter.id).then((data) => {
-          if (cancelled) return;
-          const paragraphs = mergeParagraphsForNarration(data.paragraphs || []);
+        const initialEpoch = epochRef.current;
+        loadNarrationParagraphs(targetChapter).then((paragraphs) => {
+          if (cancelled || initialEpoch !== epochRef.current) return;
           paragraphCacheRef.current[targetChapter.id] = paragraphs;
           const startParagraphIdx = paragraphs.length > 0
             ? Math.max(0, Math.min(paragraphs.length - 1, Math.floor(startFractionValue * paragraphs.length)))
             : 0;
-          playFrom(targetChapterIdx, startParagraphIdx, epochRef.current);
+          playFrom(targetChapterIdx, startParagraphIdx, initialEpoch);
         }).catch(() => {
-          if (cancelled) return;
-          playFrom(targetChapterIdx, 0, epochRef.current); // 算起点失败就退化成从头，不阻塞播放
+          if (cancelled || initialEpoch !== epochRef.current) return;
+          playFrom(targetChapterIdx, 0, initialEpoch); // 算起点失败就退化成从头，不阻塞播放
         });
       } else {
         playFrom(targetChapterIdx, 0, epochRef.current);
@@ -1059,11 +1078,12 @@ export default function ListenScreen({ route, navigation }) {
     const total = currentSegCount.total || 1;
     const targetPi = Math.min(Math.max(Math.round(fraction * (total - 1)), 0), total - 1);
     const { chapterIdx } = posRef.current;
-    epochRef.current += 1;
+    const epoch = ++epochRef.current;
+    posRef.current = { chapterIdx, paragraphIdx: targetPi };
     paragraphProgressRef.current = { chapterIdx, paragraphIdx: targetPi, charOffset: 0 };
     (async () => {
       await stopSound();
-      playFrom(chapterIdx, targetPi, epochRef.current);
+      if (epoch === epochRef.current) playFrom(chapterIdx, targetPi, epoch);
     })();
   }
 
@@ -1071,15 +1091,15 @@ export default function ListenScreen({ route, navigation }) {
   // 一致（chaptersRef是扁平的宏观章节列表，idx就是数组下标）。
   function handleJumpToChapter(idx) {
     if (idx < 0 || idx >= chaptersRef.current.length) return;
-    if (chapterJumpingRef.current) return;
-    chapterJumpingRef.current = true;
-    epochRef.current += 1;
+    const epoch = ++epochRef.current;
+    posRef.current = { chapterIdx: idx, paragraphIdx: 0 };
     paragraphProgressRef.current = { chapterIdx: idx, paragraphIdx: 0, charOffset: 0 };
+    setChapterTitle(chaptersRef.current[idx].title);
+    setPhase('loading-chapter');
+    setShowChapterPicker(false);
     (async () => {
       await stopSound();
-      setShowChapterPicker(false);
-      playFrom(idx, 0, epochRef.current);
-      setTimeout(() => { chapterJumpingRef.current = false; }, 900);
+      if (epoch === epochRef.current) playFrom(idx, 0, epoch);
     })();
   }
 
