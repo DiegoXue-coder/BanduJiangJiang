@@ -20,6 +20,7 @@ import { FONT_ASSETS, FONTS } from '../fonts';
 import { useAuthGate } from '../lib/authGate';
 import BookChatScreen from './BookChatScreen';
 import ReaderChrome, { READER_INFO_STRIP_HEIGHT } from '../components/ReaderChrome';
+import StandardPager from '../components/StandardPager';
 
 // 阶段十一：epub正文（书本原文内容）换成思源宋体——这部分渲染在
 // react-native-webview内部，不是普通RN Text，普通expo-font的useFonts()
@@ -1006,7 +1007,13 @@ function ReaderInner({
   const [readerLoadingTick, setReaderLoadingTick] = useState(0);
   const progressTimer = useRef(null);
   const standardSelectionTimerRef = useRef(null);
+  // 现在指向翻页容器（StandardPager）；它对外提供 injectJavaScript，只作用于"当前页"
   const standardWebViewRef = useRef(null);
+  const standardPagerRef = standardWebViewRef;
+  // 往前翻进上一章时，要直接落在上一章的最后一页（不是第一页）
+  const landingPageRef = useRef(null);
+  // 相邻章节预读完成后 +1，触发重新渲染，让翻页容器拿到上一页/下一页
+  const [, setPrefetchTick] = useState(0);
   const annotationsRestored = useRef(false);
   const skippedInitialNav = useRef(false);
   const initialStandardLocationApplied = useRef(false);
@@ -1143,7 +1150,8 @@ function ReaderInner({
     const cacheMode = bookSource === 'imported' && Platform.OS === 'android' ? 'standard' : 'original';
     const memory = STANDARD_CHAPTER_MEMORY_CACHE.get(`${cacheMode}:${bookId}:${chapter.id}`);
     setStandardChapterText(memory ? { ...memory, title: memory.title || chapter.title || '', chapterId: chapter.id } : null);
-    setStandardPageIndex(0);
+    setStandardPageIndex(landingPageRef.current ?? 0);
+    landingPageRef.current = null;
     setCurrentSectionTitle(chapter.title || '');
     getCachedStandardChapterText(bookId, chapter.id, { includeBlocks: true, standard: bookSource === 'imported' && Platform.OS === 'android' })
       .then((data) => {
@@ -1931,15 +1939,46 @@ function ReaderInner({
   const paginationReserved = immersive
     ? insets.top + READER_INFO_STRIP_HEIGHT + insets.bottom + 20 + 40
     : 142;
-  const standardPages = useMemo(
-    () => paginateStandardBlocks(
-      standardChapterText?.blocks || normalizeStandardBlocks(standardChapterText),
+  // 章节正文的取法：当前章优先用 state（加载完写进去的），state 还是上一章的旧数据时
+  // （翻过章节的那一帧）直接从内存缓存里拿——相邻章节早已预读，这样翻章时分页是同步算出来的，
+  // 不会出现"页码已经变了、正文还是旧章"的一帧。上一章/下一章只从内存缓存取，取不到就是 null，
+  // 翻页容器那一侧暂时没有页面（预读一完成会自动补上）。
+  const standardCacheMode = bookSource === 'imported' && Platform.OS === 'android' ? 'standard' : 'original';
+  const getMemoryChapterPayload = (chapterIndex) => {
+    const chapter = readingChapters?.[chapterIndex];
+    if (!chapter) return null;
+    return STANDARD_CHAPTER_MEMORY_CACHE.get(`${standardCacheMode}:${bookId}:${chapter.id}`) || null;
+  };
+  const currentChapterIdForPages = readingChapters?.[standardChapterIndex]?.id;
+  const currentChapterPayload = (standardChapterText && standardChapterText.chapterId === currentChapterIdForPages)
+    ? standardChapterText
+    : getMemoryChapterPayload(standardChapterIndex);
+  const prevChapterPayload = getMemoryChapterPayload(standardChapterIndex - 1);
+  const nextChapterPayload = getMemoryChapterPayload(standardChapterIndex + 1);
+  const paginatePayload = (payload) => (payload
+    ? paginateStandardBlocks(
+      payload.blocks || normalizeStandardBlocks(payload),
       fontSizePt,
       windowSize.width,
       windowSize.height,
       paginationReserved,
-    ),
-    [standardChapterText, fontSizePt, windowSize.width, windowSize.height, paginationReserved],
+    )
+    : null);
+  const standardPages = useMemo(
+    () => paginatePayload(currentChapterPayload) || [],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [currentChapterPayload, fontSizePt, windowSize.width, windowSize.height, paginationReserved],
+  );
+  // 只在"每一页内容 = 前一章末页 / 后一章首页"需要时才用到：不参与当前章的任何逻辑
+  const prevChapterPages = useMemo(
+    () => paginatePayload(prevChapterPayload),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [prevChapterPayload, fontSizePt, windowSize.width, windowSize.height, paginationReserved],
+  );
+  const nextChapterPages = useMemo(
+    () => paginatePayload(nextChapterPayload),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [nextChapterPayload, fontSizePt, windowSize.width, windowSize.height, paginationReserved],
   );
   const standardPage = standardPages[Math.min(standardPageIndex, standardPages.length - 1)] || [];
   // 整本书的阅读进度：(已读章数 + 本章内进度)/总章数，末章末页=100%。后端只有章节粒度，
@@ -1979,23 +2018,30 @@ function ReaderInner({
   // 先显示加载页（首次一般不到 1 秒，之后有进程内缓存），避免先闪一下系统字体。
   const standardFontUrl = standardFontMode === 'file' ? (standardFontUris[bodyFontKey] || '') : '';
   const standardFontPending = Platform.OS === 'android' && standardFontMode === 'file' && !standardFontUrl;
-  const standardPageHtml = useMemo(() => buildStandardPageHtml({
-    blocks: standardPage,
-    fontFamily: bodyFont.family,
-    fontCssFamily: bodyFont.cssFamily,
-    fontBase64: standardFontMode === 'inline' ? standardFontBase64 : '',
-    fontUrl: standardFontUrl,
-    fontWeight: bodyFont.profile.weight || 400,
-    fontSize: standardFontSize,
-    lineHeight: standardLineHeight,
-    theme: THEMES[themeName].body,
-    accent: uiTheme.accent,
-    highlights: standardSavedHighlights,
-    chapterId: standardChapterId,
-    androidSelectionGuard: Platform.OS === 'android',
-    screenTopOffset: immersive ? insets.top : 0,
+  // 每一页的 HTML 只在"这一页的内容/样式"变了才重新生成（相邻页不会每次渲染都重算）。
+  // key 里带上字体/主题/字体来源：这些一变就整批换新 WebView；字号、划线变化只让同一个
+  // WebView 原地换内容（旧内容会留到新内容画好，比先白屏好）。
+  const standardStyleSig = `${bodyFontKey}-${themeName}-${standardFontUrl ? 'file' : (standardFontBase64 ? 'font' : 'fallback')}`;
+  const makeStandardPage = useMemo(() => (blocks, chapterId, pageIndex) => ({
+    key: `${chapterId}:${pageIndex}:${standardStyleSig}`,
+    html: buildStandardPageHtml({
+      blocks,
+      fontFamily: bodyFont.family,
+      fontCssFamily: bodyFont.cssFamily,
+      fontBase64: standardFontMode === 'inline' ? standardFontBase64 : '',
+      fontUrl: standardFontUrl,
+      fontWeight: bodyFont.profile.weight || 400,
+      fontSize: standardFontSize,
+      lineHeight: standardLineHeight,
+      theme: THEMES[themeName].body,
+      accent: uiTheme.accent,
+      highlights: standardSavedHighlights,
+      chapterId,
+      androidSelectionGuard: Platform.OS === 'android',
+      screenTopOffset: immersive ? insets.top : 0,
+    }),
   }), [
-    standardPage,
+    standardStyleSig,
     bodyFont,
     standardFontBase64,
     standardFontMode,
@@ -2005,10 +2051,61 @@ function ReaderInner({
     themeName,
     uiTheme.accent,
     standardSavedHighlights,
-    standardChapterId,
     immersive,
     insets.top,
   ]);
+  const prevChapterId = readingChapters?.[standardChapterIndex - 1]?.id || '';
+  const nextChapterId = readingChapters?.[standardChapterIndex + 1]?.id || '';
+  const safePageIndex = Math.min(standardPageIndex, Math.max(0, standardPages.length - 1));
+  // 三页各自的"源数据"：下面 useMemo 的依赖用它们（数组引用稳定），而不是每次新建的对象
+  const curPageBlocks = standardPages[safePageIndex] || null;
+  const prevPageBlocks = safePageIndex > 0
+    ? standardPages[safePageIndex - 1]
+    : (prevChapterPages && prevChapterPages.length ? prevChapterPages[prevChapterPages.length - 1] : null);
+  const prevPageRefIndex = safePageIndex > 0 ? safePageIndex - 1 : (prevChapterPages ? prevChapterPages.length - 1 : 0);
+  const nextPageBlocks = safePageIndex < standardPages.length - 1
+    ? standardPages[safePageIndex + 1]
+    : (nextChapterPages && nextChapterPages.length ? nextChapterPages[0] : null);
+  const nextPageRefIndex = safePageIndex < standardPages.length - 1 ? safePageIndex + 1 : 0;
+  const curPage = useMemo(
+    () => (curPageBlocks ? makeStandardPage(curPageBlocks, standardChapterId, safePageIndex) : null),
+    [curPageBlocks, makeStandardPage, standardChapterId, safePageIndex],
+  );
+  const prevPage = useMemo(
+    () => (prevPageBlocks ? makeStandardPage(prevPageBlocks, safePageIndex > 0 ? standardChapterId : prevChapterId, prevPageRefIndex) : null),
+    [prevPageBlocks, makeStandardPage, standardChapterId, prevChapterId, safePageIndex, prevPageRefIndex],
+  );
+  const nextPage = useMemo(
+    () => (nextPageBlocks ? makeStandardPage(nextPageBlocks, safePageIndex < standardPages.length - 1 ? standardChapterId : nextChapterId, nextPageRefIndex) : null),
+    [nextPageBlocks, makeStandardPage, standardChapterId, nextChapterId, safePageIndex, standardPages.length, nextPageRefIndex],
+  );
+  const pagerPages = useMemo(
+    () => ({ prev: prevPage, cur: curPage, next: nextPage }),
+    [prevPage, curPage, nextPage],
+  );
+
+  // 预读：当前章排好之后，往后读 3 章、往前读 1 章，放进内存缓存。往后多读几章是因为
+  // 有的章只有一页，连翻几下就会用到后面的章。预读一章完成就 tick 一下，让翻页容器补上页面。
+  useEffect(() => {
+    if (readerMode !== 'standard' || !readingChapters?.length) return undefined;
+    if (!standardChapterText || standardChapterText.chapterId !== readingChapters[standardChapterIndex]?.id) return undefined;
+    let cancelled = false;
+    (async () => {
+      const offsets = [1, -1, 2, 3];
+      for (const offset of offsets) {
+        const chapter = readingChapters[standardChapterIndex + offset];
+        if (!chapter) continue;
+        try {
+          await getCachedStandardChapterText(bookId, chapter.id, { includeBlocks: true, standard: standardCacheMode === 'standard' });
+          if (cancelled) return;
+          setPrefetchTick((t) => t + 1);
+        } catch (e) {
+          console.warn('[标准阅读缓存] 相邻章节预读失败', e?.message || e);
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [readerMode, readingChapters, standardChapterIndex, standardChapterText, bookId, standardCacheMode]);
   const visibleChapterTitle = readerMode === 'standard'
     ? (standardChapterText?.title || readingChapters?.[standardChapterIndex]?.title || bookTitle)
     : (currentSectionTitle || bookTitle);
@@ -2077,31 +2174,53 @@ function ReaderInner({
     `);
   }
 
+  // 翻页：先让翻页容器做滑动动画，动画结束才真正改页码/章节（commit）。
+  // 容器那一侧还没有页面（相邻章节没读进来）时，退回原来的"直接跳转"，功能不打折。
   function goStandardPrev() {
     if (!readerInteractionReady) return;
+    if (standardPagerRef.current?.isBusy()) return;
     if (closeReaderPanels()) return;
     clearStandardSelection();
     if (standardPageIndex > 0) {
-      setStandardPageIndex((prev) => Math.max(0, prev - 1));
+      const commit = () => setStandardPageIndex((prev) => Math.max(0, prev - 1));
+      if (!standardPagerRef.current?.turn(-1, commit)) commit();
       return;
     }
     if (standardChapterIndex > 0) {
-      setStandardChapterIndex((prev) => Math.max(0, prev - 1));
-      setStandardPageIndex(0);
+      // 往前翻进上一章：落在上一章的最后一页
+      const landing = prevChapterPages && prevChapterPages.length ? prevChapterPages.length - 1 : null;
+      const commit = () => {
+        if (landing !== null) {
+          landingPageRef.current = landing;
+          setStandardChapterIndex((prev) => Math.max(0, prev - 1));
+          setStandardPageIndex(landing);
+        } else {
+          // 上一章还没读进来，页数未知：交给"跳章后落到目标页"的老机制，落在末页
+          pendingSeekRef.current = { chapterIndex: standardChapterIndex - 1, frac: 1 };
+          setStandardChapterIndex((prev) => Math.max(0, prev - 1));
+          setStandardPageIndex(0);
+        }
+      };
+      if (!standardPagerRef.current?.turn(-1, commit)) commit();
     }
   }
 
   function goStandardNext() {
     if (!readerInteractionReady) return;
+    if (standardPagerRef.current?.isBusy()) return;
     if (closeReaderPanels()) return;
     clearStandardSelection();
     if (standardPageIndex < standardPages.length - 1) {
-      setStandardPageIndex((prev) => Math.min(standardPages.length - 1, prev + 1));
+      const commit = () => setStandardPageIndex((prev) => Math.min(standardPages.length - 1, prev + 1));
+      if (!standardPagerRef.current?.turn(1, commit)) commit();
       return;
     }
     if (standardChapterIndex < (readingChapters?.length || 0) - 1) {
-      setStandardChapterIndex((prev) => Math.min((readingChapters?.length || 1) - 1, prev + 1));
-      setStandardPageIndex(0);
+      const commit = () => {
+        setStandardChapterIndex((prev) => Math.min((readingChapters?.length || 1) - 1, prev + 1));
+        setStandardPageIndex(0);
+      };
+      if (!standardPagerRef.current?.turn(1, commit)) commit();
     }
   }
 
@@ -2437,23 +2556,16 @@ function ReaderInner({
               </View>
             ) : (
               <>
-                <WebView
+                <StandardPager
                   ref={standardWebViewRef}
-                  key={`${standardChapterIndex}-${standardPageIndex}-${bodyFontKey}-${themeName}-${standardFontUrl ? 'file' : (standardFontBase64 ? 'font' : 'fallback')}`}
-                  originWhitelist={['*']}
+                  pages={pagerPages}
                   // 字体走本地文件时：baseUrl 指到字体所在的缓存目录 + allowFileAccess，
                   // 这是实测能加载 file:// 字体的最小权限组合。mixedContentMode 放开是因为
                   // 页面源换成 file:// 后，书里的 http 图片不能被误拦。
-                  source={standardFontUrl ? { html: standardPageHtml, baseUrl: FileSystem.cacheDirectory } : { html: standardPageHtml }}
+                  baseUrl={standardFontUrl ? FileSystem.cacheDirectory : null}
                   allowFileAccess={!!standardFontUrl}
-                  mixedContentMode={standardFontUrl ? 'always' : undefined}
-                  style={styles.standardReaderPage}
-                  containerStyle={styles.standardReaderPage}
+                  background={THEMES[themeName].body.background}
                   onMessage={handleStandardWebViewMessage}
-                  showsVerticalScrollIndicator={false}
-                  showsHorizontalScrollIndicator={false}
-                  scrollEnabled={false}
-                  bounces={false}
                 />
               </>
             )}
