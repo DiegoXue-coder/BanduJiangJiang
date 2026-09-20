@@ -2094,7 +2094,8 @@ function ReaderInner({
   // 预读：当前章排好之后，往后读 3 章、往前读 1 章，放进内存缓存。往后多读几章是因为
   // 有的章只有一页，连翻几下就会用到后面的章。预读一章完成就 tick 一下，让翻页容器补上页面。
   useEffect(() => {
-    if (readerMode !== 'standard' || !readingChapters?.length) return undefined;
+    // 只有安卓的翻页容器需要预读相邻章节；iOS 保持原来只预热下一章的行为
+    if (Platform.OS !== 'android' || readerMode !== 'standard' || !readingChapters?.length) return undefined;
     if (!standardChapterText || standardChapterText.chapterId !== readingChapters[standardChapterIndex]?.id) return undefined;
     let cancelled = false;
     (async () => {
@@ -2577,17 +2578,34 @@ function ReaderInner({
               </View>
             ) : (
               <>
-                <StandardPager
-                  ref={standardWebViewRef}
-                  pages={pagerPages}
-                  // 字体走本地文件时：baseUrl 指到字体所在的缓存目录 + allowFileAccess，
-                  // 这是实测能加载 file:// 字体的最小权限组合。mixedContentMode 放开是因为
-                  // 页面源换成 file:// 后，书里的 http 图片不能被误拦。
-                  baseUrl={standardFontUrl ? FileSystem.cacheDirectory : null}
-                  allowFileAccess={!!standardFontUrl}
-                  background={THEMES[themeName].body.background}
-                  onMessage={handleStandardWebViewMessage}
-                />
+                {Platform.OS === 'android' ? (
+                  <StandardPager
+                    ref={standardWebViewRef}
+                    pages={pagerPages}
+                    // 字体走本地文件时：baseUrl 指到字体所在的缓存目录 + allowFileAccess，
+                    // 这是实测能加载 file:// 字体的最小权限组合。mixedContentMode 放开是因为
+                    // 页面源换成 file:// 后，书里的 http 图片不能被误拦。
+                    baseUrl={standardFontUrl ? FileSystem.cacheDirectory : null}
+                    allowFileAccess={!!standardFontUrl}
+                    background={THEMES[themeName].body.background}
+                    onMessage={handleStandardWebViewMessage}
+                  />
+                ) : (
+                  // iOS 暂不启用翻页容器（还没在 iOS 上验证过滑动翻页），保持原来的"每页一个 WebView"
+                  <WebView
+                    ref={standardWebViewRef}
+                    key={`${standardChapterIndex}-${standardPageIndex}-${bodyFontKey}-${themeName}-${standardFontUrl ? 'file' : (standardFontBase64 ? 'font' : 'fallback')}`}
+                    originWhitelist={['*']}
+                    source={{ html: curPage ? curPage.html : '' }}
+                    style={styles.standardReaderPage}
+                    containerStyle={styles.standardReaderPage}
+                    onMessage={handleStandardWebViewMessage}
+                    showsVerticalScrollIndicator={false}
+                    showsHorizontalScrollIndicator={false}
+                    scrollEnabled={false}
+                    bounces={false}
+                  />
+                )}
               </>
             )}
           </View>
