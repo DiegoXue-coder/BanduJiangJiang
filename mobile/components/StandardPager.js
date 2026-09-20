@@ -16,6 +16,13 @@
 //   往后翻：当前页向左滑走，露出压在下面的下一页；
 //   往前翻：上一页从左边滑进来，盖住当前页。（此时上一页临时提到最上层）
 // 这是"覆盖式"翻页（iOS 图书 / 微信读书的一种常见样式），不是"整体平移式"。
+//
+// 【为什么常驻 2 个而不是 3 个】三个整屏 WebView 同时叠在屏幕里，模拟器（2.5GB 内存）上改字号
+// 让它们同时重载后，Chromium 报 "tile memory limits exceeded, some content may not draw"，
+// 整页空白。所以：静止时只常驻"当前页 + 下一页"（往后翻是最常见的动作，做到最丝滑）；
+// 往前翻时才临时把"上一页"挂到当前页下面、等它画好、再滑进来，同时把"下一页"卸掉——
+// 任何时刻整屏 WebView 不超过 2 个。往前翻因此会有一小段"等上一页画好"的时间
+// （和改造前的翻页耗时相当），换来内存安全；往后翻则是即点即滑。
 import React, {
   forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState,
 } from 'react';
@@ -27,7 +34,9 @@ import { WebView } from 'react-native-webview';
 const TURN_MS = 260;
 const TURN_EASING = Easing.bezier(0.22, 1, 0.36, 1);
 // 目标页还没加载完时，最多等多久再开始动画（防止滑出来一张空白页）
-const LOAD_WAIT_MAX_MS = 500;
+const LOAD_WAIT_MAX_MS = 700;
+// 上一页加载完之后再等这么久才开始滑，给 Chromium 一点时间把画面真正绘出来
+const PREV_RASTER_MS = 120;
 
 const PagerPage = React.memo(function PagerPage({
   page, width, translateX, zIndex, isCurrent, isCurrentRef, onMessageRef, webRef, onLoaded,
@@ -80,6 +89,8 @@ const StandardPager = forwardRef(function StandardPager({
   // 只有动画期间才把最上面那页绑到动画值上；动画结束的那一刻，这个 state 和页码在同一次
   // 渲染里一起更新，所以"角色互换"和"回到静止样式"是原子的，不会闪。
   const [turning, setTurning] = useState(null);
+  // 往前翻的准备阶段：上一页已挂在当前页下面正在加载/绘制，画好之前不开始动画
+  const [prepPrev, setPrepPrev] = useState(false);
   const progress = useRef(new Animated.Value(0)).current; // 0 → 1
   const busyRef = useRef(false);
   const webRef = useRef(null);
@@ -125,9 +136,11 @@ const StandardPager = forwardRef(function StandardPager({
       if (commit) {
         // 同一次批处理里：回到静止样式 + 外面把页码改掉
         setTurning(null);
+        setPrepPrev(false);
         onCommit && onCommit();
       } else {
         setTurning(null);
+        setPrepPrev(false);
       }
       busyRef.current = false;
     };
@@ -164,6 +177,7 @@ const StandardPager = forwardRef(function StandardPager({
         if (started) return;
         started = true;
         if (!pagesRef.current.cur || pagesRef.current.cur.key !== startKey) {
+          setPrepPrev(false);
           busyRef.current = false;
           return;
         }
@@ -171,15 +185,26 @@ const StandardPager = forwardRef(function StandardPager({
         pendingRef.current = { startKey, onCommit };
         setTurning({ dir });
       };
-      if (loadedRef.current.has(target.key)) {
-        run();
+      const waitLoaded = (afterMs) => {
+        if (loadedRef.current.has(target.key)) {
+          setTimeout(run, afterMs);
+        } else {
+          // 目标页还没加载完：等它加载完再滑（最多等 LOAD_WAIT_MAX_MS），
+          // 不然会滑出来一张空白页，比直接慢半拍还难受
+          const waiters = loadWaitersRef.current.get(target.key) || [];
+          waiters.push(() => setTimeout(run, afterMs));
+          loadWaitersRef.current.set(target.key, waiters);
+          setTimeout(run, LOAD_WAIT_MAX_MS + afterMs);
+        }
+      };
+      if (dir > 0) {
+        // 下一页一直常驻，通常已画好，直接滑
+        if (loadedRef.current.has(target.key)) run(); else waitLoaded(0);
       } else {
-        // 目标页还没加载完：等它加载完再滑（最多等 LOAD_WAIT_MAX_MS），
-        // 不然会滑出来一张空白页，比直接慢半拍还难受
-        const waiters = loadWaitersRef.current.get(target.key) || [];
-        waiters.push(run);
-        loadWaitersRef.current.set(target.key, waiters);
-        setTimeout(run, LOAD_WAIT_MAX_MS);
+        // 上一页没有常驻：先挂上（压在当前页下面），等它加载完 + 留一小段时间让它绘制，再滑
+        loadedRef.current.delete(target.key);
+        setPrepPrev(true);
+        waitLoaded(PREV_RASTER_MS);
       }
       return true;
     },
@@ -198,15 +223,21 @@ const StandardPager = forwardRef(function StandardPager({
   const styleFor = (role) => {
     if (role === 'cur') return { translateX: dir === 1 ? curX : 0, zIndex: 3 };
     if (role === 'next') return { translateX: 0, zIndex: 2 };
-    // 上一页：静止时压在最底层；往前翻时提到最上层、从左边滑进来
+    // 上一页（只在往前翻期间才挂载）：准备阶段压在最底层；开滑后提到最上层、从左边滑进来
     return { translateX: dir === -1 ? prevInX : 0, zIndex: dir === -1 ? 4 : 1 };
   };
 
-  const list = [
-    pages.prev ? { role: 'prev', page: pages.prev } : null,
-    pages.cur ? { role: 'cur', page: pages.cur } : null,
-    pages.next ? { role: 'next', page: pages.next } : null,
-  ].filter(Boolean);
+  // 挂载哪几页：平时 当前+下一页；往前翻期间 上一页+当前（下一页先卸掉，保证同时最多 2 个）
+  const backMode = prepPrev || dir === -1;
+  const list = (backMode
+    ? [
+      pages.prev ? { role: 'prev', page: pages.prev } : null,
+      pages.cur ? { role: 'cur', page: pages.cur } : null,
+    ]
+    : [
+      pages.cur ? { role: 'cur', page: pages.cur } : null,
+      pages.next ? { role: 'next', page: pages.next } : null,
+    ]).filter(Boolean);
 
   return (
     <View
