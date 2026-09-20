@@ -10,7 +10,7 @@ import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import {
   View, Text, StyleSheet, TouchableOpacity, TextInput,
   ActivityIndicator, ScrollView, Platform, KeyboardAvoidingView, Switch,
-  Animated, Easing, Modal,
+  Modal,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Audio, InterruptionModeIOS, InterruptionModeAndroid } from 'expo-av';
@@ -21,7 +21,7 @@ import {
   IconChevronLeft, IconList, IconVolume, IconBolt,
   IconPlayerTrackPrevFilled, IconPlayerTrackNextFilled,
   IconPlayerPlayFilled, IconPlayerPauseFilled,
-  IconMicrophone, IconMicrophoneOff, IconSend, IconDropletFilled,
+  IconMicrophone, IconMicrophoneOff, IconSend,
   IconX,
 } from '@tabler/icons-react-native';
 import {
@@ -296,119 +296,6 @@ function mergeParagraphsForNarration(paragraphs) {
   return merged;
 }
 
-// 设计稿里的"灯芯轨迹环"——呼吸缩放的发光球体+缓慢自转的轨迹环+外扩淡出
-// 的三层脉冲光环，原设计用CSS animation做（breathe/spin/ping三个
-// @keyframes），这里用RN内置的Animated复刻，不引入额外动画库。三层脉冲
-// 环用不同的delay错开启动，效果是连续不断有环从中心扩散出去，不是三个
-// 环同步跳动。
-// 2026-08-10：免提这一轮进行中，字幕区不是唯一的状态提示——光晕本身也要
-// 跟着换颜色/换节奏，用户确认过的预览稿（handsfree_flow_preview.html）
-// 里这个球是"正在聆听"变亮加快脉动、"AI正在回答"变成翠色的关键视觉线索
-// 之一，不只是装饰。stage不传或传''就是原来朗读中的默认样子，不影响
-// 手动打断那条流程（那边根本不传这个prop）。
-function ListenOrb({ stage }) {
-  const breatheAnim = useRef(new Animated.Value(0)).current;
-  const spinAnim = useRef(new Animated.Value(0)).current;
-  const ring1 = useRef(new Animated.Value(0)).current;
-  const ring2 = useRef(new Animated.Value(0)).current;
-  const ring3 = useRef(new Animated.Value(0)).current;
-
-  useEffect(() => {
-    const breatheDuration = stage === 'listening' ? 550 : 1700; // "正在聆听"时脉动明显加快，跟预览稿的pulseFast节奏对齐
-    const breathe = Animated.loop(
-      Animated.sequence([
-        Animated.timing(breatheAnim, { toValue: 1, duration: breatheDuration, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
-        Animated.timing(breatheAnim, { toValue: 0, duration: breatheDuration, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
-      ]),
-    );
-    const spin = Animated.loop(
-      Animated.timing(spinAnim, { toValue: 1, duration: 14000, easing: Easing.linear, useNativeDriver: true }),
-    );
-    function ringLoop(anim, delay) {
-      return Animated.loop(
-        Animated.sequence([
-          Animated.delay(delay),
-          Animated.timing(anim, { toValue: 1, duration: 2600, easing: Easing.out(Easing.quad), useNativeDriver: true }),
-          Animated.timing(anim, { toValue: 0, duration: 0, useNativeDriver: true }),
-          Animated.delay(2600 * 2 - delay),
-        ]),
-      );
-    }
-    const r1 = ringLoop(ring1, 0);
-    const r2 = ringLoop(ring2, 700);
-    const r3 = ringLoop(ring3, 1400);
-    breathe.start();
-    spin.start();
-    r1.start();
-    r2.start();
-    r3.start();
-    return () => {
-      breathe.stop();
-      spin.stop();
-      r1.stop();
-      r2.stop();
-      r3.stop();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stage]); // stage变了要用新的breatheDuration重新起一次循环，不然还是旧节奏
-
-  // "正在聆听"时脉动幅度也跟着放大（1→1.22，比默认的1.04明显得多），
-  // 光是变快还不够醒目——这个数值跟预览稿pulseFast关键帧的1.22对齐。
-  const orbScale = breatheAnim.interpolate({
-    inputRange: [0, 1],
-    outputRange: stage === 'listening' ? [1, 1.22] : [1, 1.04],
-  });
-  const orbitRotate = spinAnim.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] });
-  // 默认朗读中是ember橙；"AI正在回答"这一刻换成jade绿，跟字幕区回答文字
-  // 的颜色对上，"聆听"阶段沿用ember但配合上面更快更大的脉动已经够醒目，
-  // 不需要再单独换色，颜色变化太多反而分散注意力。
-  const orbColor = stage === 'replying' ? EMBER.jade : EMBER.ember;
-
-  function renderPingRing(anim) {
-    const ringScale = anim.interpolate({ inputRange: [0, 1], outputRange: [92 / 220, 1] });
-    const ringOpacity = anim.interpolate({ inputRange: [0, 1], outputRange: [0.55, 0] });
-    return <Animated.View style={[orbStyles.pingRing, { opacity: ringOpacity, transform: [{ scale: ringScale }] }]} />;
-  }
-
-  return (
-    <View style={orbStyles.zone}>
-      {renderPingRing(ring1)}
-      {renderPingRing(ring2)}
-      {renderPingRing(ring3)}
-      <Animated.View style={[orbStyles.orbit, { transform: [{ rotate: orbitRotate }] }]}>
-        <View style={orbStyles.mote} />
-      </Animated.View>
-      <Animated.View style={[orbStyles.orb, { backgroundColor: orbColor, shadowColor: orbColor }, { transform: [{ scale: orbScale }] }]}>
-        <IconDropletFilled color={EMBER.ink} size={30} />
-      </Animated.View>
-    </View>
-  );
-}
-
-const orbStyles = StyleSheet.create({
-  zone: { flex: 1, alignItems: 'center', justifyContent: 'center' },
-  pingRing: {
-    position: 'absolute', width: 220, height: 220, borderRadius: 110,
-    borderWidth: 1, borderColor: EMBER.emberDim,
-  },
-  orbit: {
-    position: 'absolute', width: 168, height: 168, borderRadius: 84,
-    borderWidth: 0.5, borderColor: 'rgba(226,150,58,0.28)',
-    alignItems: 'center',
-  },
-  mote: {
-    position: 'absolute', top: -2.5, width: 5, height: 5, borderRadius: 2.5,
-    backgroundColor: EMBER.emberBright,
-  },
-  orb: {
-    width: 92, height: 92, borderRadius: 46,
-    backgroundColor: EMBER.ember,
-    alignItems: 'center', justifyContent: 'center',
-    shadowColor: EMBER.ember, shadowOpacity: 0.45, shadowRadius: 24, shadowOffset: { width: 0, height: 0 },
-    elevation: 8,
-  },
-});
-
 export default function ListenScreen({ route, navigation }) {
   const { bookId, bookTitle, author, initialChapterTitle, startFraction } = route.params;
   const insets = useSafeAreaInsets();
@@ -483,7 +370,10 @@ export default function ListenScreen({ route, navigation }) {
   // recordingRef等等这些完全不共用，就是要做到用户明确要求的"两条线互不
   // 干扰"。
   const [hfStage, setHfStage] = useState(''); // '' | 'listening' | 'thinking' | 'replying'
-  const [hfText, setHfText] = useState(''); // 当前显示在字幕区的文字：用户问题(thinking起)或AI回答(replying)
+  const [voiceMessages, setVoiceMessages] = useState([]);
+  const voiceMessageIdRef = useRef(0);
+  const voiceConversationRef = useRef(null);
+  const voiceAutoScrollRef = useRef(true);
 
   // playOneParagraph在playFrom的异步循环里调用，如果直接读voice/rate这两个
   // state会有闭包过期的问题（循环开始时闭包捕获的是当时的值，用户中途在
@@ -1126,7 +1016,6 @@ export default function ListenScreen({ route, navigation }) {
       await stopHandsFreeAmbient(); // 等它真的放开麦克风，再开正式录音那一路，两路录音先后而不是同时存在
       markHfTiming('打断音频并释放环境监听');
       setHfStage('listening');
-      setHfText('');
       await hfListenTurnLoop({ skipIntent: forceMic });
     })();
   }
@@ -1278,7 +1167,6 @@ export default function ListenScreen({ route, navigation }) {
       finishHandsFreeTurn();
       return;
     }
-    setHfText(text);
     setHfStage('thinking');
     const chapter = chaptersRef.current[posRef.current.chapterIdx];
     let relevant = true;
@@ -1301,6 +1189,8 @@ export default function ListenScreen({ route, navigation }) {
       finishHandsFreeTurn();
       return;
     }
+    const messageId = ++voiceMessageIdRef.current;
+    setVoiceMessages((prev) => [...prev, { id: messageId, role: 'user', content: text }]);
     await askHandsFree(text);
   }
 
@@ -1327,6 +1217,7 @@ export default function ListenScreen({ route, navigation }) {
     let markedPlayEnd = false;
     let firstTtsQueued = false;
     let seq = 0;
+    const replyId = ++voiceMessageIdRef.current;
     const queue = [];
 
     await new Promise((resolve) => {
@@ -1512,7 +1403,9 @@ export default function ListenScreen({ route, navigation }) {
             fullAnswer += delta;
             sentenceBuffer += delta;
             setHfStage('replying');
-            setHfText(fullAnswer);
+            setVoiceMessages((prev) => prev.some((msg) => msg.id === replyId)
+              ? prev.map((msg) => msg.id === replyId ? { ...msg, content: fullAnswer } : msg)
+              : [...prev, { id: replyId, role: 'assistant', content: fullAnswer }]);
             if (HF_REPLY_TTS_STREAMING_ENABLED) flushSentences(false);
           },
           onDone: async (answer) => {
@@ -1526,7 +1419,11 @@ export default function ListenScreen({ route, navigation }) {
             const streamedAnswer = fullAnswer;
             if (finalAnswer && finalAnswer !== fullAnswer) {
               fullAnswer = finalAnswer;
-              setHfText(finalAnswer);
+            }
+            if (finalAnswer) {
+              setVoiceMessages((prev) => prev.some((msg) => msg.id === replyId)
+                ? prev.map((msg) => msg.id === replyId ? { ...msg, content: finalAnswer } : msg)
+                : [...prev, { id: replyId, role: 'assistant', content: finalAnswer }]);
             }
             markHfTiming(`AI回复完成 answerChars=${finalAnswer.length}`, 'llm_done');
             setHfTimingMeta({ answerChars: finalAnswer.length });
@@ -1572,7 +1469,6 @@ export default function ListenScreen({ route, navigation }) {
       return;
     }
     setHfStage('listening');
-    setHfText('');
     await hfListenTurnLoop();
   }
 
@@ -1583,7 +1479,6 @@ export default function ListenScreen({ route, navigation }) {
     hfActiveRef.current = false;
     hfReplyInterruptingRef.current = false;
     setHfStage('');
-    setHfText('');
     const { chapterIdx, paragraphIdx } = posRef.current;
     epochRef.current += 1;
     hfResumePendingRef.current = true;
@@ -1624,7 +1519,6 @@ export default function ListenScreen({ route, navigation }) {
       restorePlaybackAudioMode().catch(() => {});
     }
     setHfStage('');
-    setHfText('');
   }
 
   function handleVoiceModeMicGestureStart() {
@@ -2116,37 +2010,59 @@ export default function ListenScreen({ route, navigation }) {
               <View style={[styles.mainStage, handsFreeEnabled && styles.mainStageVoiceMode]}>
                 {inNarrating ? (
                   <>
-                    {!handsFreeEnabled && <ListenOrb stage={hfStage} />}
-                    <View style={[styles.captionZone, handsFreeEnabled && styles.captionZoneVoiceMode]}>
+                    <View style={[
+                      styles.captionZone,
+                      handsFreeEnabled ? styles.captionZoneVoiceMode : styles.captionZoneReading,
+                      handsFreeEnabled && voiceMessages.length > 0 && styles.captionZoneWithConversation,
+                    ]}>
                       {phase === 'loading-chapter' ? (
                         <ActivityIndicator color={EMBER.emberBright} />
-                      ) : hfStage ? (
-                        // 免提这一轮进行中——字幕区不显示原来在念的正文，改成
-                        // 免提自己的状态展示，全程留在这个视图里，不跳转页面。
-                        // 用户在确认稿（handsfree_flow_preview.html）里明确
-                        // 认可的是"识别出的问题用橙色字、AI的回答用绿色字"这
-                        // 个颜色区分，不是两段文字用同一个颜色摆在一起——
-                        // 这是"感觉像对话"这句反馈里真正落地的那部分，照抄。
-                        <>
-                          <Text style={styles.hfStageLabel}>
-                            {hfStage === 'listening' ? '正在聆听…' : hfStage === 'thinking' ? 'AI正在思考…' : 'AI正在回答'}
-                          </Text>
-                          {hfStage !== 'listening' && !!hfText && (
-                            <Text style={hfStage === 'replying' ? styles.hfAiText : styles.hfUserText}>{hfText}</Text>
-                          )}
-                          {hfStage === 'thinking' && (
-                            <ActivityIndicator color={EMBER.emberBright} style={styles.hfThinkingSpin} />
-                          )}
-                        </>
                       ) : (
-                        <>
+                        <ScrollView style={styles.captionScroll} contentContainerStyle={styles.captionScrollContent}>
                           <Text style={styles.captionTextEl}>{currentCaption}</Text>
                           {currentSegCount.total > 0 && (
                             <Text style={styles.captionCountText}>句 {currentSegCount.idx + 1}/{currentSegCount.total}</Text>
                           )}
-                        </>
+                        </ScrollView>
                       )}
                     </View>
+                    {handsFreeEnabled && (voiceMessages.length > 0 || !!hfStage) && (
+                      <View style={[styles.voiceConversationArea, voiceMessages.length > 0 && styles.voiceConversationFilled]}>
+                        {voiceMessages.length > 0 && (
+                          <ScrollView
+                            ref={voiceConversationRef}
+                            style={styles.voiceConversationScroll}
+                            contentContainerStyle={styles.voiceConversationContent}
+                            onContentSizeChange={() => {
+                              if (voiceAutoScrollRef.current) voiceConversationRef.current?.scrollToEnd({ animated: false });
+                            }}
+                            onScrollBeginDrag={() => { voiceAutoScrollRef.current = false; }}
+                            onScrollEndDrag={({ nativeEvent }) => {
+                              const { contentOffset, contentSize, layoutMeasurement } = nativeEvent;
+                              voiceAutoScrollRef.current = contentOffset.y + layoutMeasurement.height >= contentSize.height - 40;
+                            }}
+                            onMomentumScrollEnd={({ nativeEvent }) => {
+                              const { contentOffset, contentSize, layoutMeasurement } = nativeEvent;
+                              voiceAutoScrollRef.current = contentOffset.y + layoutMeasurement.height >= contentSize.height - 40;
+                            }}
+                          >
+                            {voiceMessages.map((msg) => (
+                              <View key={msg.id} style={[styles.bubble, msg.role === 'user' ? styles.bubbleUser : styles.bubbleAi]}>
+                                <Text style={msg.role === 'user' ? styles.bubbleUserText : styles.bubbleAiText}>{msg.content}</Text>
+                              </View>
+                            ))}
+                          </ScrollView>
+                        )}
+                        {!!hfStage && (
+                          <View style={styles.voiceStageRow}>
+                            {hfStage === 'thinking' && <ActivityIndicator size="small" color={EMBER.emberBright} />}
+                            <Text style={styles.voiceStageText}>
+                              {hfStage === 'listening' ? '正在聆听…' : hfStage === 'thinking' ? 'AI正在思考…' : 'AI正在回答'}
+                            </Text>
+                          </View>
+                        )}
+                      </View>
+                    )}
                   </>
                 ) : (
                   <ScrollView contentContainerStyle={styles.chatBody}>
@@ -2275,7 +2191,7 @@ export default function ListenScreen({ route, navigation }) {
                         </GestureDetector>
                         <TouchableOpacity
                           style={[styles.voiceModeRoundBtn, styles.voiceModeExitBtn]}
-                          onPress={() => setHandsFreeEnabled(false)}
+                          onPress={() => { setHandsFreeEnabled(false); setVoiceMessages([]); voiceAutoScrollRef.current = true; }}
                           accessibilityLabel="退出语音模式"
                         >
                           <IconX color="#ff2d2d" size={34} strokeWidth={2.7} />
@@ -2288,6 +2204,8 @@ export default function ListenScreen({ route, navigation }) {
                         style={styles.interruptBtnEl}
                         onPress={() => {
                           if (!requireAuth('ai')) return;
+                          setVoiceMessages([]);
+                          voiceAutoScrollRef.current = true;
                           setHandsFreeMuted(true);
                           setHandsFreeEnabled(true);
                         }}
@@ -2441,19 +2359,25 @@ const styles = StyleSheet.create({
   errorText: { fontSize: 14, textAlign: 'center', color: EMBER.paperDim },
   doneText: { fontSize: 17, color: EMBER.paper, fontWeight: '600' },
 
-  mainStage: { flex: 1 },
+  mainStage: { flex: 1, minHeight: 0 },
   mainStageVoiceMode: { justifyContent: 'center' },
   captionZone: {
     paddingHorizontal: 30, paddingBottom: 8, minHeight: 90,
-    alignItems: 'center', justifyContent: 'flex-start',
+    alignItems: 'center', justifyContent: 'center',
   },
-  captionZoneVoiceMode: { flex: 1, justifyContent: 'center', paddingTop: 18, paddingBottom: 18 },
+  captionZoneReading: { flex: 1 },
+  captionZoneVoiceMode: { flex: 1, paddingTop: 18, paddingBottom: 18 },
+  captionZoneWithConversation: { flex: 0.42, maxHeight: 210, paddingTop: 12, paddingBottom: 12 },
+  captionScroll: { flex: 1, alignSelf: 'stretch' },
+  captionScrollContent: { flexGrow: 1, alignItems: 'center', justifyContent: 'center' },
   captionTextEl: { fontSize: 17, lineHeight: 27, textAlign: 'center', color: EMBER.paper },
   captionCountText: { fontSize: 10.5, color: EMBER.inkSoft, marginTop: 8, letterSpacing: 0.5 },
-  hfStageLabel: { fontSize: 12.5, color: EMBER.emberBright, letterSpacing: 0.3, marginBottom: 10 },
-  hfThinkingSpin: { marginTop: 12 },
-  hfUserText: { fontSize: 17, lineHeight: 27, textAlign: 'center', color: EMBER.emberBright, fontWeight: '600' },
-  hfAiText: { fontSize: 17, lineHeight: 27, textAlign: 'center', color: EMBER.jade },
+  voiceConversationArea: { paddingHorizontal: 18, paddingBottom: 8 },
+  voiceConversationFilled: { flex: 0.58, minHeight: 0 },
+  voiceConversationScroll: { flex: 1 },
+  voiceConversationContent: { paddingVertical: 8, gap: 12 },
+  voiceStageRow: { minHeight: 28, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
+  voiceStageText: { fontSize: 12, color: EMBER.inkSoft },
 
   chatBody: { flexGrow: 1, padding: 16, gap: 14 },
   contextChip: {
