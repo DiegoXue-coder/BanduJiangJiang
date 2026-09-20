@@ -2134,8 +2134,11 @@ function ReaderInner({
     }
     if (data?.type === 'standardBodyTap') {
       // 旧脚本在这里发的是 standardClearSelection；新脚本把"点了哪个区域"一起带上来。
+      // 一次点击只做一件事：有选区时这一下只用来取消选区，不顺带切换工具栏
+      // （样板 click 处理里同样是 `if (hasSelection()) return;`）。
+      const hadSelection = !!selection;
       clearStandardSelection();
-      if (!immersive) return;
+      if (!immersive || hadSelection) return;
       if (chromeOpen) setChromeOpen(false);
       else if (data.zone === 'center' && readerInteractionReady) setChromeOpen(true);
       return;
