@@ -103,7 +103,7 @@ function GlassBackground() {
         // 实测（新原生包）tint="dark" 会让玻璃叠在白底上从样板的 (141,127,113) 变深到约 (104,88,71)。
         <BlurView
           intensity={40}
-          tint="default"
+          tint="light"
           experimentalBlurMethod="dimezisBlurView"
           style={StyleSheet.absoluteFill}
         />
