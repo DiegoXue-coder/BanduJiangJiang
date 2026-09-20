@@ -58,7 +58,10 @@ const BODY_FONT_OPTIONS = [
     key: 'kai',
     label: '楷体',
     family: 'LXGWWenKai',
-    cssFamily: '"LXGWWenKai", "Kaiti SC", STKaiti, KaiTi, cursive',
+    // 兜底用 serif 而不是 cursive：安卓的 cursive 只有拉丁手写体、没有中文映射，
+    // 汉字会落到默认黑体（实测"楷体≡黑体"的原因之一）。子集字体之外的生僻字
+    // 按字体栈逐字回退：iOS 落到 Kaiti SC，安卓落到系统衬线中文。
+    cssFamily: '"LXGWWenKai", "Kaiti SC", STKaiti, KaiTi, serif',
     previewFamily: Platform.select({ ios: 'Kaiti SC', android: FONTS.kaiRegular, default: FONTS.kaiRegular }),
     checkFamilies: ['Kaiti SC', 'STKaiti', 'LXGWWenKai'],
     asset: FONTS.kaiRegular,
@@ -113,6 +116,12 @@ const STANDARD_CHAPTER_CACHE_VERSION = 2;
 const STANDARD_CHAPTER_MEMORY_CACHE = new Map();
 const EPUB_FILE_CACHE_VERSION = 2;
 const EPUB_BASE64_MEMORY_CACHE = new Map();
+// 标准阅读正文字体的本地文件缓存（安卓）：把随包的子集字体复制到缓存目录的固定
+// 文件名，页面 baseUrl 也指向该目录，保证 WebView 能用 file:// 读到字体（实测
+// 最小权限只需 allowFileAccess + baseUrl，不必开 allowUniversalAccessFromFileURLs）。
+// 文件名带资源 hash，换字体文件后自动失效，不会读到旧字体。
+const READER_FONT_FILE_URIS = new Map(); // `${key}:${hash}` -> file:// 路径，进程内缓存
+let ANDROID_FONT_FILE_MODE_FAILED = false; // 本次进程里 file:// 失败过就不再重试
 const READER_LOADING_STAGES = [
   '准备书籍文件',
   '读取目录结构',
@@ -398,6 +407,7 @@ function buildStandardPageHtml({
   fontFamily,
   fontCssFamily,
   fontBase64,
+  fontUrl,
   fontWeight,
   fontSize,
   lineHeight,
@@ -407,8 +417,31 @@ function buildStandardPageHtml({
   chapterId,
   androidSelectionGuard,
 }) {
-  const faceCss = fontBase64
-    ? `@font-face{font-family:"${fontFamily}";src:url("data:font/truetype;charset=utf-8;base64,${fontBase64}") format("truetype");font-weight:${fontWeight};font-style:normal;}`
+  // 字体来源二选一：fontUrl（本地文件 file://，安卓默认，HTML 里只有一行路径，
+  // 翻页成本≈不加载字体）；fontBase64（内联 data URL，iOS 一直用这种，也是安卓
+  // file:// 失败后的降级）。为什么不再往每页塞完整字体：标准阅读每翻一页都会
+  // 重建 WebView，实测安卓上 HTML 超过约 14MB 就加载不出来（宋体/楷体完整版
+  // 18.9MB/34MB 都不行，楷体甚至让进程被系统杀掉），黑体 13.5MB 能加载但每页 2.1s。
+  const fontSrc = fontUrl
+    ? `url("${fontUrl}")`
+    : (fontBase64 ? `url("data:font/truetype;charset=utf-8;base64,${fontBase64}")` : '');
+  const faceCss = fontSrc
+    ? `@font-face{font-family:"${fontFamily}";src:${fontSrc} format("truetype");font-weight:${fontWeight};font-style:normal;}`
+    : '';
+  // 只有 file:// 方式才需要自检：字体没加载出来就通知 RN 降级成内联。
+  const fontCheckScript = fontUrl
+    ? `<script>
+    (function(){
+      function fail(){
+        try { window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify({type:'standardFontFailed'})); } catch(e) {}
+      }
+      try {
+        document.fonts.load('16px "${fontFamily}"', '学而时习之').then(function(faces){
+          if (!faces || !faces.length) fail();
+        }).catch(fail);
+      } catch(e) { fail(); }
+    })();
+  </script>`
     : '';
   const bodyHtml = (blocks || []).map((block) => {
     const cfiRange = block.type === 'text' ? `standard:${chapterId || 'unknown'}:${block.paragraphIndex}` : '';
@@ -634,6 +667,7 @@ function buildStandardPageHtml({
       }, {passive:true});
     })();
   </script>
+  ${fontCheckScript}
 </body>
 </html>`;
 }
@@ -932,6 +966,12 @@ function ReaderInner({
   const [readerSettingsLoaded, setReaderSettingsLoaded] = useState(false);
   const [fontAssetReport, setFontAssetReport] = useState([]);
   const [standardFontBase64, setStandardFontBase64] = useState('');
+  // 字体加载方式：安卓默认 'file'（本地文件），失败降级 'inline'（只内联当前一个
+  // 子集字体）；iOS 一直是 'inline'（原来的做法，字体变小后自然更快）。
+  const [standardFontMode, setStandardFontMode] = useState(
+    Platform.OS === 'android' && !ANDROID_FONT_FILE_MODE_FAILED ? 'file' : 'inline',
+  );
+  const [standardFontUris, setStandardFontUris] = useState({}); // { serif, sans, kai } -> file://
   // 长按原生菜单（menuItems）在拖动选区手柄调整范围后不会重新弹出——这是
   // react-native-webview 自身的已知限制，不是我们代码能修的。改用这个悬浮条
   // 兜底：只要 epub.js 报了新的选区（onSelected，拖动调整后也会正常触发），
@@ -1014,11 +1054,41 @@ function ReaderInner({
     );
   }, [initialAnnotations]);
 
+  // 安卓：把三个子集字体准备成本地文件（一次性，之后切字体不用等）。
+  // 之前（9/19 起）安卓导入书干脆不加载字体，导致宋/黑/楷三者靠系统字体兜底、
+  // 看起来一样；现在用本地文件方式，页面 HTML 里只有一行路径，翻页成本≈没字体。
   useEffect(() => {
-    if (Platform.OS === 'android' && bookSource === 'imported') {
-      setStandardFontBase64('');
-      return undefined;
-    }
+    if (Platform.OS !== 'android' || standardFontMode !== 'file') return undefined;
+    let cancelled = false;
+    (async () => {
+      const next = {};
+      for (const opt of BODY_FONT_OPTIONS) {
+        const asset = await Asset.fromModule(FONT_ASSETS[opt.asset]).downloadAsync();
+        const cacheKey = `${opt.key}:${asset.hash || 'nohash'}`;
+        let uri = READER_FONT_FILE_URIS.get(cacheKey);
+        if (!uri) {
+          const src = asset.localUri || asset.uri;
+          const dst = `${FileSystem.cacheDirectory}reader-font-${opt.key}-${asset.hash || 'nohash'}.ttf`;
+          const info = await FileSystem.getInfoAsync(dst);
+          if (!info.exists) await FileSystem.copyAsync({ from: src, to: dst });
+          uri = dst;
+          READER_FONT_FILE_URIS.set(cacheKey, uri);
+        }
+        next[opt.key] = uri;
+      }
+      if (!cancelled) setStandardFontUris(next);
+    })().catch((e) => {
+      console.warn('[标准阅读字体] 本地文件方式准备失败，降级为内联', e.message || e);
+      ANDROID_FONT_FILE_MODE_FAILED = true;
+      if (!cancelled) setStandardFontMode('inline');
+    });
+    return () => { cancelled = true; };
+  }, [standardFontMode]);
+
+  // 内联方式（iOS 一直用；安卓仅在本地文件方式失败后降级用）：只读取当前选中的
+  // 那一个字体，转 base64 塞进页面。字体已是子集（3~5MB），不再是原来的 10~25MB。
+  useEffect(() => {
+    if (standardFontMode !== 'inline') return undefined;
     let cancelled = false;
     const currentOpt = BODY_FONT_OPTIONS.find((o) => o.key === bodyFontKey) || BODY_FONT_OPTIONS[0];
     Asset.fromModule(FONT_ASSETS[currentOpt.asset]).downloadAsync()
@@ -1034,7 +1104,7 @@ function ReaderInner({
         if (!cancelled) setStandardFontBase64('');
       });
     return () => { cancelled = true; };
-  }, [bodyFontKey, bookSource]);
+  }, [bodyFontKey, standardFontMode]);
 
   useEffect(() => {
     if (readerMode !== 'standard') return;
@@ -1840,11 +1910,16 @@ function ReaderInner({
   );
   const standardPage = standardPages[Math.min(standardPageIndex, standardPages.length - 1)] || [];
   const standardChapterId = readingChapters?.[standardChapterIndex]?.id || '';
+  // 安卓 file 方式：当前字体的本地路径；还没准备好时 standardFontPending=true，
+  // 先显示加载页（首次一般不到 1 秒，之后有进程内缓存），避免先闪一下系统字体。
+  const standardFontUrl = standardFontMode === 'file' ? (standardFontUris[bodyFontKey] || '') : '';
+  const standardFontPending = Platform.OS === 'android' && standardFontMode === 'file' && !standardFontUrl;
   const standardPageHtml = useMemo(() => buildStandardPageHtml({
     blocks: standardPage,
     fontFamily: bodyFont.family,
     fontCssFamily: bodyFont.cssFamily,
-    fontBase64: standardFontBase64,
+    fontBase64: standardFontMode === 'inline' ? standardFontBase64 : '',
+    fontUrl: standardFontUrl,
     fontWeight: bodyFont.profile.weight || 400,
     fontSize: standardFontSize,
     lineHeight: standardLineHeight,
@@ -1857,6 +1932,8 @@ function ReaderInner({
     standardPage,
     bodyFont,
     standardFontBase64,
+    standardFontMode,
+    standardFontUrl,
     standardFontSize,
     standardLineHeight,
     themeName,
@@ -1872,7 +1949,7 @@ function ReaderInner({
     setStandardPageIndex((prev) => Math.min(prev, Math.max(0, standardPages.length - 1)));
   }, [standardPages.length]);
 
-  const standardInteractionReady = readerSettingsLoaded && !standardChapterError && !!standardChapterText;
+  const standardInteractionReady = readerSettingsLoaded && !standardChapterError && !!standardChapterText && !standardFontPending;
   const epubInteractionReady = readerSettingsLoaded && !!epubSrc && isReady;
   const readerInteractionReady = readerMode === 'standard' ? standardInteractionReady : epubInteractionReady;
   const readerLoadingStageIndex = readerMode === 'standard'
@@ -1981,6 +2058,16 @@ function ReaderInner({
         setSelection({ text, cfiRange, fragments });
         standardSelectionTimerRef.current = null;
       }, 50);
+      return;
+    }
+    if (data?.type === 'standardFontFailed') {
+      // 页面里的自检发现 file:// 字体没加载出来（比如某些机型/更新版 WebView 对本地
+      // 文件的限制不同）：本次进程内不再尝试 file 方式，降级为只内联当前一个子集字体。
+      if (Platform.OS === 'android' && standardFontMode === 'file') {
+        console.warn('[标准阅读字体] file:// 加载失败，降级为内联');
+        ANDROID_FONT_FILE_MODE_FAILED = true;
+        setStandardFontMode('inline');
+      }
       return;
     }
     if (data?.type === 'standardSelectionError') {
@@ -2237,7 +2324,7 @@ function ReaderInner({
               <View style={styles.centerBox}>
                 <Text style={[styles.errorText, { color: uiTheme.danger }]}>章节加载失败：{standardChapterError}</Text>
               </View>
-            ) : !standardChapterText ? (
+            ) : !standardChapterText || standardFontPending ? (
               <View style={styles.centerBox}>
                 <ReaderLoadingProgress stageIndex={readerLoadingStageIndex} tick={readerLoadingTick} subtitle={readerLoadingLabel} theme={uiTheme} />
               </View>
@@ -2245,9 +2332,14 @@ function ReaderInner({
               <>
                 <WebView
                   ref={standardWebViewRef}
-                  key={`${standardChapterIndex}-${standardPageIndex}-${bodyFontKey}-${themeName}-${standardFontBase64 ? 'font' : 'fallback'}`}
+                  key={`${standardChapterIndex}-${standardPageIndex}-${bodyFontKey}-${themeName}-${standardFontUrl ? 'file' : (standardFontBase64 ? 'font' : 'fallback')}`}
                   originWhitelist={['*']}
-                  source={{ html: standardPageHtml }}
+                  // 字体走本地文件时：baseUrl 指到字体所在的缓存目录 + allowFileAccess，
+                  // 这是实测能加载 file:// 字体的最小权限组合。mixedContentMode 放开是因为
+                  // 页面源换成 file:// 后，书里的 http 图片不能被误拦。
+                  source={standardFontUrl ? { html: standardPageHtml, baseUrl: FileSystem.cacheDirectory } : { html: standardPageHtml }}
+                  allowFileAccess={!!standardFontUrl}
+                  mixedContentMode={standardFontUrl ? 'always' : undefined}
                   style={styles.standardReaderPage}
                   containerStyle={styles.standardReaderPage}
                   onMessage={handleStandardWebViewMessage}
