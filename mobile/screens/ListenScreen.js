@@ -475,6 +475,7 @@ export default function ListenScreen({ route, navigation }) {
   const [handsFreeMuted, setHandsFreeMuted] = useState(false);
   const [handsFreeStatus, setHandsFreeStatus] = useState('');
   const [hfTimingSummary, setHfTimingSummary] = useState('');
+  const [voiceMicError, setVoiceMicError] = useState('');
   // 免提"一轮对话"独立状态机：''表示没有正在进行的免提轮次（这时候ambient
   // 的VAD监听按老逻辑跑），非空表示正在经历"暂停朗读→听问题→AI思考→
   // 念回答"这一整套流程，全程停留在朗读字幕这个视图里，不跳phase。
@@ -1120,12 +1121,24 @@ export default function ListenScreen({ route, navigation }) {
   // 直接跳过transcribeAudio这次调用（没必要为了纯噪音/静音去请求一次
   // 语音识别）。
   async function hfRecordUntilSilence() {
+    let recordingStarted = false;
+    let pendingRecording = null;
     try {
       markHfTiming('准备正式录音');
-      const { status: perm } = await Audio.getPermissionsAsync();
-      if (perm !== 'granted') return null;
+      const { status: perm } = await Audio.requestPermissionsAsync();
+      setHfTimingMeta({ microphonePermission: perm });
+      if (perm !== 'granted') {
+        markHfTiming(`麦克风权限未授予 status=${perm}`);
+        setVoiceMicError('麦克风权限未开启，请在系统设置中允许 ChatBook 使用麦克风');
+        return null;
+      }
+      if (!voiceHoldActiveRef.current) {
+        markHfTiming('权限检查后手指已松开，跳过录音');
+        return null;
+      }
       await enableRecordingAudioMode();
       const recording = new Audio.Recording();
+      pendingRecording = recording;
       const manualHoldMode = MANUAL_HOLD_TO_TALK;
       let speechEverDetected = false;
       let silenceMs = 0;
@@ -1170,6 +1183,8 @@ export default function ListenScreen({ route, navigation }) {
       });
       await recording.prepareToRecordAsync({ ...Audio.RecordingOptionsPresets.HIGH_QUALITY, isMeteringEnabled: true });
       await recording.startAsync();
+      recordingStarted = true;
+      pendingRecording = null;
       recordingStartedAt = Date.now();
       markHfTiming('正式录音已开始', 'recording_started');
       console.log(`[免提诊断] 正式录音开始 mode=${manualHoldMode ? 'manual_hold' : 'vad'} hold=${voiceHoldActiveRef.current}`);
@@ -1220,7 +1235,11 @@ export default function ListenScreen({ route, navigation }) {
       return (text || '').trim();
     } catch (e) {
       markHfTiming(`录音/ASR失败 ${e.message || e}`);
-      return null; // 静默失败——免提是锦上添花的功能，任何一步出错都直接放弃这一轮，不打断听书体验、不弹错误
+      setHfTimingMeta({ recordingError: String(e.message || e), recordingStarted });
+      setVoiceMicError(recordingStarted ? '语音识别失败，请再试一次' : `麦克风启动失败：${e.message || e}`);
+      await pendingRecording?.stopAndUnloadAsync().catch(() => {});
+      await restorePlaybackAudioMode().catch(() => {});
+      return null;
     }
   }
 
@@ -1591,6 +1610,7 @@ export default function ListenScreen({ route, navigation }) {
   function handleVoiceModeMicGestureStart() {
     if (MANUAL_HOLD_TO_TALK) {
       if (hfStage === 'listening' || hfStage === 'thinking') return;
+      setVoiceMicError('');
       voiceHoldActiveRef.current = true;
       console.log(`[免提诊断] mic gestureStart stage=${hfStage || 'idle'} muted=${handsFreeMuted} phase=${phase}`);
       if (hfStage === 'replying') {
@@ -1922,6 +1942,10 @@ export default function ListenScreen({ route, navigation }) {
   async function startHandsFreeAmbient() {
     try {
       if (MANUAL_HOLD_TO_TALK) {
+        const { status: perm } = await Audio.requestPermissionsAsync();
+        if (perm !== 'granted') {
+          setVoiceMicError('麦克风权限未开启，请在系统设置中允许 ChatBook 使用麦克风');
+        }
         await restorePlaybackAudioMode().catch(() => {});
         setHandsFreeStatus('按住麦克风说话');
         return;
@@ -2008,7 +2032,7 @@ export default function ListenScreen({ route, navigation }) {
         : hfStage === 'thinking'
           ? '正在思考…'
           : '开始提问';
-  const voiceModeStatus = hfStage
+  const voiceModeStatus = (!hfStage && voiceMicError) ? voiceMicError : hfStage
     ? (hfStage === 'listening' ? '松开后发送问题' : hfStage === 'thinking' ? '正在识别和思考…' : '按住麦克风打断追问')
     : handsFreeMuted
       ? (MANUAL_HOLD_TO_TALK ? '按住麦克风说话' : '已静音 · 继续讲书')
