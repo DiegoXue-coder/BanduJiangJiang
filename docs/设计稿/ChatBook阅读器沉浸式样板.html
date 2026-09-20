@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>沉浸阅读示意</title>
+<style>
+:root{
+  --canvas:#dde2e5; --ink:#1f2a30; --ink2:#56646c; --rule:#c3cbd0; --gold:#b4823a;
+  --font-ui:-apple-system,"PingFang SC","Noto Sans SC","Microsoft YaHei",system-ui,sans-serif;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){ --canvas:#161c20; --ink:#e4e9ec; --ink2:#95a3ab; --rule:#2c363c; }
+}
+:root[data-theme="dark"]{ --canvas:#161c20; --ink:#e4e9ec; --ink2:#95a3ab; --rule:#2c363c; }
+:root[data-theme="light"]{ --canvas:#dde2e5; --ink:#1f2a30; --ink2:#56646c; --rule:#c3cbd0; }
+
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:var(--canvas);color:var(--ink);font-family:var(--font-ui);-webkit-text-size-adjust:100%}
+
+.stage{min-height:100dvh;display:flex;align-items:center;justify-content:center;gap:56px;padding:16px}
+.notes{width:260px;flex:none;display:none}
+.notes h1{font-size:17px;font-weight:600;margin:0 0 6px;letter-spacing:.02em}
+.notes p{font-size:13px;line-height:1.7;color:var(--ink2);margin:0 0 18px}
+.notes ol{margin:0 0 18px;padding:0;list-style:none;display:grid;gap:10px}
+.notes li{font-size:13px;line-height:1.6;color:var(--ink);padding-top:10px;border-top:1px solid var(--rule)}
+.notes li b{font-weight:600}
+.notes small{display:block;font-size:12px;color:var(--ink2);line-height:1.6}
+@media (min-width:900px){ .notes{display:block} }
+
+.device{
+  position:relative;overflow:hidden;
+  height:min(844px,calc(100dvh - 32px));aspect-ratio:390/844;
+  border-radius:34px;border:1px solid var(--rule);
+  background:var(--bg);color:var(--fg);
+  transition:background-color .25s;
+  touch-action:pan-y;
+}
+@media (max-width:520px){
+  .stage{padding:0}
+  .device{width:100vw;height:100dvh;aspect-ratio:auto;border-radius:0;border:0}
+}
+.device[data-rt="paper"]{--bg:#f4ecd8;--fg:#5b4636;--mut:rgba(91,70,54,.72)}
+.device[data-rt="light"]{--bg:#ffffff;--fg:#1a1a2e;--mut:rgba(26,26,46,.62)}
+.device[data-rt="dark"]{--bg:#1a1a2e;--fg:#dcdce6;--mut:rgba(220,220,230,.66)}
+
+.pagebox{position:absolute;left:26px;right:26px;top:30px;bottom:44px;overflow:hidden}
+.cols{height:100%;column-fill:auto;line-height:1.85;text-align:justify;transition:none}
+.cols h2{font-size:1.25em;font-weight:600;margin:0 0 1em;letter-spacing:.08em}
+.cols p{margin:0 0 .7em;text-indent:2em}
+.cols ::selection,.cols::selection{background:rgba(180,130,58,.38)}
+
+.hint{
+  position:absolute;left:0;right:0;bottom:0;height:44px;padding:0 26px 8px;
+  display:grid;grid-template-columns:1fr auto 1fr;align-items:end;gap:10px;
+  font-size:12px;color:var(--mut);font-variant-numeric:tabular-nums;
+  transition:opacity .2s;pointer-events:none;
+}
+.hint .l{display:flex;align-items:center;gap:6px}
+.hint .c{max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center}
+.hint .r{text-align:right}
+.bat{display:inline-flex;align-items:center;gap:3px}
+.device.open .hint{opacity:0}
+
+.glass{
+  position:absolute;left:0;right:0;z-index:5;color:#fff;
+  background:rgba(103,84,66,.75);
+  -webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px);
+  transition:transform .25s ease;
+}
+.glass.top{top:0;padding:14px 10px 10px;display:flex;align-items:center;gap:6px;border-bottom:1px solid rgba(255,255,255,.22);transform:translateY(-102%)}
+.glass.bottom{bottom:0;padding:14px 18px 20px;display:grid;gap:14px;border-top:1px solid rgba(255,255,255,.22);transform:translateY(102%)}
+.device.open .glass{transform:translateY(0)}
+.ttl{flex:1;text-align:center;font-size:15px;font-weight:600;letter-spacing:.06em}
+.ib{width:40px;height:40px;border:0;background:transparent;color:#fff;display:grid;place-items:center;border-radius:10px;cursor:pointer}
+.ib:hover{background:rgba(255,255,255,.14)}
+
+.prow{display:flex;align-items:center;gap:12px;font-size:13px}
+.prow .lab{width:30px;flex:none;color:rgba(255,255,255,.88)}
+.prow .val{width:34px;flex:none;text-align:right;font-variant-numeric:tabular-nums;font-weight:600}
+.aS{font-size:12px;width:16px;text-align:center;flex:none;font-family:"Songti SC","Noto Serif SC",serif}
+.aL{font-size:22px;width:20px;text-align:center;flex:none;line-height:1;font-family:"Songti SC","Noto Serif SC",serif}
+
+.gs{-webkit-appearance:none;appearance:none;flex:1;min-width:0;height:26px;background:transparent;margin:0;cursor:pointer}
+.gs::-webkit-slider-runnable-track{height:3px;border-radius:2px;background:rgba(255,255,255,.4)}
+.gs::-webkit-slider-thumb{-webkit-appearance:none;width:20px;height:20px;margin-top:-8.5px;border-radius:50%;background:#fff;border:0}
+.gs::-moz-range-track{height:3px;border-radius:2px;background:rgba(255,255,255,.4)}
+.gs::-moz-range-thumb{width:20px;height:20px;border-radius:50%;background:#fff;border:0}
+.gs:focus-visible{outline:2px solid #fff;outline-offset:2px;border-radius:6px}
+
+.seg{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.seg button{height:38px;border-radius:10px;border:1px solid rgba(255,255,255,.4);background:transparent;color:#fff;font-size:15px;cursor:pointer}
+.seg button[aria-pressed="true"]{background:rgba(255,255,255,.92);color:#54402c;border-color:transparent;font-weight:600}
+.themes{display:flex;gap:18px;align-items:center;justify-content:space-between;font-size:13px}
+.themes .lab{color:rgba(255,255,255,.88)}
+.sw{display:flex;align-items:center;gap:8px;background:transparent;border:0;color:#fff;font-size:12px;cursor:pointer;padding:2px}
+.sw i{width:24px;height:24px;border-radius:50%;border:2px solid rgba(255,255,255,.5);display:block}
+.sw[aria-pressed="true"] i{border-color:#fff;box-shadow:0 0 0 2px rgba(255,255,255,.35)}
+button:focus-visible{outline:2px solid #fff;outline-offset:2px}
+@media (prefers-reduced-motion:reduce){ .glass,.hint,.device{transition:none} }
+</style>
+</head>
+<body>
+<main class="stage">
+  <aside class="notes">
+    <h1>沉浸阅读示意</h1>
+    <p>这是给 1 号的对照样板，不是最终代码。请在手机浏览器里打开，手感最接近真机。</p>
+    <ol>
+      <li><b>呼出 / 收起</b><small>点屏幕中间，或从屏幕中部向下滑；向上滑或点正文收起。</small></li>
+      <li><b>翻页</b><small>点左右两侧，或左右滑。本次不做翻页动画，这里只是瞬间切换。</small></li>
+      <li><b>选字不误触</b><small>长按选字、或正在选中文字时，下滑不会呼出工具栏。</small></li>
+      <li><b>底栏</b><small>左：时间和电量；中：章节名；右：百分比进度。收起时它占底部一小条，正文占满其余空间。</small></li>
+      <li><b>工具栏里</b><small>进度可拖动；字号是滑块，最左最小，最右最大；字体、主题可切换。</small></li>
+    </ol>
+    <small>时间为当前时间；电量如果浏览器不给读取，就显示示意值。字体用的是电脑自带字体，App 里会换成随包字体。</small>
+  </aside>
+
+  <div class="device" id="device" data-rt="paper">
+    <div class="pagebox" id="pagebox">
+      <div class="cols" id="cols">
+        <h2>学而第一</h2>
+        <p>子曰：“学而时习之，不亦说乎？有朋自远方来，不亦乐乎？人不知而不愠，不亦君子乎？”</p>
+        <p>有子曰：“其为人也孝弟，而好犯上者，鲜矣；不好犯上，而好作乱者，未之有也。君子务本，本立而道生。孝弟也者，其为仁之本与！”</p>
+        <p>子曰：“巧言令色，鲜矣仁！”</p>
+        <p>曾子曰：“吾日三省吾身：为人谋而不忠乎？与朋友交而不信乎？传不习乎？”</p>
+        <p>子曰：“道千乘之国，敬事而信，节用而爱人，使民以时。”</p>
+        <p>子曰：“弟子入则孝，出则弟，谨而信，泛爱众，而亲仁。行有余力，则以学文。”</p>
+        <p>子夏曰：“贤贤易色；事父母，能竭其力；事君，能致其身；与朋友交，言而有信。虽曰未学，吾必谓之学矣。”</p>
+        <p>子曰：“君子不重则不威，学则不固。主忠信。无友不如己者。过则勿惮改。”</p>
+        <p>曾子曰：“慎终追远，民德归厚矣。”</p>
+        <p>子禽问于子贡曰：“夫子至于是邦也，必闻其政，求之与？抑与之与？”子贡曰：“夫子温、良、恭、俭、让以得之。夫子之求之也，其诸异乎人之求之与？”</p>
+        <p>子曰：“父在，观其志；父没，观其行；三年无改于父之道，可谓孝矣。”</p>
+        <p>有子曰：“礼之用，和为贵。先王之道，斯为美；小大由之。有所不行，知和而和，不以礼节之，亦不可行也。”</p>
+        <p>有子曰：“信近于义，言可复也。恭近于礼，远耻辱也。因不失其亲，亦可宗也。”</p>
+        <p>子曰：“君子食无求饱，居无求安，敏于事而慎于言，就有道而正焉，可谓好学也已。”</p>
+        <p>子贡曰：“贫而无谄，富而无骄，何如？”子曰：“可也。未若贫而乐，富而好礼者也。”子贡曰：“《诗》云：‘如切如磋，如琢如磨’，其斯之谓与？”子曰：“赐也，始可与言《诗》已矣，告诸往而知来者。”</p>
+        <p>子曰：“不患人之不己知，患不知人也。”</p>
+      </div>
+    </div>
+
+    <div class="hint" id="hint" aria-hidden="true">
+      <div class="l"><span id="clock">09:41</span><span class="bat" id="bat"></span></div>
+      <div class="c">学而第一</div>
+      <div class="r" id="pct">0%</div>
+    </div>
+
+    <div class="glass top" id="topbar">
+      <button class="ib" aria-label="返回"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg></button>
+      <span class="ttl">论语</span>
+      <button class="ib" aria-label="目录"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01"/></svg></button>
+    </div>
+
+    <div class="glass bottom" id="panel">
+      <div class="prow"><span class="lab">进度</span><input class="gs" id="sp" type="range" min="0" max="1000" value="0" aria-label="阅读进度"><span class="val" id="pr">0%</span></div>
+      <div class="prow"><span class="aS">A</span><input class="gs" id="sz" type="range" min="12" max="28" step="1" value="17" aria-label="字号"><span class="aL">A</span><span class="val" id="szv">17</span></div>
+      <div class="seg" id="fontSeg">
+        <button data-f="serif" aria-pressed="true" style="font-family:'Songti SC','Noto Serif SC','SimSun',serif">宋体</button>
+        <button data-f="sans" aria-pressed="false" style="font-family:'PingFang SC','Noto Sans SC','Microsoft YaHei',sans-serif">黑体</button>
+        <button data-f="kai" aria-pressed="false" style="font-family:'Kaiti SC','STKaiti','KaiTi',serif">楷体</button>
+      </div>
+      <div class="themes" id="themeRow">
+        <span class="lab">主题</span>
+        <button class="sw" data-t="paper" aria-pressed="true"><i style="background:#f4ecd8"></i>护眼</button>
+        <button class="sw" data-t="light" aria-pressed="false"><i style="background:#ffffff"></i>默认</button>
+        <button class="sw" data-t="dark" aria-pressed="false"><i style="background:#1a1a2e"></i>晚间</button>
+      </div>
+    </div>
+  </div>
+</main>
+
+<script>
+(function(){
+  var $ = function(s){ return document.querySelector(s); };
+  var dev = $('#device'), box = $('#pagebox'), cols = $('#cols');
+  var pctEl = $('#pct'), sp = $('#sp'), pr = $('#pr'), sz = $('#sz'), szv = $('#szv');
+  var GAP = 52;
+  var FONTS = {
+    serif: '"Songti SC","Noto Serif SC","Source Han Serif SC","SimSun","STSong",serif',
+    sans: '"PingFang SC","Noto Sans SC","Source Han Sans SC","Microsoft YaHei",sans-serif',
+    kai: '"Kaiti SC","STKaiti","KaiTi","LXGW WenKai",serif'
+  };
+  var st = { page: 0, total: 1, frac: 0, size: 17, font: 'serif' };
+
+  function layout(){
+    var W = box.clientWidth;
+    if (!W) return;
+    cols.style.width = W + 'px';
+    cols.style.columnWidth = W + 'px';
+    cols.style.columnGap = GAP + 'px';
+    cols.style.fontSize = st.size + 'px';
+    cols.style.fontFamily = FONTS[st.font];
+    st.total = Math.max(1, Math.round((cols.scrollWidth + GAP) / (W + GAP)));
+    st.page = Math.min(st.total - 1, Math.round(st.frac * (st.total - 1)));
+    apply(false);
+  }
+  function apply(fromSlider){
+    var W = box.clientWidth;
+    cols.style.transform = 'translateX(' + (-st.page * (W + GAP)) + 'px)';
+    st.frac = st.total > 1 ? st.page / (st.total - 1) : 0;
+    var pct = Math.round(st.frac * 100);
+    pctEl.textContent = pct + '%';
+    pr.textContent = pct + '%';
+    if (!fromSlider) sp.value = Math.round(st.frac * 1000);
+  }
+  function go(d){
+    var n = Math.max(0, Math.min(st.total - 1, st.page + d));
+    if (n !== st.page){ st.page = n; apply(false); }
+  }
+  function setOpen(v){ dev.classList.toggle('open', v); }
+  function isOpen(){ return dev.classList.contains('open'); }
+
+  var ro = new ResizeObserver(layout); ro.observe(box);
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(layout);
+  layout();
+
+  sp.addEventListener('input', function(){
+    st.page = Math.round(sp.value / 1000 * (st.total - 1));
+    apply(true);
+  });
+  sz.addEventListener('input', function(){
+    st.size = +sz.value; szv.textContent = st.size; layout();
+  });
+  $('#fontSeg').addEventListener('click', function(e){
+    var f = e.target.dataset && e.target.dataset.f; if (!f) return;
+    st.font = f;
+    this.querySelectorAll('button').forEach(function(b){ b.setAttribute('aria-pressed', b.dataset.f === f ? 'true' : 'false'); });
+    layout();
+  });
+  $('#themeRow').addEventListener('click', function(e){
+    var b = e.target.closest('[data-t]'); if (!b) return;
+    dev.dataset.rt = b.dataset.t;
+    this.querySelectorAll('[data-t]').forEach(function(x){ x.setAttribute('aria-pressed', x === b ? 'true' : 'false'); });
+  });
+
+  var ts = null, pressTimer = 0, longPressed = false, lastSwipe = 0;
+  var SWIPE = 60, EDGE = 24;
+  function hasSelection(){ var s = window.getSelection && window.getSelection(); return !!(s && String(s).length); }
+  dev.addEventListener('touchstart', function(e){
+    if (e.target.closest('.glass')) { ts = null; return; }
+    var t = e.touches[0]; var r = dev.getBoundingClientRect();
+    ts = { x: t.clientX, y: t.clientY, top: (t.clientY - r.top) < EDGE };
+    longPressed = false; clearTimeout(pressTimer);
+    pressTimer = setTimeout(function(){ longPressed = true; }, 350);
+  }, { passive: true });
+  dev.addEventListener('touchend', function(e){
+    clearTimeout(pressTimer);
+    if (!ts) return;
+    var t = e.changedTouches[0], dx = t.clientX - ts.x, dy = t.clientY - ts.y, startedAtTop = ts.top;
+    ts = null;
+    if (longPressed || hasSelection()) return;
+    var ax = Math.abs(dx), ay = Math.abs(dy);
+    if (ay > SWIPE && ay > 2 * ax){
+      if (dy > 0 && !startedAtTop) setOpen(true);
+      if (dy < 0) setOpen(false);
+      lastSwipe = Date.now();
+    } else if (ax > 50 && ax > 2 * ay && !isOpen()){
+      go(dx < 0 ? 1 : -1);
+      lastSwipe = Date.now();
+    }
+  }, { passive: true });
+  dev.addEventListener('click', function(e){
+    if (e.target.closest('.glass')) return;
+    if (Date.now() - lastSwipe < 400) return;
+    if (hasSelection()) return;
+    if (isOpen()){ setOpen(false); return; }
+    var r = dev.getBoundingClientRect(), x = (e.clientX - r.left) / r.width;
+    if (x < 0.3) go(-1); else if (x > 0.7) go(1); else setOpen(true);
+  });
+  document.addEventListener('keydown', function(e){
+    if (e.target.tagName === 'INPUT') return;
+    if (e.key === 'ArrowRight') go(1);
+    else if (e.key === 'ArrowLeft') go(-1);
+    else if (e.key === 'ArrowDown') setOpen(true);
+    else if (e.key === 'ArrowUp') setOpen(false);
+  });
+
+  var batEl = $('#bat'), level = 0.82;
+  function drawBat(){
+    var w = Math.max(1, Math.round(14 * level));
+    batEl.innerHTML = '<svg width="24" height="12" viewBox="0 0 24 12" fill="none" aria-hidden="true"><rect x=".75" y=".75" width="19" height="10.5" rx="2.5" stroke="currentColor" stroke-width="1.5"/><rect x="3" y="3" width="' + w + '" height="6" rx="1" fill="currentColor"/><rect x="21" y="4" width="2" height="4" rx="1" fill="currentColor"/></svg><span>' + Math.round(level * 100) + '%</span>';
+  }
+  drawBat();
+  if (navigator.getBattery){
+    navigator.getBattery().then(function(b){
+      level = b.level; drawBat();
+      b.addEventListener('levelchange', function(){ level = b.level; drawBat(); });
+    }).catch(function(){});
+  }
+  function tick(){
+    var d = new Date(), h = d.getHours(), m = d.getMinutes();
+    $('#clock').textContent = (h < 10 ? '0' : '') + h + ':' + (m < 10 ? '0' : '') + m;
+  }
+  tick(); setInterval(tick, 15000);
+})();
+</script>
+</body>
+</html>
