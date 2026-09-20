@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View, Text, TouchableOpacity, StyleSheet, ActivityIndicator, Alert,
-  Modal, FlatList, PanResponder, Platform, useWindowDimensions,
+  Modal, FlatList, PanResponder, Platform, useWindowDimensions, StatusBar,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Reader, useReader } from '@epubjs-react-native/core';
@@ -19,6 +19,7 @@ import { useTheme, setThemeMode } from '../theme';
 import { FONT_ASSETS, FONTS } from '../fonts';
 import { useAuthGate } from '../lib/authGate';
 import BookChatScreen from './BookChatScreen';
+import ReaderChrome, { READER_INFO_STRIP_HEIGHT } from '../components/ReaderChrome';
 
 // 阶段十一：epub正文（书本原文内容）换成思源宋体——这部分渲染在
 // react-native-webview内部，不是普通RN Text，普通expo-font的useFonts()
@@ -87,6 +88,11 @@ const THEMES = {
   dark:  { body: { background: '#1a1a2e', color: '#dcdce6', 'line-height': READING_LINE_HEIGHT } },
 };
 const THEME_ORDER = ['light', 'paper', 'dark'];
+const IMMERSIVE_THEME_CHOICES = [
+  { key: 'paper', label: '护眼', swatch: '#f4ecd8' },
+  { key: 'light', label: '默认', swatch: '#ffffff' },
+  { key: 'dark', label: '晚间', swatch: '#1a1a2e' },
+];
 // 阶段十一：颜色/主题从"点一下循环切换"改成"三档横向切换控件"，标签跟着改
 const THEME_SEGMENT_LABEL = { light: '默认', paper: '护眼模式', dark: '晚间阅读' };
 
@@ -416,6 +422,7 @@ function buildStandardPageHtml({
   highlights,
   chapterId,
   androidSelectionGuard,
+  screenTopOffset = 0,
 }) {
   // 字体来源二选一：fontUrl（本地文件 file://，安卓默认，HTML 里只有一行路径，
   // 翻页成本≈不加载字体）；fontBase64（内联 data URL，iOS 一直用这种，也是安卓
@@ -485,6 +492,7 @@ function buildStandardPageHtml({
   <script>
     (function(){
       var startX=0,startY=0,startT=0,moved=false,selecting=false,longTimer=null,anchor=null,focus=null,lastFocusKey='',selectedEls=[];
+      var screenTop=${Number(screenTopOffset) || 0};
       var longPressMs=${androidSelectionGuard ? 720 : 320};
       var moveCancelPx=${androidSelectionGuard ? 10 : 22};
       function post(payload){
@@ -641,13 +649,25 @@ function buildStandardPageHtml({
         clearTimeout(longTimer);
         longTimer=null;
         var t=e.changedTouches[0], dx=t.clientX-startX, dy=t.clientY-startY;
+        var held=Date.now()-startT;
+        // 沉浸式：纵向滑动呼出/收起工具栏。规则（任务卡 08 §3.2）：竖向位移>=60px 且
+        // 竖向>2×横向；按住>=350ms（长按）不识别；下滑起点在屏幕顶部边缘 24px 内不响应
+        // （避开系统通知栏下拉）。"正在选字"的情况在上面 endCustomSelection 已经 return，
+        // 选区取消前的判断（RN 侧 selection 状态）由 App 层再把一道关。
+        if(Math.abs(dy)>=60 && Math.abs(dy)>Math.abs(dx)*2 && held<350){
+          if(dy>0 && (startY+screenTop)<24) return;
+          post({type:'standardVSwipe', dir: dy>0 ? 'down' : 'up'});
+          return;
+        }
         if(Math.abs(dx)>54 && Math.abs(dx)>Math.abs(dy)*1.45){ post({type:dx<0?'standardNext':'standardPrev'}); return; }
-        if(!moved && Date.now()-startT<420){
+        if(!moved && held<420){
           var w=window.innerWidth || document.documentElement.clientWidth;
           if(t.clientX < w*.14) { clearTokenSelection(); post({type:'standardPrev'}); return; }
           if(t.clientX > w*.86) { clearTokenSelection(); post({type:'standardNext'}); return; }
           clearTokenSelection();
-          post({type:'standardClearSelection'});
+          // 点屏幕中间 30%~70% 呼出工具栏；工具栏展开时点正文收起（由 RN 侧按当前状态决定）
+          var zone=(t.clientX>=w*.3 && t.clientX<=w*.7) ? 'center' : 'side';
+          post({type:'standardBodyTap', zone:zone});
         }
         } catch(err) { post({type:'standardSelectionError'}); }
       }, {passive:true});
@@ -672,10 +692,10 @@ function buildStandardPageHtml({
 </html>`;
 }
 
-function paginateStandardBlocks(blocks, fontSizePt, pageWidth, pageHeight) {
+function paginateStandardBlocks(blocks, fontSizePt, pageWidth, pageHeight, reservedHeight = 142) {
   const fontPx = Math.round(fontSizePt * 1.35);
   const usableWidth = Math.max(220, Number(pageWidth || 0) - 40);
-  const usableHeight = Math.max(360, Number(pageHeight || 0) - 142);
+  const usableHeight = Math.max(360, Number(pageHeight || 0) - reservedHeight);
   const estimatedLines = Math.max(9, Math.min(24, Math.floor(usableHeight / (fontPx * STANDARD_READING_LINE_HEIGHT))));
   const estimatedCharsPerLine = Math.max(9, Math.min(20, Math.floor(usableWidth / fontPx)));
   const pageBudget = Math.max(
@@ -959,6 +979,11 @@ function ReaderInner({
     ? READER_DEFAULT_MODE
     : (bookSource === 'imported' ? 'epub' : READER_DEFAULT_MODE);
   const [readerMode, setReaderMode] = useState(defaultReaderMode);
+  // 沉浸式阅读器（任务卡 08 §3.2）：先只在安卓的标准阅读启用；iOS 和原版 EPUB 保持旧壳，
+  // 等安卓验证完再对比移植（用户 9/20 决定"先做安卓，再移植苹果"）。
+  const immersive = Platform.OS === 'android' && readerMode === 'standard';
+  const [chromeOpen, setChromeOpen] = useState(false);
+  const pendingSeekRef = useRef(null); // 进度条跳到别的章节时，等那一章加载完再定位到页
   const [standardChapterIndex, setStandardChapterIndex] = useState(0);
   const [standardPageIndex, setStandardPageIndex] = useState(0);
   const [standardChapterText, setStandardChapterText] = useState(null);
@@ -1117,7 +1142,7 @@ function ReaderInner({
     setStandardChapterError('');
     const cacheMode = bookSource === 'imported' && Platform.OS === 'android' ? 'standard' : 'original';
     const memory = STANDARD_CHAPTER_MEMORY_CACHE.get(`${cacheMode}:${bookId}:${chapter.id}`);
-    setStandardChapterText(memory ? { ...memory, title: memory.title || chapter.title || '' } : null);
+    setStandardChapterText(memory ? { ...memory, title: memory.title || chapter.title || '', chapterId: chapter.id } : null);
     setStandardPageIndex(0);
     setCurrentSectionTitle(chapter.title || '');
     getCachedStandardChapterText(bookId, chapter.id, { includeBlocks: true, standard: bookSource === 'imported' && Platform.OS === 'android' })
@@ -1130,6 +1155,7 @@ function ReaderInner({
           title: data?.title || chapter.title || '',
           paragraphs: Array.isArray(data?.paragraphs) ? data.paragraphs : [],
           blocks,
+          chapterId: chapter.id,
         });
         if (pendingStandardPageIndex.current !== null) {
           setStandardPageIndex(pendingStandardPageIndex.current);
@@ -1899,16 +1925,55 @@ function ReaderInner({
   const bodyFont = BODY_FONT_OPTIONS.find((o) => o.key === bodyFontKey) || BODY_FONT_OPTIONS[0];
   const standardFontSize = Math.round(fontSizePt * 1.35);
   const standardLineHeight = Math.round(standardFontSize * STANDARD_READING_LINE_HEIGHT);
+  // 预留高度：旧壳沿用 142（顶栏+边距，历史上调出来的）；沉浸式下正文区 = 屏幕高 −
+  // 顶部安全区 − 底部信息条(44) − 底部安全区，再减 WebView 页内上下边距(12+8) 和一段安全余量
+  // （分页是按字数预算估算的，页内 overflow:hidden，估多了会把最后一行裁掉，所以要留余量）。
+  const paginationReserved = immersive
+    ? insets.top + READER_INFO_STRIP_HEIGHT + insets.bottom + 20 + 40
+    : 142;
   const standardPages = useMemo(
     () => paginateStandardBlocks(
       standardChapterText?.blocks || normalizeStandardBlocks(standardChapterText),
       fontSizePt,
       windowSize.width,
       windowSize.height,
+      paginationReserved,
     ),
-    [standardChapterText, fontSizePt, windowSize.width, windowSize.height],
+    [standardChapterText, fontSizePt, windowSize.width, windowSize.height, paginationReserved],
   );
   const standardPage = standardPages[Math.min(standardPageIndex, standardPages.length - 1)] || [];
+  // 整本书的阅读进度：(已读章数 + 本章内进度)/总章数，末章末页=100%。后端只有章节粒度，
+  // 各章长度不等，所以这是"按章节均分"的估算，不是按字数的精确进度。
+  const readingChapterCount = Math.max(1, readingChapters?.length || 1);
+  const standardProgress = Math.min(1, Math.max(0,
+    (standardChapterIndex + (standardPages.length
+      ? (Math.min(standardPageIndex, standardPages.length - 1) + 1) / standardPages.length
+      : 0)) / readingChapterCount));
+  const standardPercent = Math.round(standardProgress * 100);
+
+  function seekStandardProgress(p) {
+    if (!readerInteractionReady) return;
+    const target = Math.min(readingChapterCount - 0.0001, Math.max(0, p * readingChapterCount));
+    const chapterIndex = Math.floor(target);
+    const frac = target - chapterIndex;
+    if (chapterIndex === standardChapterIndex && standardPages.length) {
+      setStandardPageIndex(Math.round(frac * (standardPages.length - 1)));
+      return;
+    }
+    pendingSeekRef.current = { chapterIndex, frac };
+    setStandardChapterIndex(chapterIndex);
+    setStandardPageIndex(0);
+  }
+
+  // 跳到别的章节后，等那一章的正文和分页都就绪，再落到目标页
+  useEffect(() => {
+    const pending = pendingSeekRef.current;
+    if (!pending || standardChapterIndex !== pending.chapterIndex) return;
+    const id = readingChapters?.[pending.chapterIndex]?.id;
+    if (!standardChapterText || standardChapterText.chapterId !== id || !standardPages.length) return;
+    pendingSeekRef.current = null;
+    setStandardPageIndex(Math.round(pending.frac * (standardPages.length - 1)));
+  }, [standardChapterIndex, standardChapterText, standardPages, readingChapters]);
   const standardChapterId = readingChapters?.[standardChapterIndex]?.id || '';
   // 安卓 file 方式：当前字体的本地路径；还没准备好时 standardFontPending=true，
   // 先显示加载页（首次一般不到 1 秒，之后有进程内缓存），避免先闪一下系统字体。
@@ -1928,6 +1993,7 @@ function ReaderInner({
     highlights: standardSavedHighlights,
     chapterId: standardChapterId,
     androidSelectionGuard: Platform.OS === 'android',
+    screenTopOffset: immersive ? insets.top : 0,
   }), [
     standardPage,
     bodyFont,
@@ -1940,6 +2006,8 @@ function ReaderInner({
     uiTheme.accent,
     standardSavedHighlights,
     standardChapterId,
+    immersive,
+    insets.top,
   ]);
   const visibleChapterTitle = readerMode === 'standard'
     ? (standardChapterText?.title || readingChapters?.[standardChapterIndex]?.title || bookTitle)
@@ -1987,6 +2055,10 @@ function ReaderInner({
   }, [readerMode, readerInteractionReady, standardChapterIndex, standardPageIndex, readingChapters, bookId]);
 
   function closeReaderPanels() {
+    if (immersive && chromeOpen) {
+      setChromeOpen(false);
+      return true;
+    }
     if (!readerPanelOpen) return false;
     setShowFontSizePanel(false);
     setShowThemePanel(false);
@@ -2060,6 +2132,20 @@ function ReaderInner({
       }, 50);
       return;
     }
+    if (data?.type === 'standardBodyTap') {
+      // 旧脚本在这里发的是 standardClearSelection；新脚本把"点了哪个区域"一起带上来。
+      clearStandardSelection();
+      if (!immersive) return;
+      if (chromeOpen) setChromeOpen(false);
+      else if (data.zone === 'center' && readerInteractionReady) setChromeOpen(true);
+      return;
+    }
+    if (data?.type === 'standardVSwipe') {
+      // 正在选字/选区存在期间不识别上下滑（任务卡规则 2）；脚本侧已挡住长按，这里挡选区
+      if (!immersive || !readerInteractionReady || selection) return;
+      setChromeOpen(data.dir === 'down');
+      return;
+    }
     if (data?.type === 'standardFontFailed') {
       // 页面里的自检发现 file:// 字体没加载出来（比如某些机型/更新版 WebView 对本地
       // 文件的限制不同）：本次进程内不再尝试 file 方式，降级为只内联当前一个子集字体。
@@ -2086,10 +2172,25 @@ function ReaderInner({
     }
   }
 
+  function openListen() {
+    // 与旧顶栏里的听书按钮同一套逻辑：把"翻到哪了"换算成 0~1 的比例传给听书页
+    const standardFraction = standardPages.length > 1
+      ? Math.max(0, Math.min(1, standardPageIndex / standardPages.length))
+      : 0;
+    navigation.navigate('Listen', {
+      bookId, bookTitle, author,
+      initialChapterTitle: readingChapters?.[standardChapterIndex]?.title,
+      startFraction: standardFraction,
+    });
+  }
+
   const activeSelection = selection;
 
   return (
-    <SafeAreaView edges={['bottom', 'left', 'right']} style={[styles.safe, { backgroundColor: THEMES[themeName].body.background }]}>
+    <SafeAreaView edges={immersive ? ['left', 'right'] : ['bottom', 'left', 'right']} style={[styles.safe, { backgroundColor: THEMES[themeName].body.background }]}>
+      {immersive ? <StatusBar hidden animated /> : null}
+      {!immersive && (
+      <>
       <View style={[styles.header, { backgroundColor: uiTheme.accent, paddingTop: insets.top + 10 }]}>
         <TouchableOpacity onPress={() => navigation.goBack()} style={styles.headerBtn}>
           <Text style={[styles.headerBtnText, { color: uiTheme.textOnAccent }]}>‹ 书架</Text>
@@ -2253,6 +2354,9 @@ function ReaderInner({
         </View>
       )}
 
+      </>
+      )}
+
       <Modal visible={showToc} animationType="slide" onRequestClose={() => setShowToc(false)}>
         <SafeAreaView edges={['bottom', 'left', 'right']} style={[styles.tocSafe, { backgroundColor: uiTheme.bg }]} {...tocPanResponder.panHandlers}>
           <View style={[styles.tocHeader, { borderBottomColor: uiTheme.cardBorder, paddingTop: insets.top + 14 }]}>
@@ -2317,7 +2421,7 @@ function ReaderInner({
         </SafeAreaView>
       </Modal>
 
-      <View style={styles.readerBody}>
+      <View style={[styles.readerBody, immersive && { paddingTop: insets.top, paddingBottom: READER_INFO_STRIP_HEIGHT + insets.bottom }]}>
         {readerMode === 'standard' ? (
           <View style={[styles.standardReader, { backgroundColor: THEMES[themeName].body.background }]}>
             {standardChapterError ? (
@@ -2419,7 +2523,7 @@ function ReaderInner({
       </View>
 
       {!!activeSelection && readerInteractionReady && (
-        <View style={[styles.selectionBar, { backgroundColor: uiTheme.text, borderRadius: uiTheme.radius }]}>
+        <View style={[styles.selectionBar, { backgroundColor: uiTheme.text, borderRadius: uiTheme.radius }, immersive && { bottom: READER_INFO_STRIP_HEIGHT + insets.bottom + 8 }]}>
           <Text style={[styles.selectionBarText, { color: uiTheme.bg }]} numberOfLines={1}>“{activeSelection.text}”</Text>
           <View style={styles.selectionBarActions}>
             <TouchableOpacity
@@ -2452,6 +2556,41 @@ function ReaderInner({
           </View>
         </View>
       )}
+
+      {immersive ? (
+        <ReaderChrome
+          open={chromeOpen}
+          insets={insets}
+          readerTheme={themeName}
+          bookTitle={bookTitle}
+          chapterTitle={visibleChapterTitle}
+          percent={standardPercent}
+          progress={standardProgress}
+          onSeek={seekStandardProgress}
+          fontSize={fontSizePt}
+          onFontSize={(v) => { if (readerInteractionReady) setFontSizePt(v); }}
+          fonts={BODY_FONT_OPTIONS.map((o) => ({ key: o.key, label: o.label, previewFamily: o.previewFamily }))}
+          fontKey={bodyFontKey}
+          onFont={selectBodyFont}
+          themes={IMMERSIVE_THEME_CHOICES}
+          onTheme={selectTheme}
+          onBack={() => navigation.goBack()}
+          onToc={() => { setChromeOpen(false); setShowToc(true); }}
+          onListen={() => { setChromeOpen(false); openListen(); }}
+          onAsk={() => { setChromeOpen(false); openChat(); }}
+          enabled={readerInteractionReady}
+        />
+      ) : null}
+      {immersive && !readerInteractionReady ? (
+        // 加载中/出错时正文区不可点，工具栏也调不出来——给一个常驻的返回按钮，别把人困在里面
+        <TouchableOpacity
+          style={{ position: 'absolute', left: 8, top: insets.top + 8, zIndex: 6, width: 40, height: 40, alignItems: 'center', justifyContent: 'center' }}
+          onPress={() => navigation.goBack()}
+          accessibilityLabel="返回"
+        >
+          <Text style={{ fontSize: 28, lineHeight: 30, color: THEMES[themeName].body.color }}>‹</Text>
+        </TouchableOpacity>
+      ) : null}
 
       <BottomSheetModal
         ref={chatSheetRef}

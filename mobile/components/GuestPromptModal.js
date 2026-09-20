@@ -1,6 +1,7 @@
 import React from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Modal } from 'react-native';
 import { IconX } from '@tabler/icons-react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '../theme';
 import { useAuthGate, GUEST_PROMPT_REASONS } from '../lib/authGate';
 import LoginScreen from '../screens/LoginScreen';
@@ -13,20 +14,21 @@ import LoginScreen from '../screens/LoginScreen';
 // 徽标+圆形描边关闭按钮），不改交互结构本身。
 export default function GuestPromptModal() {
   const theme = useTheme();
+  const insets = useSafeAreaInsets();
   const { reason, dismiss, handleLoggedIn } = useAuthGate();
 
   return (
     <Modal visible={!!reason} animationType="slide" onRequestClose={dismiss} presentationStyle="pageSheet">
       <View style={[styles.wrap, { backgroundColor: theme.bg }]}>
         <TouchableOpacity
-          style={[styles.closeBtn, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}
+          style={[styles.closeBtn, { top: 16 + insets.top, backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}
           onPress={dismiss}
           hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
         >
           <IconX color={theme.textMuted} size={18} strokeWidth={2} />
         </TouchableOpacity>
         {!!reason && (
-          <View style={styles.reasonBlock}>
+          <View style={[styles.reasonBlock, { paddingTop: 56 + insets.top }]}>
             <View style={[styles.badge, { backgroundColor: theme.accentSoft, borderRadius: theme.radius }]}>
               <Text style={[styles.badgeText, { color: theme.accent }]}>登录后可用</Text>
             </View>
