@@ -16,6 +16,10 @@
         "buildType": "apk"
       }
     },
+    "canary": {
+      "extends": "preview",
+      "channel": "canary"
+    },
     "production": {
       "autoIncrement": true,
       "channel": "production"
