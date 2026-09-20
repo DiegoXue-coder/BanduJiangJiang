@@ -1011,8 +1011,12 @@ function ReaderInner({
   const standardWebViewRef = useRef(null);
   const standardPagerRef = standardWebViewRef;
   // 翻页动画进行中又点了一下：记下来，动画一结束（页码变了）就接着翻，
-  // 不然连点会"吞"掉点击。只记 1 次（再多就是乱点了），方向 +1 下一页 / -1 上一页。
-  const queuedTurnRef = useRef(0);
+  // 不然连点会"吞"掉点击。同方向最多攒 3 下（再多就是乱点了），方向变了就重新计。
+  const queuedTurnRef = useRef({ dir: 0, n: 0 });
+  const queueTurn = (dir) => {
+    const q = queuedTurnRef.current;
+    queuedTurnRef.current = q.dir === dir ? { dir, n: Math.min(3, q.n + 1) } : { dir, n: 1 };
+  };
   // 往前翻进上一章时，要直接落在上一章的最后一页（不是第一页）
   const landingPageRef = useRef(null);
   // 相邻章节预读完成后 +1，触发重新渲染，让翻页容器拿到上一页/下一页
@@ -2181,8 +2185,7 @@ function ReaderInner({
   // 容器那一侧还没有页面（相邻章节没读进来）时，退回原来的"直接跳转"，功能不打折。
   function goStandardPrev() {
     if (!readerInteractionReady) return;
-    if (standardPagerRef.current?.isBusy()) { queuedTurnRef.current = -1; return; }
-    queuedTurnRef.current = 0;
+    if (standardPagerRef.current?.isBusy()) { queueTurn(-1); return; }
     if (closeReaderPanels()) return;
     clearStandardSelection();
     if (standardPageIndex > 0) {
@@ -2206,13 +2209,14 @@ function ReaderInner({
         }
       };
       if (!standardPagerRef.current?.turn(-1, commit)) commit();
+      return;
     }
+    queuedTurnRef.current = { dir: 0, n: 0 }; // 已经是第一页，剩下的排队作废
   }
 
   function goStandardNext() {
     if (!readerInteractionReady) return;
-    if (standardPagerRef.current?.isBusy()) { queuedTurnRef.current = 1; return; }
-    queuedTurnRef.current = 0;
+    if (standardPagerRef.current?.isBusy()) { queueTurn(1); return; }
     if (closeReaderPanels()) return;
     clearStandardSelection();
     if (standardPageIndex < standardPages.length - 1) {
@@ -2226,15 +2230,18 @@ function ReaderInner({
         setStandardPageIndex(0);
       };
       if (!standardPagerRef.current?.turn(1, commit)) commit();
+      return;
     }
+    queuedTurnRef.current = { dir: 0, n: 0 }; // 已经是最后一页，剩下的排队作废
   }
 
   // 页码/章节变了 = 上一次翻页已提交：如果动画期间有排队的点击，接着翻
   useEffect(() => {
     const queued = queuedTurnRef.current;
-    if (!queued) return;
-    queuedTurnRef.current = 0;
-    if (queued > 0) goStandardNext(); else goStandardPrev();
+    if (!queued.n) return;
+    // 取出一下来翻，剩下的留在队列里，等这一下提交后（本 effect 再次触发）继续
+    queuedTurnRef.current = { dir: queued.dir, n: queued.n - 1 };
+    if (queued.dir > 0) goStandardNext(); else goStandardPrev();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [standardPageIndex, standardChapterIndex]);
 
@@ -3054,6 +3061,8 @@ const styles = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     shadowColor: '#000', shadowOpacity: 0.2,
     shadowOffset: { width: 0, height: 2 }, shadowRadius: 6, elevation: 4,
+    // 翻页容器上线后，这条在真机模拟器上被页面盖住了：显式给一个高层级
+    zIndex: 60,
   },
   selectionBarText: { flex: 1, fontSize: 13, marginRight: 10 },
   selectionBarActions: { flexDirection: 'row', alignItems: 'center', gap: 8 },
