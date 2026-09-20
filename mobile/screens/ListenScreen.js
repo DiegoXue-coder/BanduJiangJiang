@@ -6,7 +6,7 @@
 // 简单的"一段一段顺序加载播放"，代码简单很多，也不会带上那套至今还没
 // 排查清楚的乱序/丢句问题（阶段十七开工前置条件那次真机没能复现，日志
 // 还留着，详见04-开发进度记录.md）。
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, TextInput,
   ActivityIndicator, ScrollView, Platform, KeyboardAvoidingView, Switch,
@@ -16,6 +16,7 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { Audio, InterruptionModeIOS, InterruptionModeAndroid } from 'expo-av';
 import * as FileSystem from 'expo-file-system/legacy';
 import Slider from '@react-native-community/slider';
+import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import {
   IconChevronLeft, IconList, IconVolume, IconBolt,
   IconPlayerTrackPrevFilled, IconPlayerTrackNextFilled,
@@ -546,6 +547,7 @@ export default function ListenScreen({ route, navigation }) {
   const hfListenTimerRef = useRef(null); // 兜底的硬性超时，防止metering回调异常时无限录下去
   const hfListenResolveRef = useRef(null); // 让cancelHandsFreeTurn能立刻唤醒hfRecordUntilSilence里还在等待的Promise，不用干等到超时才发现被取消了
   const voiceHoldActiveRef = useRef(false);
+  const micGestureHandlersRef = useRef({ grant: null, release: null, cancel: null });
   const hfAbortRef = useRef(null);
   const hfReplyInterruptingRef = useRef(false);
   const hfTimingRef = useRef(null);
@@ -1124,7 +1126,7 @@ export default function ListenScreen({ route, navigation }) {
       if (perm !== 'granted') return null;
       await enableRecordingAudioMode();
       const recording = new Audio.Recording();
-      const manualHoldMode = MANUAL_HOLD_TO_TALK && voiceHoldActiveRef.current;
+      const manualHoldMode = MANUAL_HOLD_TO_TALK;
       let speechEverDetected = false;
       let silenceMs = 0;
       let elapsedMs = 0;
@@ -1193,6 +1195,7 @@ export default function ListenScreen({ route, navigation }) {
       if (!rec) return null;
       await rec.stopAndUnloadAsync();
       const wallElapsedMs = recordingStartedAt ? Date.now() - recordingStartedAt : elapsedMs;
+      setHfTimingMeta({ recordingStopReason: finishReason || 'unknown', recordingMode: manualHoldMode ? 'manual_hold' : 'vad', recordingElapsedMs: wallElapsedMs });
       markHfTiming(`录音结束 reason=${finishReason || 'unknown'} mode=${manualHoldMode ? 'manual_hold' : 'vad'} speech=${speechEverDetected} elapsed=${wallElapsedMs}ms`, 'endpoint_end');
       console.log(`[免提诊断] 录音结束 reason=${finishReason || 'unknown'} mode=${manualHoldMode ? 'manual_hold' : 'vad'} speech=${speechEverDetected} meterElapsed=${elapsedMs}ms wallElapsed=${wallElapsedMs}ms`);
       const uri = rec.getURI();
@@ -1585,11 +1588,11 @@ export default function ListenScreen({ route, navigation }) {
     setHfText('');
   }
 
-  function handleVoiceModeMicResponderGrant() {
+  function handleVoiceModeMicGestureStart() {
     if (MANUAL_HOLD_TO_TALK) {
       if (hfStage === 'listening' || hfStage === 'thinking') return;
       voiceHoldActiveRef.current = true;
-      console.log(`[免提诊断] mic responderGrant stage=${hfStage || 'idle'} muted=${handsFreeMuted} phase=${phase}`);
+      console.log(`[免提诊断] mic gestureStart stage=${hfStage || 'idle'} muted=${handsFreeMuted} phase=${phase}`);
       if (hfStage === 'replying') {
         setHandsFreeMuted(false);
         startHandsFreeTurn(true);
@@ -1604,18 +1607,33 @@ export default function ListenScreen({ route, navigation }) {
     setHandsFreeMuted((v) => !v);
   }
 
-  function handleVoiceModeMicResponderRelease() {
+  function handleVoiceModeMicGestureEnd(reason = 'manual_release') {
     if (!MANUAL_HOLD_TO_TALK) return;
     if (!voiceHoldActiveRef.current && hfStage !== 'listening') return;
     voiceHoldActiveRef.current = false;
-    console.log(`[免提诊断] mic responderRelease stage=${hfStage || 'idle'} resolve=${!!hfListenResolveRef.current}`);
+    console.log(`[免提诊断] mic gestureEnd reason=${reason} stage=${hfStage || 'idle'} resolve=${!!hfListenResolveRef.current}`);
     setHandsFreeMuted(true);
-    hfListenResolveRef.current?.('manual_release');
+    hfListenResolveRef.current?.(reason);
   }
 
-  function handleVoiceModeMicResponderTerminate() {
-    console.log(`[免提诊断] mic responderTerminate stage=${hfStage || 'idle'} resolve=${!!hfListenResolveRef.current}`);
-  }
+  micGestureHandlersRef.current = {
+    grant: handleVoiceModeMicGestureStart,
+    release: () => handleVoiceModeMicGestureEnd('manual_release'),
+    cancel: () => handleVoiceModeMicGestureEnd('manual_cancelled'),
+  };
+  const micHoldGesture = useMemo(() => Gesture.LongPress()
+    .minDuration(180)
+    .maxDistance(1000)
+    .shouldCancelWhenOutside(false)
+    .runOnJS(true)
+    .onStart(() => micGestureHandlersRef.current.grant?.())
+    .onEnd((_event, success) => {
+      if (success) micGestureHandlersRef.current.release?.();
+      else micGestureHandlersRef.current.cancel?.();
+    })
+    .onFinalize((_event, success) => {
+      if (!success) micGestureHandlersRef.current.cancel?.();
+    }), []);
 
   function handleVoiceModeStatusPress() {
     // 2026-09-06安卓P0：语音收音只能由麦克风长按触发，状态区轻点不再打断。
@@ -2195,25 +2213,22 @@ export default function ListenScreen({ route, navigation }) {
                         )}
                       </TouchableOpacity>
                       <View style={styles.voiceModeActions}>
-                        <View
-                          style={[
-                            styles.voiceModeRoundBtn,
-                            !handsFreeMuted && styles.voiceModeMicBtnActive,
-                            handsFreeMuted && styles.voiceModeMicBtnMuted,
-                          ]}
-                          onStartShouldSetResponder={() => true}
-                          onMoveShouldSetResponder={() => true}
-                          onResponderGrant={handleVoiceModeMicResponderGrant}
-                          onResponderRelease={handleVoiceModeMicResponderRelease}
-                          onResponderTerminate={handleVoiceModeMicResponderTerminate}
-                          accessible
-                          accessibilityRole="button"
-                          accessibilityLabel={manualAskLabel}
-                        >
-                          {handsFreeMuted
-                            ? <IconMicrophoneOff color={EMBER.paperDim} size={28} strokeWidth={2.2} />
-                            : <IconMicrophone color={EMBER.ink} size={30} strokeWidth={2.2} />}
-                        </View>
+                        <GestureDetector gesture={micHoldGesture}>
+                          <View
+                            style={[
+                              styles.voiceModeRoundBtn,
+                              !handsFreeMuted && styles.voiceModeMicBtnActive,
+                              handsFreeMuted && styles.voiceModeMicBtnMuted,
+                            ]}
+                            accessible
+                            accessibilityRole="button"
+                            accessibilityLabel={manualAskLabel}
+                          >
+                            {handsFreeMuted
+                              ? <IconMicrophoneOff color={EMBER.paperDim} size={28} strokeWidth={2.2} />
+                              : <IconMicrophone color={EMBER.ink} size={30} strokeWidth={2.2} />}
+                          </View>
+                        </GestureDetector>
                         <TouchableOpacity
                           style={[styles.voiceModeRoundBtn, styles.voiceModeExitBtn]}
                           onPress={() => setHandsFreeEnabled(false)}
