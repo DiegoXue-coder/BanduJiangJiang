@@ -1010,6 +1010,9 @@ function ReaderInner({
   // 现在指向翻页容器（StandardPager）；它对外提供 injectJavaScript，只作用于"当前页"
   const standardWebViewRef = useRef(null);
   const standardPagerRef = standardWebViewRef;
+  // 翻页动画进行中又点了一下：记下来，动画一结束（页码变了）就接着翻，
+  // 不然连点会"吞"掉点击。只记 1 次（再多就是乱点了），方向 +1 下一页 / -1 上一页。
+  const queuedTurnRef = useRef(0);
   // 往前翻进上一章时，要直接落在上一章的最后一页（不是第一页）
   const landingPageRef = useRef(null);
   // 相邻章节预读完成后 +1，触发重新渲染，让翻页容器拿到上一页/下一页
@@ -2178,7 +2181,8 @@ function ReaderInner({
   // 容器那一侧还没有页面（相邻章节没读进来）时，退回原来的"直接跳转"，功能不打折。
   function goStandardPrev() {
     if (!readerInteractionReady) return;
-    if (standardPagerRef.current?.isBusy()) return;
+    if (standardPagerRef.current?.isBusy()) { queuedTurnRef.current = -1; return; }
+    queuedTurnRef.current = 0;
     if (closeReaderPanels()) return;
     clearStandardSelection();
     if (standardPageIndex > 0) {
@@ -2207,7 +2211,8 @@ function ReaderInner({
 
   function goStandardNext() {
     if (!readerInteractionReady) return;
-    if (standardPagerRef.current?.isBusy()) return;
+    if (standardPagerRef.current?.isBusy()) { queuedTurnRef.current = 1; return; }
+    queuedTurnRef.current = 0;
     if (closeReaderPanels()) return;
     clearStandardSelection();
     if (standardPageIndex < standardPages.length - 1) {
@@ -2223,6 +2228,15 @@ function ReaderInner({
       if (!standardPagerRef.current?.turn(1, commit)) commit();
     }
   }
+
+  // 页码/章节变了 = 上一次翻页已提交：如果动画期间有排队的点击，接着翻
+  useEffect(() => {
+    const queued = queuedTurnRef.current;
+    if (!queued) return;
+    queuedTurnRef.current = 0;
+    if (queued > 0) goStandardNext(); else goStandardPrev();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [standardPageIndex, standardChapterIndex]);
 
   function handleStandardWebViewMessage(event) {
     if (!readerInteractionReady) return;
