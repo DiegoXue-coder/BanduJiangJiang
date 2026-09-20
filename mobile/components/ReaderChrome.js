@@ -12,13 +12,20 @@
 //   .themes 圆点 24px 边 2px rgba(255,255,255,.5)，选中边 #fff
 //   .hint 高 44、左右 26、12px、字色随阅读主题；呼出时淡出
 //   浮层动画 ≈250ms，尊重系统"减少动态效果"。
+//
+// 【用户反馈后的调整】样板的底部面板把 进度/字号/字体/主题 一次性全摊开，占高太多。
+// 用户拿其他阅读器对比后要求"收敛"：呼出后底部只有一排图标（目录/进度/主题/字体），
+// 点哪个才在上面展开对应的一小块（一次只开一个）；顶栏也收薄、目录挪到底部图标里。
+// 玻璃配色、按钮/滑块/圆点的具体数值仍沿用样板；变的是"信息层级"，不是视觉语言。
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   View, Text, TouchableOpacity, StyleSheet, Animated, Easing, AccessibilityInfo,
 } from 'react-native';
 import Slider from '@react-native-community/slider';
 import Svg, { Rect } from 'react-native-svg';
-import { IconChevronLeft, IconList, IconHeadphones, IconMessageCircle } from '@tabler/icons-react-native';
+import {
+  IconChevronLeft, IconList, IconHeadphones, IconMessageCircle, IconProgress, IconBrightness, IconTextSize,
+} from '@tabler/icons-react-native';
 import { getBatteryModule, getBlurView } from '../lib/nativeCaps';
 
 const GLASS_BG = 'rgba(103,84,66,0.75)';
@@ -93,6 +100,22 @@ function BatteryIcon({ level, color }) {
   );
 }
 
+// 底部图标按钮：图标 + 一行小字（小字帮不熟悉的人认图标）；当前展开的那个高亮
+function BarButton({ icon, label, active, onPress, enabled }) {
+  return (
+    <TouchableOpacity
+      style={[styles.barBtn, active && styles.barBtnOn, !enabled && styles.disabled]}
+      disabled={!enabled}
+      onPress={onPress}
+      accessibilityLabel={label}
+      accessibilityState={{ selected: active }}
+    >
+      {icon}
+      <Text style={styles.barLabel}>{label}</Text>
+    </TouchableOpacity>
+  );
+}
+
 // 玻璃底：能真模糊就模糊，不能就只用半透明底色（"只靠半透明也好看"的降级）
 function GlassBackground() {
   const BlurView = getBlurView();
@@ -139,6 +162,9 @@ export default function ReaderChrome({
   const anim = useRef(new Animated.Value(open ? 1 : 0)).current;
   const [topH, setTopH] = useState(120);
   const [bottomH, setBottomH] = useState(300);
+  // 二级面板：null | 'progress' | 'theme' | 'font'，一次只开一个；工具栏收起时复位
+  const [panel, setPanel] = useState(null);
+  useEffect(() => { if (!open) setPanel(null); }, [open]);
   const clock = useClock();
   const battery = useBatteryLevel();
   const muted = MUTED_BY_THEME[readerTheme] || MUTED_BY_THEME.paper;
@@ -179,11 +205,11 @@ export default function ReaderChrome({
         <Text style={[styles.stripRight, { color: muted }]}>{percent}%</Text>
       </Animated.View>
 
-      {/* 玻璃顶栏：返回、书名、目录（另保留 听书/问AI，避免这两个入口消失） */}
+      {/* 玻璃顶栏（收薄）：返回、书名、听书、问AI。目录挪到底部图标栏。 */}
       <Animated.View
         pointerEvents={open ? 'auto' : 'none'}
         onLayout={(e) => setTopH(e.nativeEvent.layout.height)}
-        style={[styles.glass, styles.top, { paddingTop: 14 + insets.top, transform: [{ translateY: topTranslate }] }]}
+        style={[styles.glass, styles.top, { paddingTop: 6 + insets.top, transform: [{ translateY: topTranslate }] }]}
       >
         <GlassBackground />
         <TouchableOpacity style={styles.ib} onPress={onBack} accessibilityLabel="返回">
@@ -196,84 +222,111 @@ export default function ReaderChrome({
         <TouchableOpacity style={[styles.ib, !enabled && styles.disabled]} disabled={!enabled} onPress={onAsk} accessibilityLabel="问AI">
           <IconMessageCircle color="#fff" size={22} strokeWidth={2} />
         </TouchableOpacity>
-        <TouchableOpacity style={[styles.ib, !enabled && styles.disabled]} disabled={!enabled} onPress={onToc} accessibilityLabel="目录">
-          <IconList color="#fff" size={22} strokeWidth={2} />
-        </TouchableOpacity>
       </Animated.View>
 
-      {/* 玻璃底部面板：进度、字号、字体、主题 */}
+      {/* 玻璃底部：一排图标 + 点开才出现的二级小面板（一次只开一个） */}
       <Animated.View
         pointerEvents={open ? 'auto' : 'none'}
         onLayout={(e) => setBottomH(e.nativeEvent.layout.height)}
-        style={[styles.glass, styles.bottom, { paddingBottom: 20 + insets.bottom, transform: [{ translateY: bottomTranslate }] }]}
+        style={[styles.glass, styles.bottom, { transform: [{ translateY: bottomTranslate }] }]}
       >
         <GlassBackground />
-        <View style={styles.prow}>
-          <Text style={styles.lab}>进度</Text>
-          <Slider
-            style={styles.slider}
-            minimumValue={0}
-            maximumValue={1000}
-            step={1}
-            value={Math.round(progress * 1000)}
-            disabled={!enabled}
-            onValueChange={(v) => setDragging(v / 1000)}
-            onSlidingComplete={(v) => { setDragging(null); onSeek && onSeek(v / 1000); }}
-            {...sliderProps}
-          />
-          <Text style={styles.val}>{shownPercent}%</Text>
-        </View>
 
-        <View style={styles.prow}>
-          <Text style={styles.aS}>A</Text>
-          <Slider
-            style={styles.slider}
-            minimumValue={12}
-            maximumValue={28}
-            step={1}
-            value={fontSize}
-            disabled={!enabled}
-            onSlidingComplete={(v) => onFontSize && onFontSize(Math.round(v))}
-            {...sliderProps}
-          />
-          <Text style={styles.aL}>A</Text>
-          <Text style={styles.val}>{fontSize}</Text>
-        </View>
+        {panel === 'progress' ? (
+          <View style={[styles.subPanel, styles.prow]}>
+            <Text style={styles.lab}>进度</Text>
+            <Slider
+              style={styles.slider}
+              minimumValue={0}
+              maximumValue={1000}
+              step={1}
+              value={Math.round(progress * 1000)}
+              disabled={!enabled}
+              onValueChange={(v) => setDragging(v / 1000)}
+              onSlidingComplete={(v) => { setDragging(null); onSeek && onSeek(v / 1000); }}
+              {...sliderProps}
+            />
+            <Text style={styles.val}>{shownPercent}%</Text>
+          </View>
+        ) : null}
 
-        <View style={styles.seg}>
-          {fonts.map((f) => {
-            const on = f.key === fontKey;
-            return (
-              <TouchableOpacity
-                key={f.key}
+        {panel === 'font' ? (
+          <View style={[styles.subPanel, { gap: 12 }]}>
+            <View style={styles.prow}>
+              <Text style={styles.aS}>A</Text>
+              <Slider
+                style={styles.slider}
+                minimumValue={12}
+                maximumValue={28}
+                step={1}
+                value={fontSize}
                 disabled={!enabled}
-                style={[styles.segBtn, on && styles.segBtnOn]}
-                onPress={() => onFont && onFont(f.key)}
-                accessibilityState={{ selected: on }}
-              >
-                <Text style={[styles.segText, { fontFamily: f.previewFamily }, on && styles.segTextOn]}>{f.label}</Text>
-              </TouchableOpacity>
-            );
-          })}
-        </View>
+                onSlidingComplete={(v) => onFontSize && onFontSize(Math.round(v))}
+                {...sliderProps}
+              />
+              <Text style={styles.aL}>A</Text>
+              <Text style={styles.val}>{fontSize}</Text>
+            </View>
+            <View style={styles.seg}>
+              {fonts.map((f) => {
+                const on = f.key === fontKey;
+                return (
+                  <TouchableOpacity
+                    key={f.key}
+                    disabled={!enabled}
+                    style={[styles.segBtn, on && styles.segBtnOn]}
+                    onPress={() => onFont && onFont(f.key)}
+                    accessibilityState={{ selected: on }}
+                  >
+                    <Text style={[styles.segText, { fontFamily: f.previewFamily }, on && styles.segTextOn]}>{f.label}</Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          </View>
+        ) : null}
 
-        <View style={styles.themes}>
-          <Text style={styles.themeLab}>主题</Text>
-          {themes.map((t) => {
-            const on = t.key === readerTheme;
-            return (
-              <TouchableOpacity
-                key={t.key}
-                disabled={!enabled}
-                style={styles.sw}
-                onPress={() => onTheme && onTheme(t.key)}
-                accessibilityState={{ selected: on }}
-              >
-                <View style={[styles.swDot, { backgroundColor: t.swatch }, on && styles.swDotOn]} />
-                <Text style={styles.swText}>{t.label}</Text>
-              </TouchableOpacity>
-            );
-          })}
+        {panel === 'theme' ? (
+          <View style={[styles.subPanel, styles.themes]}>
+            {themes.map((t) => {
+              const on = t.key === readerTheme;
+              return (
+                <TouchableOpacity
+                  key={t.key}
+                  disabled={!enabled}
+                  style={styles.sw}
+                  onPress={() => onTheme && onTheme(t.key)}
+                  accessibilityState={{ selected: on }}
+                >
+                  <View style={[styles.swDot, { backgroundColor: t.swatch }, on && styles.swDotOn]} />
+                  <Text style={styles.swText}>{t.label}</Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        ) : null}
+
+        <View style={[styles.iconBar, { paddingBottom: 6 + insets.bottom }]}>
+          <BarButton
+            label="目录" enabled={enabled} active={false}
+            onPress={onToc}
+            icon={<IconList color="#fff" size={22} strokeWidth={1.9} />}
+          />
+          <BarButton
+            label="进度" enabled={enabled} active={panel === 'progress'}
+            onPress={() => setPanel((p) => (p === 'progress' ? null : 'progress'))}
+            icon={<IconProgress color="#fff" size={22} strokeWidth={1.9} />}
+          />
+          <BarButton
+            label="主题" enabled={enabled} active={panel === 'theme'}
+            onPress={() => setPanel((p) => (p === 'theme' ? null : 'theme'))}
+            icon={<IconBrightness color="#fff" size={22} strokeWidth={1.9} />}
+          />
+          <BarButton
+            label="字体" enabled={enabled} active={panel === 'font'}
+            onPress={() => setPanel((p) => (p === 'font' ? null : 'font'))}
+            icon={<IconTextSize color="#fff" size={22} strokeWidth={1.9} />}
+          />
         </View>
       </Animated.View>
     </>
@@ -282,15 +335,26 @@ export default function ReaderChrome({
 
 const styles = StyleSheet.create({
   glass: { position: 'absolute', left: 0, right: 0, zIndex: 5, overflow: 'hidden' },
+  // 顶栏收薄：上下留白 14/10 -> 6/6，按钮 40 -> 36
   top: {
-    top: 0, paddingBottom: 10, paddingHorizontal: 10, flexDirection: 'row', alignItems: 'center', gap: 6,
+    top: 0, paddingBottom: 6, paddingHorizontal: 10, flexDirection: 'row', alignItems: 'center', gap: 4,
     borderBottomWidth: 1, borderBottomColor: GLASS_LINE,
   },
   bottom: {
-    bottom: 0, paddingTop: 14, paddingHorizontal: 18, gap: 14,
-    borderTopWidth: 1, borderTopColor: GLASS_LINE,
+    bottom: 0, borderTopWidth: 1, borderTopColor: GLASS_LINE,
   },
-  ib: { width: 40, height: 40, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
+  ib: { width: 36, height: 36, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
+  // 二级小面板：贴在图标栏上方，与图标栏之间一条分隔线
+  subPanel: {
+    paddingTop: 14, paddingBottom: 14, paddingHorizontal: 18,
+    borderBottomWidth: 1, borderBottomColor: GLASS_LINE,
+  },
+  iconBar: { flexDirection: 'row', justifyContent: 'space-around', paddingTop: 6, paddingHorizontal: 8 },
+  barBtn: {
+    minWidth: 64, paddingVertical: 4, borderRadius: 10, alignItems: 'center', justifyContent: 'center', gap: 2,
+  },
+  barBtnOn: { backgroundColor: 'rgba(255,255,255,0.16)' },
+  barLabel: { color: WHITE_DIM, fontSize: 11 },
   disabled: { opacity: 0.4 },
   ttl: { flex: 1, textAlign: 'center', color: '#fff', fontSize: 15, fontWeight: '600', letterSpacing: 0.9 },
 
@@ -310,8 +374,7 @@ const styles = StyleSheet.create({
   segText: { color: '#fff', fontSize: 15 },
   segTextOn: { color: '#54402c', fontWeight: '600' },
 
-  themes: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 18 },
-  themeLab: { color: WHITE_DIM, fontSize: 13 },
+  themes: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around' },
   sw: { flexDirection: 'row', alignItems: 'center', gap: 8, padding: 2 },
   swDot: { width: 24, height: 24, borderRadius: 12, borderWidth: 2, borderColor: 'rgba(255,255,255,0.5)' },
   swDotOn: { borderColor: '#fff', shadowColor: '#fff', shadowOpacity: 0.35, shadowRadius: 0, elevation: 0 },
