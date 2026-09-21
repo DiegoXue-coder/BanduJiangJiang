@@ -361,7 +361,6 @@ export default function ListenScreen({ route, navigation }) {
   const [handsFreeEnabled, setHandsFreeEnabled] = useState(false);
   const [handsFreeMuted, setHandsFreeMuted] = useState(false);
   const [handsFreeStatus, setHandsFreeStatus] = useState('');
-  const [hfTimingSummary, setHfTimingSummary] = useState('');
   const [voiceMicError, setVoiceMicError] = useState('');
   // 免提"一轮对话"独立状态机：''表示没有正在进行的免提轮次（这时候ambient
   // 的VAD监听按老逻辑跑），非空表示正在经历"暂停朗读→听问题→AI思考→
@@ -528,7 +527,6 @@ export default function ListenScreen({ route, navigation }) {
     const summary = buildHfTimingSummary(timing);
     if (summary) {
       console.log(`[免提计时汇总] ${summary}`);
-      setHfTimingSummary(summary);
       uploadHfTiming(timing, summary, false);
     }
   }
@@ -539,7 +537,6 @@ export default function ListenScreen({ route, navigation }) {
     const summary = buildHfTimingSummary(timing);
     if (summary) {
       console.log(`[免提计时汇总] ${summary}`);
-      setHfTimingSummary(summary);
       uploadHfTiming(timing, summary, true);
     }
     hfTimingRef.current = null;
@@ -549,7 +546,6 @@ export default function ListenScreen({ route, navigation }) {
   function startHfTiming(reason) {
     const now = Date.now();
     hfTimingRef.current = { reason, startedAt: now, lastAt: now, marks: { start: now } };
-    setHfTimingSummary('');
     console.log(`[免提计时] ${reason} start`);
   }
 
@@ -1953,6 +1949,34 @@ export default function ListenScreen({ route, navigation }) {
       : MANUAL_HOLD_TO_TALK
         ? '松开后发送问题'
         : '正在听 · 你可以直接说话';
+  const transportControls = (
+    <View style={styles.transport}>
+      <TouchableOpacity
+        style={styles.transportIconBtn}
+        onPress={() => handleJumpToChapter(posRef.current.chapterIdx - 1)}
+        accessibilityLabel="上一章"
+      >
+        <IconPlayerTrackPrevFilled color={EMBER.paperDim} size={18} />
+      </TouchableOpacity>
+      <TouchableOpacity
+        style={styles.transportPlayBtn}
+        onPress={togglePlayPause}
+        disabled={phase !== 'playing'}
+        accessibilityLabel={isManuallyPaused ? '继续播放' : '暂停播放'}
+      >
+        {isManuallyPaused
+          ? <IconPlayerPlayFilled color={EMBER.emberBright} size={20} />
+          : <IconPlayerPauseFilled color={EMBER.emberBright} size={20} />}
+      </TouchableOpacity>
+      <TouchableOpacity
+        style={styles.transportIconBtn}
+        onPress={() => handleJumpToChapter(posRef.current.chapterIdx + 1)}
+        accessibilityLabel="下一章"
+      >
+        <IconPlayerTrackNextFilled color={EMBER.paperDim} size={18} />
+      </TouchableOpacity>
+    </View>
+  );
 
   return (
     <View style={styles.stage}>
@@ -2125,37 +2149,13 @@ export default function ListenScreen({ route, navigation }) {
                   />
                   <View style={styles.progressTimes}>
                     <Text style={styles.progressTimeText}>{progressLabel || '—'}</Text>
-                    <Text style={styles.progressTimeText}>{chapterTitle}</Text>
+                    <Text style={styles.progressTimeText}>{Math.round(segFraction * 100)}%</Text>
                   </View>
                 </View>
 
-                <View style={styles.transport}>
-                  <TouchableOpacity
-                    style={styles.transportIconBtn}
-                    onPress={() => handleJumpToChapter(posRef.current.chapterIdx - 1)}
-                  >
-                    <IconPlayerTrackPrevFilled color={EMBER.paperDim} size={20} />
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={styles.transportPlayBtn}
-                    onPress={togglePlayPause}
-                    disabled={phase !== 'playing'}
-                  >
-                    {isManuallyPaused
-                      ? <IconPlayerPlayFilled color={EMBER.emberBright} size={22} />
-                      : <IconPlayerPauseFilled color={EMBER.emberBright} size={22} />}
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={styles.transportIconBtn}
-                    onPress={() => handleJumpToChapter(posRef.current.chapterIdx + 1)}
-                  >
-                    <IconPlayerTrackNextFilled color={EMBER.paperDim} size={20} />
-                  </TouchableOpacity>
-                </View>
-
                 {inNarrating ? (
-                  handsFreeEnabled ? (
-                    <View style={styles.voiceModePanel}>
+                  <>
+                    {handsFreeEnabled && (
                       <TouchableOpacity
                         style={styles.voiceModeStatusButton}
                         onPress={handleVoiceModeStatusPress}
@@ -2167,12 +2167,15 @@ export default function ListenScreen({ route, navigation }) {
                           {hfStage !== 'replying' && <View style={styles.voiceModeDot} />}
                           {hfStage !== 'replying' && <View style={styles.voiceModeDot} />}
                         </View>
-                        <Text style={styles.voiceModeStatusText}>{voiceModeStatus}</Text>
-                        {!!hfTimingSummary && (
-                          <Text style={styles.voiceTimingText}>{hfTimingSummary}</Text>
-                        )}
+                        <Text style={styles.voiceModeStatusText} numberOfLines={1}>{voiceModeStatus}</Text>
                       </TouchableOpacity>
-                      <View style={styles.voiceModeActions}>
+                    )}
+
+                    <View style={styles.controlDock}>
+                      {transportControls}
+
+                      {handsFreeEnabled ? (
+                        <View style={styles.voiceModeActions}>
                         <GestureDetector gesture={micHoldGesture}>
                           <View
                             style={[
@@ -2185,8 +2188,8 @@ export default function ListenScreen({ route, navigation }) {
                             accessibilityLabel={manualAskLabel}
                           >
                             {handsFreeMuted
-                              ? <IconMicrophoneOff color={EMBER.paperDim} size={28} strokeWidth={2.2} />
-                              : <IconMicrophone color={EMBER.ink} size={30} strokeWidth={2.2} />}
+                              ? <IconMicrophoneOff color={EMBER.paperDim} size={23} strokeWidth={2.2} />
+                              : <IconMicrophone color={EMBER.ink} size={25} strokeWidth={2.2} />}
                           </View>
                         </GestureDetector>
                         <TouchableOpacity
@@ -2194,29 +2197,29 @@ export default function ListenScreen({ route, navigation }) {
                           onPress={() => { setHandsFreeEnabled(false); setVoiceMessages([]); voiceAutoScrollRef.current = true; }}
                           accessibilityLabel="退出语音模式"
                         >
-                          <IconX color="#ff2d2d" size={34} strokeWidth={2.7} />
+                          <IconX color="#ff5f57" size={24} strokeWidth={2.5} />
                         </TouchableOpacity>
-                      </View>
+                        </View>
+                      ) : (
+                        <TouchableOpacity
+                          style={styles.interruptBtnEl}
+                          onPress={() => {
+                            if (!requireAuth('ai')) return;
+                            setVoiceMessages([]);
+                            voiceAutoScrollRef.current = true;
+                            setHandsFreeMuted(true);
+                            setHandsFreeEnabled(true);
+                          }}
+                        >
+                          <IconMicrophone color={EMBER.ink} size={16} strokeWidth={2.2} />
+                          <Text style={styles.interruptBtnElText}>语音提问</Text>
+                        </TouchableOpacity>
+                      )}
                     </View>
-                  ) : (
-                    <View style={styles.askZone}>
-                      <TouchableOpacity
-                        style={styles.interruptBtnEl}
-                        onPress={() => {
-                          if (!requireAuth('ai')) return;
-                          setVoiceMessages([]);
-                          voiceAutoScrollRef.current = true;
-                          setHandsFreeMuted(true);
-                          setHandsFreeEnabled(true);
-                        }}
-                      >
-                        <IconMicrophone color={EMBER.ink} size={16} strokeWidth={2.2} />
-                        <Text style={styles.interruptBtnElText}>进入语音提问</Text>
-                      </TouchableOpacity>
-                    </View>
-                  )
+                  </>
                 ) : (
                   <>
+                    <View style={styles.conversationTransport}>{transportControls}</View>
                     {phase === 'paused' && (
                       <View style={styles.saveHighlightRow}>
                         <Switch value={saveAsHighlight} onValueChange={setSaveAsHighlight} />
@@ -2346,12 +2349,14 @@ const styles = StyleSheet.create({
   bookTitleText: { fontSize: 15, color: EMBER.paper, fontWeight: '600' },
   chapCrumbText: { fontSize: 10.5, color: EMBER.inkSoft, marginTop: 3, letterSpacing: 0.3 },
 
-  quickSettings: { flexDirection: 'row', justifyContent: 'center', gap: 8, paddingVertical: 8 },
+  quickSettings: {
+    flexDirection: 'row', alignSelf: 'center', justifyContent: 'center',
+    marginTop: 6, marginBottom: 4, paddingHorizontal: 4,
+    backgroundColor: 'rgba(255,255,255,0.035)', borderRadius: 8,
+  },
   settingChip: {
     flexDirection: 'row', alignItems: 'center', gap: 5,
-    borderWidth: 0.5, borderColor: EMBER.inkSoft, borderRadius: 999,
-    backgroundColor: 'rgba(255,255,255,0.05)', paddingHorizontal: 12, paddingVertical: 6,
-    maxWidth: 120,
+    paddingHorizontal: 11, paddingVertical: 7, maxWidth: 124,
   },
   settingChipText: { fontSize: 11, color: EMBER.paperDim },
 
@@ -2367,13 +2372,16 @@ const styles = StyleSheet.create({
   },
   captionZoneReading: { flex: 1 },
   captionZoneVoiceMode: { flex: 1, paddingTop: 18, paddingBottom: 18 },
-  captionZoneWithConversation: { flex: 0.42, maxHeight: 210, paddingTop: 12, paddingBottom: 12 },
+  captionZoneWithConversation: { flex: 0.46, maxHeight: 230, paddingTop: 12, paddingBottom: 14 },
   captionScroll: { flex: 1, alignSelf: 'stretch' },
   captionScrollContent: { flexGrow: 1, alignItems: 'center', justifyContent: 'center' },
   captionTextEl: { fontSize: 17, lineHeight: 27, textAlign: 'center', color: EMBER.paper },
   captionCountText: { fontSize: 10.5, color: EMBER.inkSoft, marginTop: 8, letterSpacing: 0.5 },
-  voiceConversationArea: { paddingHorizontal: 18, paddingBottom: 8 },
-  voiceConversationFilled: { flex: 0.58, minHeight: 0 },
+  voiceConversationArea: {
+    paddingHorizontal: 20, paddingTop: 8, paddingBottom: 4,
+    borderTopWidth: 0.5, borderTopColor: 'rgba(255,255,255,0.08)',
+  },
+  voiceConversationFilled: { flex: 0.54, minHeight: 0 },
   voiceConversationScroll: { flex: 1 },
   voiceConversationContent: { paddingVertical: 8, gap: 12 },
   voiceStageRow: { minHeight: 28, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
@@ -2408,17 +2416,22 @@ const styles = StyleSheet.create({
   },
   resumeBtnText: { fontSize: 14, color: EMBER.ink, fontWeight: '700' },
 
-  controls: { paddingHorizontal: 22, paddingTop: 6, paddingBottom: 22, gap: 14 },
-  controlsVoiceMode: { gap: 18, paddingBottom: 18 },
-  progress: { gap: 5 },
-  progressSlider: { width: '100%', height: 28 },
+  controls: {
+    paddingHorizontal: 20, paddingTop: 7, paddingBottom: 18, gap: 8,
+    borderTopWidth: 0.5, borderTopColor: 'rgba(255,255,255,0.07)',
+  },
+  controlsVoiceMode: { paddingBottom: 14 },
+  progress: { gap: 2 },
+  progressSlider: { width: '100%', height: 22 },
   progressTimes: { flexDirection: 'row', justifyContent: 'space-between' },
   progressTimeText: { fontSize: 10.5, color: EMBER.inkSoft, letterSpacing: 0.3, maxWidth: '55%' },
 
-  transport: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 28 },
-  transportIconBtn: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center' },
+  controlDock: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', minHeight: 58 },
+  conversationTransport: { alignItems: 'center', paddingVertical: 2 },
+  transport: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  transportIconBtn: { width: 38, height: 38, alignItems: 'center', justifyContent: 'center' },
   transportPlayBtn: {
-    width: 52, height: 52, borderRadius: 26,
+    width: 46, height: 46, borderRadius: 23,
     backgroundColor: 'rgba(226,150,58,0.14)', borderWidth: 1, borderColor: 'rgba(226,150,58,0.35)',
     alignItems: 'center', justifyContent: 'center',
   },
@@ -2426,28 +2439,32 @@ const styles = StyleSheet.create({
   askZone: { minHeight: 34, alignItems: 'center', justifyContent: 'center' },
   interruptBtnEl: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7,
-    backgroundColor: EMBER.ember, borderRadius: 999, paddingHorizontal: 30, paddingVertical: 12,
+    backgroundColor: EMBER.ember, borderRadius: 999, paddingHorizontal: 17, paddingVertical: 10,
   },
   interruptBtnElDisabled: { opacity: 0.62 },
   interruptBtnElText: { fontSize: 14, color: EMBER.ink, fontWeight: '600' },
-  voiceModePanel: { alignItems: 'center', gap: 14, paddingTop: 8 },
-  voiceModeStatusButton: { alignItems: 'center', justifyContent: 'center', gap: 9, paddingHorizontal: 16, paddingVertical: 3 },
-  voiceModeDots: { flexDirection: 'row', gap: 7, alignItems: 'center', justifyContent: 'center', minHeight: 16 },
+  voiceModeStatusButton: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+    minHeight: 24, paddingHorizontal: 12,
+  },
+  voiceModeDots: { flexDirection: 'row', gap: 4, alignItems: 'center', justifyContent: 'center', minHeight: 12 },
   voiceModeDotsStop: { gap: 0 },
-  voiceModeDot: { width: 11, height: 11, borderRadius: 5.5, backgroundColor: EMBER.inkSoft },
-  voiceModeStopDot: { width: 16, height: 16, borderRadius: 5, backgroundColor: EMBER.inkSoft },
+  voiceModeDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: EMBER.inkSoft },
+  voiceModeStopDot: { width: 10, height: 10, borderRadius: 3, backgroundColor: EMBER.inkSoft },
   voiceModeStatusText: { fontSize: 12.5, color: EMBER.inkSoft, textAlign: 'center', letterSpacing: 0.2 },
-  voiceTimingText: { fontSize: 10.5, color: EMBER.inkSoft, textAlign: 'center', lineHeight: 15, maxWidth: 310 },
-  voiceModeActions: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 46, marginTop: 2 },
+  voiceModeActions: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10 },
   voiceModeRoundBtn: {
-    width: 74, height: 74, borderRadius: 37, alignItems: 'center', justifyContent: 'center',
+    width: 58, height: 58, borderRadius: 29, alignItems: 'center', justifyContent: 'center',
   },
   voiceModeMicBtnActive: {
     backgroundColor: 'rgba(242,230,210,0.9)',
     shadowColor: EMBER.emberBright, shadowOpacity: 0.22, shadowRadius: 16, shadowOffset: { width: 0, height: 6 },
   },
   voiceModeMicBtnMuted: { backgroundColor: 'rgba(255,255,255,0.08)', borderWidth: 0.5, borderColor: 'rgba(255,255,255,0.12)' },
-  voiceModeExitBtn: { backgroundColor: 'rgba(255,255,255,0.12)' },
+  voiceModeExitBtn: {
+    width: 46, height: 46, borderRadius: 23,
+    backgroundColor: 'rgba(255,255,255,0.07)', borderWidth: 0.5, borderColor: 'rgba(255,255,255,0.1)',
+  },
   hfLive: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   listeningTag: { fontSize: 11.5, color: EMBER.emberBright, letterSpacing: 0.3 },
   muteIconBtn: {
