@@ -463,6 +463,7 @@ export default function ListenScreen({ route, navigation }) {
   const [mainStageHeight, setMainStageHeight] = useState(0);
   const conversationDrawerProgress = useRef(new Animated.Value(0)).current;
   const micVisualProgress = useRef(new Animated.Value(0)).current;
+  const micLevelProgress = useRef(new Animated.Value(0)).current;
   const voiceMessageIdRef = useRef(0);
   const voiceConversationRef = useRef(null);
   const voiceAutoScrollRef = useRef(true);
@@ -488,14 +489,16 @@ export default function ListenScreen({ route, navigation }) {
     return () => animation.stop();
   }, [conversationDrawerProgress, conversationExpanded]);
   useEffect(() => {
+    const listening = hfStage === 'listening';
+    if (!listening) micLevelProgress.setValue(0);
     const animation = Animated.timing(micVisualProgress, {
-      toValue: hfStage === 'listening' ? 1 : 0,
-      duration: 160,
+      toValue: listening ? 1 : 0,
+      duration: listening ? 80 : 200,
       useNativeDriver: false,
     });
     animation.start();
     return () => animation.stop();
-  }, [hfStage, micVisualProgress]);
+  }, [hfStage, micLevelProgress, micVisualProgress]);
 
   const chaptersRef = useRef([]); // 已经过滤掉"目录"章节的列表
   const standardChaptersRef = useRef(false);
@@ -1198,6 +1201,9 @@ export default function ListenScreen({ route, navigation }) {
         if (!status.isRecording) return;
         elapsedMs += HF_METER_INTERVAL_MS;
         const db = typeof status.metering === 'number' ? status.metering : -160;
+        // dBFS 映射为 0～1，只驱动现有麦克风按钮的光晕，不参与端点判断，
+        // 因而灯效不会反过来改变录音何时开始/结束。
+        micLevelProgress.setValue(Math.max(0, Math.min(1, (db + 55) / 43)));
         if (db >= HF_SPEECH_DB) {
           speechEverDetected = true;
           silenceMs = 0;
@@ -1279,6 +1285,8 @@ export default function ListenScreen({ route, navigation }) {
       await pendingRecording?.stopAndUnloadAsync().catch(() => {});
       await restorePlaybackAudioMode().catch(() => {});
       return null;
+    } finally {
+      micLevelProgress.setValue(0);
     }
   }
 
@@ -2150,10 +2158,19 @@ export default function ListenScreen({ route, navigation }) {
   const micVisualStyle = {
     backgroundColor: micVisualProgress.interpolate({
       inputRange: [0, 1],
-      outputRange: ['rgba(177,124,67,0.14)', EMBER.emberBright],
+      outputRange: [EMBER.dusk, EMBER.emberBright],
     }),
     transform: [{
       scale: micVisualProgress.interpolate({ inputRange: [0, 1], outputRange: [1, 0.94] }),
+    }],
+  };
+  const micGlowStyle = {
+    opacity: Animated.multiply(
+      micVisualProgress,
+      micLevelProgress.interpolate({ inputRange: [0, 1], outputRange: [0.14, 0.72] }),
+    ),
+    transform: [{
+      scale: micLevelProgress.interpolate({ inputRange: [0, 1], outputRange: [1, 1.42] }),
     }],
   };
 
@@ -2397,8 +2414,9 @@ export default function ListenScreen({ route, navigation }) {
                             accessibilityRole="button"
                             accessibilityLabel={manualAskLabel}
                           >
+                            <Animated.View pointerEvents="none" style={[styles.voiceModeMicGlow, micGlowStyle]} />
                             <IconMicrophone
-                              color={hfStage === 'listening' ? EMBER.ink : EMBER.emberBright}
+                              color={hfStage === 'listening' ? EMBER.ink : EMBER.inkSoft}
                               size={24}
                               strokeWidth={2.2}
                             />
@@ -2664,13 +2682,17 @@ const styles = StyleSheet.create({
   voiceModeRoundBtn: {
     width: 54, height: 54, borderRadius: 27, alignItems: 'center', justifyContent: 'center',
   },
+  voiceModeMicGlow: {
+    position: 'absolute', width: 66, height: 66, borderRadius: 33,
+    backgroundColor: EMBER.emberBright,
+  },
   voiceModeMicBtnActive: {
     backgroundColor: EMBER.emberBright,
     transform: [{ scale: 0.94 }],
     shadowColor: EMBER.emberBright, shadowOpacity: 0.22, shadowRadius: 12, shadowOffset: { width: 0, height: 4 },
   },
   voiceModeMicBtnMuted: {
-    backgroundColor: 'rgba(226,150,58,0.12)', borderWidth: 1, borderColor: 'rgba(226,150,58,0.38)',
+    backgroundColor: EMBER.dusk,
   },
   hfLive: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   listeningTag: { fontSize: 11.5, color: EMBER.emberBright, letterSpacing: 0.3 },
