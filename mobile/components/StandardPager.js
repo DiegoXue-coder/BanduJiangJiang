@@ -285,11 +285,13 @@ const StandardPager = forwardRef(function StandardPager({
         const can = dir === 1 ? hasNextSV.value : hasPrevSV.value;
         const progress = Math.abs(x) / width;
         const along = dir === 1 ? -v : v; // 沿"翻页方向"的速度，正=朝翻页方向甩
-        // 拖过 30% 且没有往回甩 → 翻；没到 30% 但朝翻页方向甩得够快 → 也翻
-        const go = can && (progress > 0.3 ? along > -300 : (along > 700 && progress > 0.03));
+        // 拖过 30% 且没有明显往回甩 → 翻；没到 30% 但朝翻页方向甩得够快 → 也翻。
+        // 注意手势库的速度单位是 dp/秒（不是像素）：普通手指轻轻一甩约 500~1500，
+        // 门槛取 450，太高的话正常的轻甩翻不动。
+        const go = can && (progress > 0.3 ? along > -200 : (along > 450 && progress > 0.03));
         if (go) {
           const remaining = width - Math.abs(x);
-          const speed = Math.max(Math.abs(v), 900);
+          const speed = Math.max(Math.abs(v), 600);
           const dur = Math.max(110, Math.min(260, (remaining / speed) * 1000 + 70));
           curTx.value = withTiming(dir === 1 ? -width : width, { duration: dur, easing: Easing.out(Easing.cubic) }, (finished) => {
             'worklet';
