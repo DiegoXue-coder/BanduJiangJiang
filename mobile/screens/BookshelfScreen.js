@@ -8,7 +8,7 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useFocusEffect } from '@react-navigation/native';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
-import { useShareIntentContext } from 'expo-share-intent';
+import { useShareIntentContext } from '../lib/shareIntent';
 import Svg, { Line, Circle, Rect, Defs, LinearGradient as SvgLinearGradient, Stop, Mask, G } from 'react-native-svg';
 import { IconTrash, IconPlus } from '@tabler/icons-react-native';
 import { getLibrary, importFile, importEpub, deleteMyBook } from '../lib/api';
