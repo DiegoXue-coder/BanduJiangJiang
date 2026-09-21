@@ -24,7 +24,7 @@ import {
   IconMicrophone, IconSend,
 } from '@tabler/icons-react-native';
 import {
-  getBookContext, getChapterText, getStandardChapterText, getTtsPlayUrl, transcribeAudio,
+  getBookContext, getChapterText, getStandardChapterText, getTtsPlayUrl, getTtsWithTiming, transcribeAudio,
   streamAsk, saveHighlight, saveQaHistory, classifyIntent, submitVoiceLatencyMetric,
 } from '../lib/api';
 import { useAuthGate } from '../lib/authGate';
@@ -308,6 +308,29 @@ function sentenceIndexAtOffset(sentences, offset) {
   const safeOffset = Math.max(0, Number(offset) || 0);
   const found = sentences.findIndex((sentence) => safeOffset < sentence.end);
   return found === -1 ? sentences.length - 1 : found;
+}
+
+function charOffsetAtPlaybackPosition(boundaries, positionMillis, sourceLength) {
+  if (!Array.isArray(boundaries) || boundaries.length === 0) return null;
+  let low = 0;
+  let high = boundaries.length - 1;
+  let found = -1;
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    if (Number(boundaries[mid]?.offsetMs) <= positionMillis) {
+      found = mid;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+  if (found < 0) return 0;
+  const boundary = boundaries[found];
+  const start = Math.max(0, Number(boundary.charStart) || 0);
+  const end = Math.max(start, Number(boundary.charEnd) || start);
+  const duration = Math.max(1, Number(boundary.durationMs) || 1);
+  const wordProgress = Math.max(0, Math.min(1, (positionMillis - Number(boundary.offsetMs || 0)) / duration));
+  return Math.min(sourceLength, Math.floor(start + (end - start) * wordProgress));
 }
 
 // TTS 为减少网络停顿按约 60 字切块，但字幕需要一个稳定的“段落视窗”。
@@ -679,19 +702,66 @@ export default function ListenScreen({ route, navigation }) {
     timing.lastAt = now;
   }
 
+  async function releaseNarrationSound(sound) {
+    if (!sound) return;
+    const localUri = sound.__banduTimedTtsFileUri;
+    await sound.unloadAsync().catch(() => {});
+    if (localUri) {
+      await FileSystem.deleteAsync(localUri, { idempotent: true }).catch(() => {});
+    }
+  }
+
+  async function createTimedNarrationSound(text, voiceName, playbackRate) {
+    const response = await getTtsWithTiming(text, voiceName, playbackRate);
+    if (!response?.audioBase64 || !Array.isArray(response?.boundaries)) {
+      throw new Error('带时间戳TTS返回格式不完整');
+    }
+    const fileUri = `${FileSystem.cacheDirectory}listen_timed_${Date.now()}_${Math.random().toString(36).slice(2)}.mp3`;
+    try {
+      await FileSystem.writeAsStringAsync(fileUri, response.audioBase64, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+      const { sound } = await Audio.Sound.createAsync({ uri: fileUri }, { shouldPlay: false });
+      // Sound实例只在本页进程内存活；把配对时间线挂在同一个实例上，避免
+      // 预取队列把A段音频和B段时间轴拆开。文件URI用于unload后立即清缓存。
+      sound.__banduTimedTtsFileUri = fileUri;
+      sound.__banduWordBoundaries = response.boundaries;
+      sound.__banduNormalizedText = response.normalizedText || text;
+      return sound;
+    } catch (e) {
+      await FileSystem.deleteAsync(fileUri, { idempotent: true }).catch(() => {});
+      throw e;
+    }
+  }
+
+  async function createNarrationSound(text, voiceName, playbackRate) {
+    try {
+      const sound = await createTimedNarrationSound(text, voiceName, playbackRate);
+      console.log(`[听书时间轴] 使用真实WordBoundary，边界数=${sound.__banduWordBoundaries.length}`);
+      return sound;
+    } catch (e) {
+      console.log(`[听书时间轴] 新接口失败，降级旧/tts/play：${e.message || e}`);
+      const { sound } = await Audio.Sound.createAsync(
+        { uri: getTtsPlayUrl(text, voiceName, playbackRate) },
+        { shouldPlay: false },
+      );
+      return sound;
+    }
+  }
+
   async function stopSound() {
     const sound = soundRef.current;
     soundRef.current = null;
     if (sound) {
       await sound.stopAsync().catch(() => {});
-      await sound.unloadAsync().catch(() => {});
+      await releaseNarrationSound(sound);
     }
     // 打断/停止听书时，预取好但还没用上的下一段音频也要一并释放，
     // 不然这份资源没人管，白占着。
     const prepared = preparedRef.current;
     preparedRef.current = null;
     if (prepared) {
-      prepared.promise.then((s) => s.unloadAsync().catch(() => {})).catch(() => {});
+      prepared.promise.then((s) => releaseNarrationSound(s)).catch(() => {});
     }
   }
 
@@ -713,14 +783,16 @@ export default function ListenScreen({ route, navigation }) {
     }
     if (!sound) {
       const t1 = Date.now();
-      ({ sound } = await Audio.Sound.createAsync(
-        { uri: getTtsPlayUrl(text, voiceRef.current, rateRef.current) },
-        { shouldPlay: false },
-      ));
+      sound = progressMeta
+        ? await createNarrationSound(text, voiceRef.current, rateRef.current)
+        : (await Audio.Sound.createAsync(
+          { uri: getTtsPlayUrl(text, voiceRef.current, rateRef.current) },
+          { shouldPlay: false },
+        )).sound;
       console.log(`[听书诊断] 播放段落(现场加载，耗时${Date.now() - t1}ms) voice=${voiceRef.current} rate=${rateRef.current} 字数=${text.length}`);
     }
     if (epoch !== epochRef.current) {
-      sound.unloadAsync().catch(() => {});
+      releaseNarrationSound(sound);
       return;
     }
     soundRef.current = sound;
@@ -740,13 +812,18 @@ export default function ListenScreen({ route, navigation }) {
       sound.setOnPlaybackStatusUpdate((s) => {
         if (epoch === epochRef.current && soundRef.current === sound
             && s.isLoaded && progressMeta && s.durationMillis > 0 && s.positionMillis >= 0) {
-          const ratio = Math.max(0, Math.min(1, s.positionMillis / s.durationMillis));
           const baseOffset = progressMeta.baseOffset || 0;
           const playTextLength = progressMeta.playTextLength || progressMeta.sourceLength || 0;
-          const charOffset = Math.min(
-            progressMeta.sourceLength,
-            baseOffset + Math.floor(playTextLength * ratio),
+          const timedOffset = charOffsetAtPlaybackPosition(
+            sound.__banduWordBoundaries,
+            s.positionMillis,
+            playTextLength,
           );
+          const ratio = Math.max(0, Math.min(1, s.positionMillis / s.durationMillis));
+          const relativeOffset = timedOffset == null
+            ? Math.floor(playTextLength * ratio)
+            : timedOffset;
+          const charOffset = Math.min(progressMeta.sourceLength, baseOffset + relativeOffset);
           paragraphProgressRef.current = {
             chapterIdx: progressMeta.chapterIdx,
             paragraphIdx: progressMeta.paragraphIdx,
@@ -772,8 +849,9 @@ export default function ListenScreen({ route, navigation }) {
   }
 
   // 从指定位置开始顺序朗读，直到打断（epoch变化）或全书听完。
-  // 录音/问答打断后会按当前音频播放比例估一个段内字位，恢复时从该字位
-  // 前面少量回退继续读，避免每次都从合并段落开头重读。
+  // 录音/问答打断后优先按本次音频的WordBoundary保存段内字位；新接口
+  // 不可用时才退回播放比例估算。恢复时从该字位前面少量回退继续读，
+  // 避免每次都从合并段落开头重读。
   const playFrom = useCallback(async (startChapterIdx, startParagraphIdx, epoch) => {
     const chapters = chaptersRef.current;
     let ci = startChapterIdx;
@@ -829,7 +907,7 @@ export default function ListenScreen({ route, navigation }) {
           presetPromise = prepared.promise;
           preparedRef.current = null;
         } else if (prepared) {
-          prepared.promise.then((s) => s.unloadAsync().catch(() => {})).catch(() => {});
+          prepared.promise.then((s) => releaseNarrationSound(s)).catch(() => {});
           preparedRef.current = null;
         }
 
@@ -849,7 +927,10 @@ export default function ListenScreen({ route, navigation }) {
           captionContext.currentStart + resumeSlice.startOffset,
         );
         if (shouldResumeWithinParagraph) {
-          presetPromise = null; // 段内恢复文本已经变短，不能复用原整段预取音频
+          // 段内恢复文本已经变短，不能复用原整段预取音频；这份预取已经
+          // 从preparedRef取走，必须在这里释放，不能只把promise变量置空。
+          presetPromise?.then((s) => releaseNarrationSound(s)).catch(() => {});
+          presetPromise = null;
         }
 
         console.log(`[听书诊断] 开始加载 章节="${chapter.title}" 第${pi + 1}/${paragraphs.length}段 段内恢复=${shouldResumeWithinParagraph} 预取命中=${!!presetPromise}`);
@@ -882,10 +963,7 @@ export default function ListenScreen({ route, navigation }) {
               const r = rateRef.current;
               const tPrefetchStart = Date.now();
               console.log(`[听书诊断] 预取开始 第${nextPi + 1}段 字数=${paragraphs[nextPi].length}`);
-              const promise = Audio.Sound.createAsync(
-                { uri: getTtsPlayUrl(paragraphs[nextPi], v, r) },
-                { shouldPlay: false },
-              ).then(({ sound: s }) => {
+              const promise = createNarrationSound(paragraphs[nextPi], v, r).then((s) => {
                 console.log(`[听书诊断] 预取完成 第${nextPi + 1}段 耗时${Date.now() - tPrefetchStart}ms`);
                 return s;
               });
@@ -917,7 +995,7 @@ export default function ListenScreen({ route, navigation }) {
         if (finishedSound) {
           soundRef.current = null;
           finishedSound.setOnPlaybackStatusUpdate(null);
-          finishedSound.unloadAsync().catch(() => {});
+          releaseNarrationSound(finishedSound);
         }
         if (pi + 1 < paragraphs.length) {
           posRef.current = { chapterIdx: ci, paragraphIdx: pi + 1 };

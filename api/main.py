@@ -562,6 +562,11 @@ class TTSRequest(BaseModel):
     text: str
     voice: str = "zh-CN-XiaoxiaoNeural"
 
+class TimedTTSRequest(BaseModel):
+    text: str
+    voice: str = "zh-CN-XiaoxiaoNeural"
+    rate: str = "+0%"
+
 class HistorySaveRequest(BaseModel):
     book_id: str = ""
     book_title: str = ""
@@ -2717,6 +2722,29 @@ async def tts(req: TTSRequest, _=ExtAuth):
 
 _RATE_PATTERN = re.compile(r"^[+-]\d{1,3}%$")
 
+def _map_tts_word_boundaries(text: str, events: list[dict]) -> list[dict]:
+    """把 Edge 只带词文本的边界事件顺序映射回本次合成文本。"""
+    cursor = 0
+    mapped = []
+    for event in events:
+        token = str(event.get("text", ""))
+        if not token:
+            continue
+        start = text.find(token, cursor)
+        if start < 0:
+            # 时间轴宁可整段降级，也不能把高亮错误地贴到重复词上。
+            return []
+        end = start + len(token)
+        mapped.append({
+            "text": token,
+            "charStart": start,
+            "charEnd": end,
+            "offsetMs": round(float(event.get("offset", 0)) / 10_000, 2),
+            "durationMs": round(float(event.get("duration", 0)) / 10_000, 2),
+        })
+        cursor = end
+    return mapped
+
 @app.get("/tts/play")
 async def tts_play(text: str, voice: str = "zh-CN-XiaoxiaoNeural", rate: str = "+0%"):
     # 阶段十七听书功能真机反馈：默认语速对文言文听众来说太快。edge_tts.
@@ -2734,6 +2762,44 @@ async def tts_play(text: str, voice: str = "zh-CN-XiaoxiaoNeural", rate: str = "
         return Response(content=b"".join(chunks), media_type="audio/mpeg")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"TTS 错误: {e}")
+
+@app.post("/app/tts_with_timing")
+async def app_tts_with_timing(req: TimedTTSRequest, _=ExtAuth):
+    """为正文听书一次生成音频和词边界；旧 /tts/play 保持不变。"""
+    if not _RATE_PATTERN.match(req.rate):
+        raise HTTPException(status_code=400, detail="rate参数格式错误，应为类似+0%/-20%这样的百分比")
+    normalized_text = clean_for_tts(req.text)
+    if not normalized_text:
+        raise HTTPException(status_code=400, detail="TTS文本不能为空")
+    if len(normalized_text) > 2_000:
+        raise HTTPException(status_code=413, detail="TTS文本过长，请拆分后重试")
+    try:
+        communicate = edge_tts.Communicate(
+            normalized_text,
+            req.voice,
+            rate=req.rate,
+            boundary="WordBoundary",
+        )
+        audio_chunks = []
+        boundary_events = []
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                audio_chunks.append(chunk["data"])
+            elif chunk["type"] == "WordBoundary":
+                boundary_events.append(chunk)
+        audio = b"".join(audio_chunks)
+        if not audio:
+            raise RuntimeError("TTS未返回音频")
+        return {
+            "audioBase64": base64.b64encode(audio).decode("ascii"),
+            "normalizedText": normalized_text,
+            "boundaries": _map_tts_word_boundaries(normalized_text, boundary_events),
+            "timingVersion": 1,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"带时间戳TTS错误: {e}")
 
 @app.get("/tts/voices")
 async def tts_voices():

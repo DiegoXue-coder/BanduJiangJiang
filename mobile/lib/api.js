@@ -664,6 +664,18 @@ export function getTtsPlayUrl(text, voice = 'zh-CN-XiaoxiaoNeural', rate = '+0%'
   return `${getCurrentApiBase()}/tts/play?text=${encodeURIComponent(text)}&voice=${encodeURIComponent(voice)}&rate=${encodeURIComponent(rate)}`;
 }
 
+// 正文听书专用：音频和WordBoundary必须由同一次合成产生，否则即使文本、
+// 声音和语速相同，两次云端合成也可能出现细小时长差，重新引入高亮漂移。
+// 失败由ListenScreen降级到旧/tts/play，这个接口本身不吞掉错误。
+export async function getTtsWithTiming(text, voice = 'zh-CN-XiaoxiaoNeural', rate = '+0%') {
+  return appFetch('/app/tts_with_timing', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text, voice, rate }),
+    timeoutMs: 45_000,
+  });
+}
+
 export async function transcribeAudio(fileUri, uploadAsync, FileSystemUploadType, onTiming = null) {
   // 真机反馈过好几次"未识别到内容"，但同一时间段后端日志完全没有对应
   // 请求记录——怀疑请求可能压根没真正打到后端（网络层面被拦截/超时返回
