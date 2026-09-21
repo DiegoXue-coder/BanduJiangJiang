@@ -150,6 +150,11 @@ const READER_DEFAULT_MODE = 'standard';
 // 移植的（只做了打包和逻辑对照检查），如果苹果真机上翻页容器出问题，把 'ios' 从这个数组里去掉、
 // 发一次 OTA，就退回到"每页一个 WebView"的旧做法（旧做法的代码还在，见下面渲染处）。
 const STANDARD_PAGER_PLATFORMS = ['android', 'ios'];
+// 阅读器"只有标准阅读模式"的平台（不再用原版 EPUB 模式）：导入的书用服务端拆好的标准章节，
+// 公版书忽略手机里旧的"原版"选择。9/21 用户要求"苹果和安卓一样"，苹果也放开——之前苹果的导入书走原版
+// EPUB 模式、公版书可能存着"原版"，所以苹果上阅读器一直是旧样子。服务端没有标准章节的旧书仍会退回原版 EPUB。
+const STANDARD_ONLY_PLATFORMS = ['android', 'ios'];
+const IS_STANDARD_ONLY = STANDARD_ONLY_PLATFORMS.includes(Platform.OS);
 const STANDARD_PAGE_MIN_CHARS = 80;
 const STANDARD_PAGE_MAX_CHARS = 430;
 const STANDARD_READING_LINE_HEIGHT = 1.56;
@@ -1046,11 +1051,13 @@ function ReaderInner({
   const [showFontSizePanel, setShowFontSizePanel] = useState(false);
   const [fontSizePt, setFontSizePt] = useState(FONT_SIZE_DEFAULT);
   const [bodyFontKey, setBodyFontKey] = useState('serif');
-  const readingChapters = Platform.OS === 'android' && bookSource === 'imported' ? standardChapters : chapters;
+  // 导入的书且服务端给了标准章节 → 走标准阅读（用标准章节）；否则（公版书/没有标准章节的旧导入书）用 EPUB 章节
+  const importedStandard = IS_STANDARD_ONLY && bookSource === 'imported' && !!standardChapters?.length;
+  const readingChapters = importedStandard ? standardChapters : chapters;
   const hasStandardChapters = Array.isArray(readingChapters) && readingChapters.length > 0;
-  const defaultReaderMode = Platform.OS === 'android' && hasStandardChapters
-    ? READER_DEFAULT_MODE
-    : (bookSource === 'imported' ? 'epub' : READER_DEFAULT_MODE);
+  const defaultReaderMode = bookSource === 'imported'
+    ? (importedStandard ? READER_DEFAULT_MODE : 'epub')
+    : READER_DEFAULT_MODE;
   const [readerMode, setReaderMode] = useState(defaultReaderMode);
   // 沉浸式阅读器（任务卡 08 §3.2）：标准阅读模式下启用（安卓、苹果一致）；原版 EPUB 模式保持旧壳
   // （任务卡 §4 关于原版 EPUB 是否套壳的决策还没定）。用户 9/20 决定"先做安卓，再移植苹果"，9/21 要求同步苹果。
@@ -1132,7 +1139,7 @@ function ReaderInner({
           setThemeName(saved.themeName);
           setThemeMode(THEME_MODE_BY_FAMILY[THEME_FAMILY[saved.themeName]]);
         }
-        if (bookSource !== 'imported' && READER_MODE_ORDER.includes(saved.readerMode)) {
+        if (!IS_STANDARD_ONLY && bookSource !== 'imported' && READER_MODE_ORDER.includes(saved.readerMode)) {
           setReaderMode(saved.readerMode);
         } else {
           setReaderMode(defaultReaderMode);
@@ -1227,13 +1234,13 @@ function ReaderInner({
     }
     let cancelled = false;
     setStandardChapterError('');
-    const cacheMode = bookSource === 'imported' && Platform.OS === 'android' ? 'standard' : 'original';
+    const cacheMode = importedStandard ? 'standard' : 'original';
     const memory = STANDARD_CHAPTER_MEMORY_CACHE.get(`${cacheMode}:${bookId}:${chapter.id}`);
     setStandardChapterText(memory ? { ...memory, title: memory.title || chapter.title || '', chapterId: chapter.id } : null);
     setStandardPageIndex(landingPageRef.current ?? 0);
     landingPageRef.current = null;
     setCurrentSectionTitle(chapter.title || '');
-    getCachedStandardChapterText(bookId, chapter.id, { includeBlocks: true, standard: bookSource === 'imported' && Platform.OS === 'android' })
+    getCachedStandardChapterText(bookId, chapter.id, { includeBlocks: true, standard: importedStandard })
       .then((data) => {
         if (cancelled) return;
         const blocks = normalizeStandardBlocks(data);
@@ -1251,7 +1258,7 @@ function ReaderInner({
         }
         const nextChapter = readingChapters?.[standardChapterIndex + 1];
         if (nextChapter?.id) {
-          getCachedStandardChapterText(bookId, nextChapter.id, { includeBlocks: true, standard: bookSource === 'imported' && Platform.OS === 'android' })
+          getCachedStandardChapterText(bookId, nextChapter.id, { includeBlocks: true, standard: importedStandard })
             .catch((e) => console.warn('[标准阅读缓存] 下一章预热失败', e.message || e));
         }
       })
@@ -2023,7 +2030,7 @@ function ReaderInner({
   // （翻过章节的那一帧）直接从内存缓存里拿——相邻章节早已预读，这样翻章时分页是同步算出来的，
   // 不会出现"页码已经变了、正文还是旧章"的一帧。上一章/下一章只从内存缓存取，取不到就是 null，
   // 翻页容器那一侧暂时没有页面（预读一完成会自动补上）。
-  const standardCacheMode = bookSource === 'imported' && Platform.OS === 'android' ? 'standard' : 'original';
+  const standardCacheMode = importedStandard ? 'standard' : 'original';
   const getMemoryChapterPayload = (chapterIndex) => {
     const chapter = readingChapters?.[chapterIndex];
     if (!chapter) return null;
@@ -2978,7 +2985,8 @@ export default function ReaderScreen({ route, navigation }) {
         isLoggedIn() ? getHighlights(bookId) : Promise.resolve([]),
       ]);
       console.log(`[打开诊断] context+highlights就绪 累计耗时=${Date.now() - tStart}ms`);
-      if (Platform.OS === 'android' && c.source === 'imported') {
+      // 服务端没有标准章节的旧导入书：不走标准阅读的预下载，后面退回原版 EPUB
+      if (IS_STANDARD_ONLY && c.source === 'imported' && c.standard_chapters?.length) {
         await prepareImportedStandardBook(bookId, c.standard_chapters, (done, total) => {
           setPreparation({ done, total });
         });
@@ -2994,7 +3002,7 @@ export default function ReaderScreen({ route, navigation }) {
 
   useEffect(() => {
     if (!ctx) return undefined;
-    if (Platform.OS === 'android' && ctx.source === 'imported') {
+    if (IS_STANDARD_ONLY && ctx.source === 'imported' && ctx.standard_chapters?.length) {
       setEpubError('');
       setEpubUri(null);
       return undefined;
