@@ -773,6 +773,92 @@ function buildStandardPageHtml({
 </html>`;
 }
 
+// 按"真实行数"分页（取代旧的"估字数 + 一大块保险余量"）：
+// 旧做法每页只估一个字数上限，还预留了约 40dp 保险、剩余不足 16% 就直接翻页，结果每页文字平均只占
+// 页面高度的七八成，底部空出三四行（用户反馈"下面总留一个拇指宽度的空"）。
+// 现在直接模拟排版：页面正文区宽 = 容器宽 − 左右内边距 40，高 = 容器高 − 上下内边距 20；
+// 每行能放 floor(宽/字号) 个字（中文一字一个字宽；夹杂的英文数字更窄，所以是"宁多估行、不少估行"的保守方向）；
+// 每行高 = 行高；段落之间 6px（对应页面 CSS 的 p{margin:0 0 6px}）；标题 h2 行高 24px、字号 17px。
+// 一页填到只剩约 0.8 行的安全余量为止（浏览器的"避头尾"规则偶尔会多挤出一行，靠这点余量兜底，
+// 页面里 overflow:hidden，估少了会把最后一行裁掉，所以不能贴到 0）。段落在"行"的边界处拆页，
+// 避免一页底部只剩孤零零一行 / 下一页顶部只有一行；拆页点不落在句号逗号等标点前面。
+// pageWidth/pageHeight 传**阅读容器的真实尺寸**（WebView 的实际大小），不再是窗口尺寸减一个估计值。
+const STANDARD_PAGE_PAD_X = 40; // 页面 CSS：#page padding 12px 20px 8px
+const STANDARD_PAGE_PAD_Y = 20;
+const STANDARD_PARA_GAP = 6;
+const STANDARD_NO_LINE_START = '，。、；：！？）」』”’》〉】〕,.;:!?)]}';
+function paginateStandardByLines(blocks, fontSizePt, pageWidth, pageHeight) {
+  const fontPx = Math.round(fontSizePt * 1.35);
+  const lineH = Math.round(fontPx * STANDARD_READING_LINE_HEIGHT);
+  const contentW = Math.max(160, Number(pageWidth || 0) - STANDARD_PAGE_PAD_X);
+  const innerH = Math.max(lineH * 6, Number(pageHeight || 0) - STANDARD_PAGE_PAD_Y - Math.round(lineH * 0.8));
+  const cpl = Math.max(6, Math.floor(contentW / fontPx)); // 每行字数
+  const headCpl = Math.max(6, Math.floor(contentW / 17)); // 标题每行字数（h2 字号 17px）
+  const pages = [];
+  let current = [];
+  let used = 0; // 当前页已用高度
+  function flush() {
+    if (!current.length) return;
+    pages.push(current);
+    current = [];
+    used = 0;
+  }
+  (blocks || []).forEach((block, blockIndex) => {
+    const type = block?.type || 'text';
+    if (type === 'image' || type === 'table') {
+      const mediaBlock = { ...block, blockIndex };
+      const h = type === 'image'
+        ? Math.round(innerH * 0.72) + 6
+        : Math.min(innerH, (Array.isArray(block.rows) ? block.rows.length : 3) * 27 + 8);
+      if (current.length && used <= innerH * 0.32 && used + h <= innerH * 1.05) {
+        current.push(mediaBlock);
+        flush();
+      } else {
+        flush();
+        pages.push([mediaBlock]);
+      }
+      return;
+    }
+    const text = String(block?.text || '').trim();
+    if (!text) return;
+    const paragraphIndex = Number.isFinite(block?.sourceIndex) ? block.sourceIndex : blockIndex;
+    const isHeading = type === 'heading';
+    const textBlock = { ...block, type, text, paragraphIndex, blockIndex };
+    if (isHeading) {
+      const h = Math.ceil(text.length / headCpl) * 24 + STANDARD_PARA_GAP;
+      // 标题不能孤零零落在页底：放不下（连同后面至少两行正文）就换页
+      if (current.length && used + h + lineH * 2 > innerH) flush();
+      current.push(textBlock);
+      used += h;
+      return;
+    }
+    let rest = text;
+    while (rest.length) {
+      const totalLines = Math.ceil(rest.length / cpl);
+      const need = totalLines * lineH + STANDARD_PARA_GAP;
+      if (used + need <= innerH) {
+        current.push({ ...textBlock, text: rest });
+        used += need;
+        rest = '';
+        break;
+      }
+      let fit = Math.floor((innerH - used) / lineH); // 这一页还能放几行
+      if (fit < 2 && current.length) { flush(); continue; } // 页底只剩一行：整段挪到下一页
+      if (fit < 1) fit = 1; // 空页也放不下一行（极端小屏）：至少放一行，避免死循环
+      // 拆页后下一页顶部不能只剩一行（孤行）：宁可这页少放一行
+      if (totalLines - fit === 1 && fit >= 3) fit -= 1;
+      let cut = Math.min(rest.length, fit * cpl);
+      // 下一页不要以标点开头
+      while (cut > 1 && STANDARD_NO_LINE_START.includes(rest[cut])) cut -= 1;
+      current.push({ ...textBlock, text: rest.slice(0, cut) });
+      rest = rest.slice(cut).trimStart();
+      flush();
+    }
+  });
+  flush();
+  return pages.length ? pages : [[]];
+}
+
 function paginateStandardBlocks(blocks, fontSizePt, pageWidth, pageHeight, reservedHeight = 142) {
   const fontPx = Math.round(fontSizePt * 1.35);
   const usableWidth = Math.max(220, Number(pageWidth || 0) - 40);
@@ -1070,6 +1156,8 @@ function ReaderInner({
   const pendingSeekRef = useRef(null); // 进度条跳到别的章节时，等那一章加载完再定位到页
   const [standardChapterIndex, setStandardChapterIndex] = useState(0);
   const [standardPageIndex, setStandardPageIndex] = useState(0);
+  // 阅读容器（WebView 所在区域）的真实尺寸：分页要按它排，不能按"窗口尺寸减估计值"
+  const [standardBox, setStandardBox] = useState({ w: 0, h: 0 });
   const [standardChapterText, setStandardChapterText] = useState(null);
   const [standardChapterError, setStandardChapterError] = useState('');
   const [readerSettingsLoaded, setReaderSettingsLoaded] = useState(false);
@@ -2047,30 +2135,28 @@ function ReaderInner({
     : getMemoryChapterPayload(standardChapterIndex);
   const prevChapterPayload = getMemoryChapterPayload(standardChapterIndex - 1);
   const nextChapterPayload = getMemoryChapterPayload(standardChapterIndex + 1);
-  const paginatePayload = (payload) => (payload
-    ? paginateStandardBlocks(
-      payload.blocks || normalizeStandardBlocks(payload),
-      fontSizePt,
-      windowSize.width,
-      windowSize.height,
-      paginationReserved,
-    )
-    : null);
+  const paginatePayload = (payload) => {
+    if (!payload) return null;
+    const blocks = payload.blocks || normalizeStandardBlocks(payload);
+    return standardBox.h > 0 && standardBox.w > 0
+      ? paginateStandardByLines(blocks, fontSizePt, standardBox.w, standardBox.h)
+      : paginateStandardBlocks(blocks, fontSizePt, windowSize.width, windowSize.height, paginationReserved);
+  };
   const standardPages = useMemo(
     () => paginatePayload(currentChapterPayload) || [],
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [currentChapterPayload, fontSizePt, windowSize.width, windowSize.height, paginationReserved],
+    [currentChapterPayload, fontSizePt, windowSize.width, windowSize.height, paginationReserved, standardBox.w, standardBox.h],
   );
   // 只在"每一页内容 = 前一章末页 / 后一章首页"需要时才用到：不参与当前章的任何逻辑
   const prevChapterPages = useMemo(
     () => paginatePayload(prevChapterPayload),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [prevChapterPayload, fontSizePt, windowSize.width, windowSize.height, paginationReserved],
+    [prevChapterPayload, fontSizePt, windowSize.width, windowSize.height, paginationReserved, standardBox.w, standardBox.h],
   );
   const nextChapterPages = useMemo(
     () => paginatePayload(nextChapterPayload),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [nextChapterPayload, fontSizePt, windowSize.width, windowSize.height, paginationReserved],
+    [nextChapterPayload, fontSizePt, windowSize.width, windowSize.height, paginationReserved, standardBox.w, standardBox.h],
   );
   const standardPage = standardPages[Math.min(standardPageIndex, standardPages.length - 1)] || [];
   // 整本书的阅读进度：(已读章数 + 本章内进度)/总章数，末章末页=100%。后端只有章节粒度，
@@ -2680,7 +2766,13 @@ function ReaderInner({
 
       <View style={[styles.readerBody, immersive && { paddingTop: insets.top, paddingBottom: READER_INFO_STRIP_HEIGHT + insets.bottom }]}>
         {readerMode === 'standard' ? (
-          <View style={[styles.standardReader, { backgroundColor: THEMES[themeName].body.background }]}>
+          <View
+            style={[styles.standardReader, { backgroundColor: THEMES[themeName].body.background }]}
+            onLayout={(e) => {
+              const { width: w, height: h } = e.nativeEvent.layout;
+              setStandardBox((prev) => (Math.abs(prev.w - w) < 1 && Math.abs(prev.h - h) < 1 ? prev : { w, h }));
+            }}
+          >
             {standardChapterError ? (
               <View style={styles.centerBox}>
                 <Text style={[styles.errorText, { color: uiTheme.danger }]}>章节加载失败：{standardChapterError}</Text>
