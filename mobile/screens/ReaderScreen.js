@@ -791,8 +791,13 @@ function paginateStandardByLines(blocks, fontSizePt, pageWidth, pageHeight) {
   const fontPx = Math.round(fontSizePt * 1.35);
   const lineH = Math.round(fontPx * STANDARD_READING_LINE_HEIGHT);
   const contentW = Math.max(160, Number(pageWidth || 0) - STANDARD_PAGE_PAD_X);
-  const innerH = Math.max(lineH * 6, Number(pageHeight || 0) - STANDARD_PAGE_PAD_Y - Math.round(lineH * 0.8));
-  const cpl = Math.max(6, Math.floor(contentW / fontPx)); // 每行字数
+  // 安全余量：安卓（Chromium，已在模拟器上逐页实测 0 页被裁）取约 0.55 行；iOS（WebKit 的避头尾规则可能不同，
+  // 没有实机验证）取更保守的 1.0 行 + 每行少放 1 个字
+  const isIOS = Platform.OS === 'ios';
+  const innerH = Math.max(lineH * 6, Number(pageHeight || 0) - STANDARD_PAGE_PAD_Y - Math.round(lineH * (isIOS ? 1.0 : 0.55)));
+  // 每行字数：向下留 0.6 字的余量——浏览器的"避头尾"规则会让个别行少放一个字（标点不能在行首），
+  // 实测（小字号、字数少的行多）不留余量会有页最后一行被裁掉
+  const cpl = Math.max(6, Math.floor(contentW / fontPx) - (isIOS ? 1 : 0.6));
   const headCpl = Math.max(6, Math.floor(contentW / 17)); // 标题每行字数（h2 字号 17px）
   const pages = [];
   let current = [];
@@ -807,10 +812,12 @@ function paginateStandardByLines(blocks, fontSizePt, pageWidth, pageHeight) {
     const type = block?.type || 'text';
     if (type === 'image' || type === 'table') {
       const mediaBlock = { ...block, blockIndex };
+      // 页面 CSS：figure.media 高度 = 72vh（vh 是整个页面视口高，不是 innerH）+ 上下外边距约 6px
       const h = type === 'image'
-        ? Math.round(innerH * 0.72) + 6
+        ? Math.round(Number(pageHeight || 0) * 0.72) + 6
         : Math.min(innerH, (Array.isArray(block.rows) ? block.rows.length : 3) * 27 + 8);
-      if (current.length && used <= innerH * 0.32 && used + h <= innerH * 1.05) {
+      // 图/表和前面的少量文字同页，但**必须真的放得下**（旧规则允许超出 5%，实测图片页底部被裁掉一截）
+      if (current.length && used <= innerH * 0.32 && used + h <= innerH) {
         current.push(mediaBlock);
         flush();
       } else {
@@ -847,7 +854,7 @@ function paginateStandardByLines(blocks, fontSizePt, pageWidth, pageHeight) {
       if (fit < 1) fit = 1; // 空页也放不下一行（极端小屏）：至少放一行，避免死循环
       // 拆页后下一页顶部不能只剩一行（孤行）：宁可这页少放一行
       if (totalLines - fit === 1 && fit >= 3) fit -= 1;
-      let cut = Math.min(rest.length, fit * cpl);
+      let cut = Math.min(rest.length, Math.floor(fit * cpl));
       // 下一页不要以标点开头
       while (cut > 1 && STANDARD_NO_LINE_START.includes(rest[cut])) cut -= 1;
       current.push({ ...textBlock, text: rest.slice(0, cut) });
