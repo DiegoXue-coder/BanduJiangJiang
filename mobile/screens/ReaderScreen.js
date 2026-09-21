@@ -21,6 +21,7 @@ import { useAuthGate } from '../lib/authGate';
 import BookChatScreen from './BookChatScreen';
 import ReaderChrome, { READER_INFO_STRIP_HEIGHT } from '../components/ReaderChrome';
 import StandardPager from '../components/StandardPager';
+import SelectionPopup from '../components/SelectionPopup';
 
 // 阶段十一：epub正文（书本原文内容）换成思源宋体——这部分渲染在
 // react-native-webview内部，不是普通RN Text，普通expo-font的useFonts()
@@ -635,10 +636,42 @@ function buildStandardPageHtml({
         var cfiRange=fragments.length>1
           ? fragments[0].cfiRange + '..' + fragments[fragments.length-1].cfiRange
           : (fragments[0] && fragments[0].cfiRange) || (anchor && anchor.cfiRange);
+        // 选中文字的位置（CSS 像素，相对页面视口）：RN 侧据此把"划线/问AI"小菜单摆在选中文字旁边。
+        // 选区可能跨多行，所以量两个矩形：第一行那几个字（菜单默认摆在它上方）、
+        // 最后一行那几个字（上方放不下时菜单摆在它下方）
+        var rect=null, rectEnd=null;
+        try {
+          var selEls=document.querySelectorAll('.tok.sel');
+          var rects=[];
+          for(var k=0;k<selEls.length;k++){
+            // 一个词元素可能被折成两行：getBoundingClientRect 会把两行包成一个大框，
+            // 要用 getClientRects 拿逐行的小框
+            var lines=selEls[k].getClientRects();
+            for(var li=0;li<lines.length;li++){
+              var rr=lines[li];
+              if(rr && (rr.width || rr.height)) rects.push({l:rr.left,t:rr.top,r:rr.right,b:rr.bottom});
+            }
+          }
+          if(rects.length){
+            var minT=rects[0].t, maxT=rects[0].t;
+            for(var m=1;m<rects.length;m++){ if(rects[m].t<minT) minT=rects[m].t; if(rects[m].t>maxT) maxT=rects[m].t; }
+            var joinLine=function(top){
+              var o=null;
+              for(var q=0;q<rects.length;q++){
+                if(Math.abs(rects[q].t-top)>4) continue;
+                if(!o) o={l:rects[q].l,t:rects[q].t,r:rects[q].r,b:rects[q].b};
+                else { o.l=Math.min(o.l,rects[q].l); o.t=Math.min(o.t,rects[q].t); o.r=Math.max(o.r,rects[q].r); o.b=Math.max(o.b,rects[q].b); }
+              }
+              return o;
+            };
+            rect=joinLine(minT);
+            rectEnd=joinLine(maxT);
+          }
+        } catch(err) { rect=null; rectEnd=null; }
         selecting=false;
         anchor=null;
         focus=null;
-        if(text) post({type:'standardSelection', text:text, cfiRange:cfiRange || 'standard:unknown', fragments:fragments});
+        if(text) post({type:'standardSelection', text:text, cfiRange:cfiRange || 'standard:unknown', fragments:fragments, rect:rect, rectEnd:rectEnd, vw:window.innerWidth||0, vh:window.innerHeight||0});
         return true;
       }
       document.addEventListener('touchstart', function(e){
@@ -2316,7 +2349,9 @@ function ReaderInner({
       if (!text) return;
       if (standardSelectionTimerRef.current) clearTimeout(standardSelectionTimerRef.current);
       standardSelectionTimerRef.current = setTimeout(() => {
-        setSelection({ text, cfiRange, fragments });
+        const r = data.rect && Number.isFinite(data.rect.l) ? data.rect : null;
+        const rEnd = data.rectEnd && Number.isFinite(data.rectEnd.l) ? data.rectEnd : r;
+        setSelection({ text, cfiRange, fragments, rect: r, rectEnd: rEnd, vw: Number(data.vw) || 0, vh: Number(data.vh) || 0 });
         standardSelectionTimerRef.current = null;
       }, 50);
       return;
@@ -2377,6 +2412,8 @@ function ReaderInner({
   }
 
   const activeSelection = selection;
+  // 安卓沉浸式且拿到了选区矩形：用贴着选区的浮动小菜单；否则（iOS、EPUB 原版模式、旧页面）仍用底部选字栏
+  const floatingSelection = immersive && !!activeSelection && !!activeSelection.rect;
 
   return (
     <SafeAreaView edges={immersive ? ['left', 'right'] : ['bottom', 'left', 'right']} style={[styles.safe, { backgroundColor: THEMES[themeName].body.background }]}>
@@ -2659,6 +2696,25 @@ function ReaderInner({
                     bounces={false}
                   />
                 )}
+                {/* 选中文字后贴着选区弹出的小菜单（划线 / 问AI），仅安卓沉浸式 */}
+                {floatingSelection && readerInteractionReady ? (
+                  <SelectionPopup
+                    rect={activeSelection.rect}
+                    rectEnd={activeSelection.rectEnd}
+                    vw={activeSelection.vw}
+                    vh={activeSelection.vh}
+                    dark={THEME_FAMILY[themeName] === 'dark'}
+                    onHighlight={async () => {
+                      await handleHighlight(activeSelection.cfiRange, activeSelection.text, activeSelection.fragments);
+                      clearStandardSelection();
+                    }}
+                    onAsk={() => {
+                      const { text, cfiRange } = activeSelection;
+                      clearStandardSelection();
+                      openChat(text, cfiRange);
+                    }}
+                  />
+                ) : null}
               </>
             )}
           </View>
@@ -2729,7 +2785,7 @@ function ReaderInner({
         )}
       </View>
 
-      {!!activeSelection && readerInteractionReady && (
+      {!!activeSelection && readerInteractionReady && !floatingSelection && (
         <View style={[styles.selectionBar, { backgroundColor: uiTheme.text, borderRadius: uiTheme.radius }, immersive && { bottom: READER_INFO_STRIP_HEIGHT + insets.bottom + 8 }]}>
           <Text style={[styles.selectionBarText, { color: uiTheme.bg }]} numberOfLines={1}>“{activeSelection.text}”</Text>
           <View style={styles.selectionBarActions}>
