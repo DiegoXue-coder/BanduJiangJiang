@@ -39,9 +39,10 @@ const LOAD_WAIT_MAX_MS = 700;
 const PREV_RASTER_MS = 120;
 
 const PagerPage = React.memo(function PagerPage({
-  page, width, translateX, zIndex, isCurrent, isCurrentRef, onMessageRef, webRef, onLoaded,
+  page, width, translateX, zIndex, isCurrent, isCurrentRef, onMessageRef, registerWeb, onLoaded,
   baseUrl, allowFileAccess, background,
 }) {
+  const setWebRef = useCallback((instance) => registerWeb(page.key, instance), [registerWeb, page.key]);
   // source 对象必须稳定：每次渲染都是新对象的话 WebView 会当作"换了页面"重新加载
   const source = useMemo(
     () => (baseUrl ? { html: page.html, baseUrl } : { html: page.html }),
@@ -60,7 +61,7 @@ const PagerPage = React.memo(function PagerPage({
       style={[styles.slot, { width, zIndex, backgroundColor: background, transform: [{ translateX }] }]}
     >
       <WebView
-        ref={isCurrent ? webRef : undefined}
+        ref={setWebRef}
         originWhitelist={['*']}
         source={source}
         allowFileAccess={allowFileAccess}
@@ -93,7 +94,13 @@ const StandardPager = forwardRef(function StandardPager({
   const [prepPrev, setPrepPrev] = useState(false);
   const progress = useRef(new Animated.Value(0)).current; // 0 → 1
   const busyRef = useRef(false);
-  const webRef = useRef(null);
+  // 每个已挂载页面的 WebView 引用（key → ref）：给"当前页注入脚本"和"换主题时改所有页颜色"用
+  const webMapRef = useRef(new Map());
+  const registerWeb = useCallback((key, instance) => {
+    if (instance) webMapRef.current.set(key, instance); else webMapRef.current.delete(key);
+  }, []);
+  const themeRef = useRef(null); // 最近一次 applyTheme 的颜色；页面加载完时补注入，防止"注入时页面还没加载好"
+  const themeScript = (t) => `(function(){var d=document,b=d.body;if(!b)return;d.documentElement.style.background='${t.background}';b.style.background='${t.background}';b.style.color='${t.color}';})();true;`;
   const onMessageRef = useRef(null);
   onMessageRef.current = onMessage;
   const loadedRef = useRef(new Set());
@@ -114,6 +121,11 @@ const StandardPager = forwardRef(function StandardPager({
 
   const handleLoaded = useCallback((key) => {
     loadedRef.current.add(key);
+    // 页面刚加载好，如果用户在它加载期间换过主题，这里补注入一次
+    if (themeRef.current) {
+      const w = webMapRef.current.get(key);
+      w && w.injectJavaScript && w.injectJavaScript(themeScript(themeRef.current));
+    }
     const waiters = loadWaitersRef.current.get(key);
     if (waiters) {
       loadWaitersRef.current.delete(key);
@@ -164,7 +176,15 @@ const StandardPager = forwardRef(function StandardPager({
   useImperativeHandle(ref, () => ({
     isBusy: () => busyRef.current,
     // 给外面清选区用：只对"当前页"注入脚本
-    injectJavaScript: (js) => webRef.current && webRef.current.injectJavaScript && webRef.current.injectJavaScript(js),
+    injectJavaScript: (js) => {
+      const w = webMapRef.current.get(pagesRef.current.cur ? pagesRef.current.cur.key : null);
+      return w && w.injectJavaScript && w.injectJavaScript(js);
+    },
+    // 换主题：不重建页面，直接把新的底色/字色注入所有已挂载的页面
+    applyTheme: (t) => {
+      themeRef.current = t;
+      webMapRef.current.forEach((w) => w && w.injectJavaScript && w.injectJavaScript(themeScript(t)));
+    },
     // 翻一页：dir = +1（下一页）/ -1（上一页）。对面没有页面（还没加载）返回 false，
     // 由外面退回"不带动画的直接跳转"。动画结束后回调 onCommit，让外面把页码真正 ±1。
     turn: (dir, onCommit) => {
@@ -256,7 +276,7 @@ const StandardPager = forwardRef(function StandardPager({
             isCurrent={role === 'cur'}
             isCurrentRef={isCurrentRef}
             onMessageRef={onMessageRef}
-            webRef={webRef}
+            registerWeb={registerWeb}
             onLoaded={handleLoaded}
             baseUrl={baseUrl}
             allowFileAccess={allowFileAccess}

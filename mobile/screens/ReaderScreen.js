@@ -2057,7 +2057,13 @@ function ReaderInner({
   // 每一页的 HTML 只在"这一页的内容/样式"变了才重新生成（相邻页不会每次渲染都重算）。
   // key 里带上字体/主题/字体来源：这些一变就整批换新 WebView；字号、划线变化只让同一个
   // WebView 原地换内容（旧内容会留到新内容画好，比先白屏好）。
-  const standardStyleSig = `${bodyFontKey}-${themeName}-${standardFontUrl ? 'file' : (standardFontBase64 ? 'font' : 'fallback')}`;
+  // 安卓的翻页容器换主题时不重建页面，而是往现有页面里注入新的底色/字色（见下面 applyTheme 的 effect）：
+  // 重建 3 个整屏 WebView 又慢又吃内存，连着切主题时会出现整页空白。所以安卓这里的 key 和
+  // html 都不依赖主题（themeDep 固定）；iOS 仍走旧的"换主题=换 key 重建"。
+  const themeRef = useRef(themeName);
+  themeRef.current = themeName;
+  const themeDep = Platform.OS === 'android' ? 'static' : themeName;
+  const standardStyleSig = `${bodyFontKey}-${themeDep}-${standardFontUrl ? 'file' : (standardFontBase64 ? 'font' : 'fallback')}`;
   const makeStandardPage = useMemo(() => (blocks, chapterId, pageIndex) => ({
     key: `${chapterId}:${pageIndex}:${standardStyleSig}`,
     html: buildStandardPageHtml({
@@ -2069,7 +2075,7 @@ function ReaderInner({
       fontWeight: bodyFont.profile.weight || 400,
       fontSize: standardFontSize,
       lineHeight: standardLineHeight,
-      theme: THEMES[themeName].body,
+      theme: THEMES[themeRef.current].body,
       accent: uiTheme.accent,
       highlights: standardSavedHighlights,
       chapterId,
@@ -2084,12 +2090,17 @@ function ReaderInner({
     standardFontUrl,
     standardFontSize,
     standardLineHeight,
-    themeName,
+    themeDep,
     uiTheme.accent,
     standardSavedHighlights,
     immersive,
     insets.top,
   ]);
+  // 换主题：把新颜色注入现有页面（新建的页面 html 里本来就是当前主题）
+  useEffect(() => {
+    if (Platform.OS !== 'android') return;
+    standardPagerRef.current?.applyTheme?.(THEMES[themeName].body);
+  }, [themeName]);
   const prevChapterId = readingChapters?.[standardChapterIndex - 1]?.id || '';
   const nextChapterId = readingChapters?.[standardChapterIndex + 1]?.id || '';
   const safePageIndex = Math.min(standardPageIndex, Math.max(0, standardPages.length - 1));
