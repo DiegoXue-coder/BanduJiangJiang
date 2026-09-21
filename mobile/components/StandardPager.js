@@ -258,7 +258,9 @@ const StandardPager = forwardRef(function StandardPager({
           if (Date.now() - downAt.value > HOLD_MS) { decided.value = 2; sm.fail(); return; }
           if (Math.abs(dx) > 10 && Math.abs(dx) > Math.abs(dy) * 1.2) {
             decided.value = 1;
-            baseDx.value = dx; // 从"开始拖"这一刻算起，页面不会一下子跳 10px
+            // 从"开始拖"这一刻算起，页面不会一下子跳 10 多 px；但最多只扣 12：
+            // 快速甩动时第一个触摸事件可能已经走了一大截，全扣掉会把这一甩吃掉
+            baseDx.value = Math.max(-12, Math.min(12, dx));
             busySV.value = true;
             sm.activate();
             runOnJS(dragStartJS)();
