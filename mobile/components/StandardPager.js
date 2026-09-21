@@ -1,64 +1,80 @@
-// 标准阅读器的"翻页容器"：让翻页从"画面直接跳变"变成"整页平滑滑过去"。
+// 标准阅读器的"翻页容器"：整页滑动翻页，而且页面跟着手指走。
 //
-// 之前的做法：整个阅读区只有一个 WebView，翻页 = 换 key = 销毁旧的、新建一个新的、再重新排版，
-// 中间要 250~450ms，而且期间画面是直接切换、没有过渡。
+// ── 历史 ──────────────────────────────────────────────────────────────────────
+// 改造前：一页一个 WebView，翻页=销毁旧的、新建一个、重新排版（250~450ms），画面直接跳变。
+// 第一版（点一下放一段固定动画）：当前页/下一页常驻，翻页时用原生动画把当前页滑走 260ms。
+//   遗留两个问题：① 动画是"写死的"，不跟手；② 往前翻时上一页没常驻，要现挂现等约 0.3s。
+// 现在这版：手指按住页面横向拖，页面就跟着手指走（挪到哪跟到哪，挪开一半就走一半，挪回来就回来），
+//   松手时按"拖了多远/甩得多快"决定翻过去还是弹回来；点边缘翻页仍然是一段动画。
+//   上一页/当前页/下一页三个 WebView 常驻，往前翻也是即点即滑。
 //
-// 现在的做法：上一页 / 当前页 / 下一页 三个 WebView 常驻，翻页之前下一页早已排好版、画好了；
-// 翻页时只做一件事——用原生动画把最上面那一页横向滑走（或滑入），动画跑在原生线程，
-// 不占 JS 线程，正文再长也不会卡。动画结束后再通知外面"页码 ±1"，三个 WebView 换角色
-// （旧的"下一页"变"当前页"，是同一个 WebView 实例，不重建），再在另一端补一个新的相邻页。
+// ── 怎么做到不卡 ─────────────────────────────────────────────────────────────
+// 页面位置由 Reanimated 的"共享值"驱动，手势回调和动画都跑在原生 UI 线程，
+// 手指每动一下，位置直接在 UI 线程更新，不经过 JS 线程（JS 线程忙于排版也不影响跟手）。
 //
-// 【为什么三页是"叠"在一起而不是"排成一行"】第一版把上一页/下一页排在屏幕左右两侧之外，
-// 模拟器录屏抽帧发现：滑进来的页第一帧只有上半截有字、下半截空白，隔几帧才补全——
-// 因为整个跑在屏幕外的 WebView 不会被绘制，Chromium 没给它画完整。所以改成：
-// 三页始终都在屏幕范围内、上下叠放（当前页在最上面、下一页在中间、上一页在最下面），
-// 被压在下面的页照常被绘制，滑动时"露"出来的页一定是已经画好的。
-//   往后翻：当前页向左滑走，露出压在下面的下一页；
-//   往前翻：上一页从左边滑进来，盖住当前页。（此时上一页临时提到最上层）
-// 这是"覆盖式"翻页（iOS 图书 / 微信读书的一种常见样式），不是"整体平移式"。
+// ── 页面怎么摆 ───────────────────────────────────────────────────────────────
+// 三页始终叠在屏幕范围内（当前页在最上面）——屏幕外的 WebView 不会被绘制（实测滑进来时下半截空白），
+// 所以不能把邻页排到屏幕外等着：
+//   往后翻（手指向左拖）：当前页向左滑走，露出压在下面的下一页；
+//   往前翻（手指向右拖）：当前页向右滑走，露出压在下面的上一页。
+// 下一页比上一页层级高，所以往前翻时要把"下一页"临时挪到屏幕右侧之外，才能露出上一页。
+// 每个页面实例有自己的位移共享值（不是按"当前/上一页/下一页"角色共用一个）：
+// 翻完之后各页角色互换时，每个实例的位置一像素都不用改，不会闪。
 //
-// 【为什么常驻 2 个而不是 3 个】三个整屏 WebView 同时叠在屏幕里，模拟器（2.5GB 内存）上改字号
-// 让它们同时重载后，Chromium 报 "tile memory limits exceeded, some content may not draw"，
-// 整页空白。所以：静止时只常驻"当前页 + 下一页"（往后翻是最常见的动作，做到最丝滑）；
-// 往前翻时才临时把"上一页"挂到当前页下面、等它画好、再滑进来，同时把"下一页"卸掉——
-// 任何时刻整屏 WebView 不超过 2 个。往前翻因此会有一小段"等上一页画好"的时间
-// （和改造前的翻页耗时相当），换来内存安全；往后翻则是即点即滑。
+// ── 内存 ────────────────────────────────────────────────────────────────────
+// 三个整屏 WebView 同时叠着，模拟器（2.5GB）上多个页面同时重载会让 Chromium 报
+// "tile memory limits exceeded, some content may not draw"，整页空白。所以：
+// ① 先加载当前页，它画好之后才挂下一页，下一页画好之后才挂上一页（错开）；
+// ② 改字号/字体这类"整批页面换内容"的变更，邻页比当前页晚 350/700ms 才重载；
+// ③ 换主题不重建页面，直接往现有页面注入新颜色（见 applyTheme）。
 import React, {
   forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState,
 } from 'react';
-import { AccessibilityInfo, Animated, Easing, StyleSheet, View } from 'react-native';
+import { AccessibilityInfo, StyleSheet, View } from 'react-native';
+import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+import Animated, {
+  Easing, makeMutable, runOnJS, useAnimatedStyle, useSharedValue, withTiming,
+} from 'react-native-reanimated';
 import { WebView } from 'react-native-webview';
 
-// 翻页动画时长：手感上"轻快但看得清"的区间是 220~300ms。用 easeOutQuint 类的曲线：
-// 起步快、收尾慢，像真的纸张被推过去后自然停稳。
-const TURN_MS = 260;
-const TURN_EASING = Easing.bezier(0.22, 1, 0.36, 1);
-// 目标页还没加载完时，最多等多久再开始动画（防止滑出来一张空白页）
-const LOAD_WAIT_MAX_MS = 700;
-// 上一页加载完之后再等这么久才开始滑，给 Chromium 一点时间把画面真正绘出来
-const PREV_RASTER_MS = 120;
+const TURN_MS = 260; // 点边缘翻页的动画时长
+const LOAD_WAIT_MAX_MS = 700; // 目标页还没加载完时，点边缘翻页最多等多久
+// 按住不动超过这个时间就当作"长按选字"，手势让给页面自己处理（页面里长按选字是 720ms，取个更早的值）
+const HOLD_MS = 450;
+const NEIGHBOR_RELOAD_DELAY = { next: 350, prev: 700 };
+const Z = { prev: 1, next: 2, cur: 3 };
 
 const PagerPage = React.memo(function PagerPage({
-  page, width, translateX, zIndex, isCurrent, isCurrentRef, onMessageRef, registerWeb, onLoaded,
+  page, role, width, tx, isCurrentRef, onMessageRef, registerWeb, onLoaded,
   baseUrl, allowFileAccess, background,
 }) {
+  // 位置：只由自己的共享值决定（UI 线程更新）
+  const animatedStyle = useAnimatedStyle(() => ({ transform: [{ translateX: tx.value }] }));
   const setWebRef = useCallback((instance) => registerWeb(page.key, instance), [registerWeb, page.key]);
+  // 邻页在"整批换内容"时错开重载：当前页立刻换，下一页晚 350ms，上一页晚 700ms
+  const [html, setHtml] = useState(page.html);
+  useEffect(() => {
+    if (page.html === html) return undefined;
+    const delay = NEIGHBOR_RELOAD_DELAY[role] || 0;
+    if (!delay) { setHtml(page.html); return undefined; }
+    const t = setTimeout(() => setHtml(page.html), delay);
+    return () => clearTimeout(t);
+  }, [page.html, role, html]);
   // source 对象必须稳定：每次渲染都是新对象的话 WebView 会当作"换了页面"重新加载
   const source = useMemo(
-    () => (baseUrl ? { html: page.html, baseUrl } : { html: page.html }),
-    [page.html, baseUrl],
+    () => (baseUrl ? { html, baseUrl } : { html }),
+    [html, baseUrl],
   );
   const handleMessage = useCallback((event) => {
-    // 只有"当前页"的消息算数：被压在下面的上一页/下一页（比如它们自己的自检消息）一律忽略，
-    // 否则会出现"点的是这页，翻页/工具栏却被别的页触发"。
+    // 只有"当前页"的消息算数：压在下面的邻页（比如它们自己的字体自检消息）一律忽略
     if (!isCurrentRef.current || isCurrentRef.current !== page.key) return;
     onMessageRef.current && onMessageRef.current(event);
   }, [isCurrentRef, onMessageRef, page.key]);
   return (
     <Animated.View
-      // 不是"当前页"的页不接收触摸，避免动画中途被误点
-      pointerEvents={isCurrent ? 'auto' : 'none'}
-      style={[styles.slot, { width, zIndex, backgroundColor: background, transform: [{ translateX }] }]}
+      // 只有当前页接收触摸；邻页压在下面，不能被误点
+      pointerEvents={role === 'cur' ? 'auto' : 'none'}
+      style={[styles.slot, { width, zIndex: Z[role], backgroundColor: background }, animatedStyle]}
     >
       <WebView
         ref={setWebRef}
@@ -81,36 +97,47 @@ const PagerPage = React.memo(function PagerPage({
 });
 
 // pages: { prev, cur, next }，每个是 { key, html } 或 null（书的首页没有上一页 / 末页没有下一页 /
-//        相邻章节还没读进来）。key 要能唯一标识"这一页的内容+样式"，同一页不变。
+//        相邻章节还没读进来）。key 要能唯一标识"这一页的位置+字体"，同一页不变。
+// onCommit(dir)：翻页动画结束（页面已经滑到位）后调用，外面据此把页码 ±1。
+// onDragStart：手指开始拖页面时调用（外面用来清掉选区）。
+// dragEnabled：false 时不响应拖动（比如工具栏展开着），触摸原样交给页面里的脚本。
 const StandardPager = forwardRef(function StandardPager({
-  pages, baseUrl, allowFileAccess, background, onMessage,
+  pages, baseUrl, allowFileAccess, background, onMessage, onCommit, onDragStart, dragEnabled = true,
 }, ref) {
   const [width, setWidth] = useState(0);
-  // 正在进行的翻页：null（静止）| { dir: 1 | -1 }。静止时三页都是静态的 translateX=0，
-  // 只有动画期间才把最上面那页绑到动画值上；动画结束的那一刻，这个 state 和页码在同一次
-  // 渲染里一起更新，所以"角色互换"和"回到静止样式"是原子的，不会闪。
-  const [turning, setTurning] = useState(null);
-  // 往前翻的准备阶段：上一页已挂在当前页下面正在加载/绘制，画好之前不开始动画
-  const [prepPrev, setPrepPrev] = useState(false);
-  const progress = useRef(new Animated.Value(0)).current; // 0 → 1
-  const busyRef = useRef(false);
-  // 每个已挂载页面的 WebView 引用（key → ref）：给"当前页注入脚本"和"换主题时改所有页颜色"用
+  const [, setLoadTick] = useState(0); // 有页面加载完就 +1，让"能不能挂邻页/能不能拖"重新计算
+  const [prevForce, setPrevForce] = useState(false);
+
+  const pagesRef = useRef(pages);
+  pagesRef.current = pages;
+  const onMessageRef = useRef(null);
+  onMessageRef.current = onMessage;
+  const onCommitRef = useRef(null);
+  onCommitRef.current = onCommit;
+  const onDragStartRef = useRef(null);
+  onDragStartRef.current = onDragStart;
+  const isCurrentRef = useRef(null);
+  isCurrentRef.current = pages.cur ? pages.cur.key : null;
+
+  const busyRef = useRef(false); // JS 侧：正在拖/正在动画/提交后等待角色互换
+  const busySV = useSharedValue(false); // UI 侧同一份状态（手势回调里读）
+  const loadedRef = useRef(new Set());
+  const loadWaitersRef = useRef(new Map());
+  const reduceMotionRef = useRef(false);
+  const mountedKeysRef = useRef(new Set());
   const webMapRef = useRef(new Map());
+  const txMapRef = useRef(new Map());
+  const themeRef = useRef(null);
+  const releaseTimerRef = useRef(null);
+
+  const getTx = (key) => {
+    let sv = txMapRef.current.get(key);
+    if (!sv) { sv = makeMutable(0); txMapRef.current.set(key, sv); }
+    return sv;
+  };
   const registerWeb = useCallback((key, instance) => {
     if (instance) webMapRef.current.set(key, instance); else webMapRef.current.delete(key);
   }, []);
-  const themeRef = useRef(null); // 最近一次 applyTheme 的颜色；页面加载完时补注入，防止"注入时页面还没加载好"
-  const themeScript = (t) => `(function(){var d=document,b=d.body;if(!b)return;d.documentElement.style.background='${t.background}';b.style.background='${t.background}';b.style.color='${t.color}';})();true;`;
-  const onMessageRef = useRef(null);
-  onMessageRef.current = onMessage;
-  const loadedRef = useRef(new Set());
-  const loadWaitersRef = useRef(new Map());
-  const pagesRef = useRef(pages);
-  pagesRef.current = pages;
-  const isCurrentRef = useRef(null);
-  isCurrentRef.current = pages.cur ? pages.cur.key : null;
-  const reduceMotionRef = useRef(false);
-  const pendingRef = useRef(null); // { dir, startKey, onCommit }
 
   useEffect(() => {
     let alive = true;
@@ -121,57 +148,165 @@ const StandardPager = forwardRef(function StandardPager({
 
   const handleLoaded = useCallback((key) => {
     loadedRef.current.add(key);
-    // 页面刚加载好，如果用户在它加载期间换过主题，这里补注入一次
+    // 页面刚加载好：如果用户在它加载期间换过主题，补注入一次
     if (themeRef.current) {
       const w = webMapRef.current.get(key);
-      w && w.injectJavaScript && w.injectJavaScript(themeScript(themeRef.current));
+      const t = themeRef.current;
+      w && w.injectJavaScript && w.injectJavaScript(`(function(){var d=document,b=d.body;if(!b)return;d.documentElement.style.background='${t.background}';b.style.background='${t.background}';b.style.color='${t.color}';})();true;`);
     }
     const waiters = loadWaitersRef.current.get(key);
     if (waiters) {
       loadWaitersRef.current.delete(key);
       waiters.forEach((fn) => fn());
     }
+    setLoadTick((n) => n + 1);
   }, []);
 
-  // 已卸载页面的"已加载"记录顺手清掉，避免集合无限增长
+  // ── 哪些页挂载 ──
+  // 先当前页；当前页加载完才挂下一页；下一页加载完（或等了 1.2s）才挂上一页。已经挂着的不会被卸掉。
+  const cur = pages.cur;
+  const curLoaded = !!cur && loadedRef.current.has(cur.key);
+  const nextLoaded = !!pages.next && loadedRef.current.has(pages.next.key);
+  const has = (p) => !!p && mountedKeysRef.current.has(p.key);
+  const showNext = !!pages.next && (has(pages.next) || curLoaded);
+  const showPrev = !!pages.prev && (has(pages.prev) || (curLoaded && (!pages.next || nextLoaded || prevForce)));
   useEffect(() => {
+    setPrevForce(false);
+    if (!cur) return undefined;
+    const t = setTimeout(() => setPrevForce(true), 1200);
+    return () => clearTimeout(t);
+  }, [cur && cur.key]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // 手势里要用的"能不能翻"（UI 线程读，用共享值）：对面页面已挂载并且加载完
+  const hasNextSV = useSharedValue(false);
+  const hasPrevSV = useSharedValue(false);
+  const canNext = showNext && nextLoaded;
+  const canPrev = showPrev && !!pages.prev && loadedRef.current.has(pages.prev.key);
+  useEffect(() => { hasNextSV.value = canNext; hasPrevSV.value = canPrev; }, [canNext, canPrev, hasNextSV, hasPrevSV]);
+
+  // ── 翻完之后（当前页 key 变了）：角色已互换，收尾 ──
+  const curKey = cur ? cur.key : null;
+  useEffect(() => {
+    // 已卸载页面的记录顺手清掉
     const alive = new Set([pages.prev?.key, pages.cur?.key, pages.next?.key].filter(Boolean));
     loadedRef.current.forEach((k) => { if (!alive.has(k)) loadedRef.current.delete(k); });
-  }, [pages.prev?.key, pages.cur?.key, pages.next?.key]);
-
-  // turning 一变成非空（样式已绑到动画值上）就开跑
+    txMapRef.current.forEach((sv, k) => { if (!alive.has(k)) txMapRef.current.delete(k); });
+    // 所有页位移归零：刚滑走的旧当前页现在是"上一页/下一页"，压在新当前页下面，归零看不出来；
+    // 新当前页原本就压在下面、位移是 0。归零发生在角色互换之后，所以不会闪。
+    txMapRef.current.forEach((sv) => { sv.value = 0; });
+    busyRef.current = false;
+    busySV.value = false;
+    if (releaseTimerRef.current) { clearTimeout(releaseTimerRef.current); releaseTimerRef.current = null; }
+  }, [curKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  const listKeys = [showPrev && pages.prev, cur, showNext && pages.next].filter(Boolean).map((p) => p.key).join('|');
   useEffect(() => {
-    if (!turning || !pendingRef.current) return undefined;
-    const { startKey, onCommit } = pendingRef.current;
-    const done = (commit) => {
-      pendingRef.current = null;
-      if (commit) {
-        // 同一次批处理里：回到静止样式 + 外面把页码改掉
-        setTurning(null);
-        setPrepPrev(false);
-        onCommit && onCommit();
-      } else {
-        setTurning(null);
-        setPrepPrev(false);
-      }
+    mountedKeysRef.current = new Set(listKeys ? listKeys.split('|') : []);
+  }, [listKeys]);
+
+  // ── 翻页动画结束（不管是点边缘还是松手）：通知外面页码 ±1 ──
+  const finishJS = useCallback((dir) => {
+    onCommitRef.current && onCommitRef.current(dir);
+    // 兜底：万一外面没让当前页 key 变（比如翻页被拒绝），别让"忙"状态卡住
+    if (releaseTimerRef.current) clearTimeout(releaseTimerRef.current);
+    releaseTimerRef.current = setTimeout(() => {
+      releaseTimerRef.current = null;
       busyRef.current = false;
-    };
-    // 等待期间/动画期间整批页面被换掉了（改了字号等），这次翻页作废，不提交页码
-    const stillValid = () => pagesRef.current.cur && pagesRef.current.cur.key === startKey;
-    if (reduceMotionRef.current) {
-      done(stillValid());
-      return undefined;
-    }
-    const anim = Animated.timing(progress, {
-      toValue: 1,
-      duration: TURN_MS,
-      easing: TURN_EASING,
-      useNativeDriver: true,
-    });
-    anim.start(({ finished }) => done(finished && stillValid()));
-    return () => anim.stop();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [turning]);
+      busySV.value = false;
+      txMapRef.current.forEach((sv) => { sv.value = 0; });
+    }, 600);
+  }, [busySV]);
+  const cancelJS = useCallback(() => {
+    busyRef.current = false;
+  }, []);
+  const dragStartJS = useCallback(() => {
+    busyRef.current = true;
+    onDragStartRef.current && onDragStartRef.current();
+  }, []);
+
+  // ── 手势：横向拖动跟手 ──
+  const startX = useSharedValue(0);
+  const startY = useSharedValue(0);
+  const downAt = useSharedValue(0);
+  const baseDx = useSharedValue(0);
+  const decided = useSharedValue(0); // 0 还没定 / 1 正在拖 / 2 不是横拖（放弃）
+  const curTx = cur ? getTx(cur.key) : null;
+  const nextTx = pages.next ? getTx(pages.next.key) : null;
+  const gesture = useMemo(() => {
+    if (!curTx || !width) return Gesture.Pan().enabled(false);
+    return Gesture.Pan()
+      .manualActivation(true)
+      .enabled(dragEnabled)
+      .onTouchesDown((e) => {
+        'worklet';
+        const t = e.allTouches[0];
+        if (!t) return;
+        startX.value = t.absoluteX;
+        startY.value = t.absoluteY;
+        downAt.value = Date.now();
+        decided.value = busySV.value ? 2 : 0;
+      })
+      .onTouchesMove((e, sm) => {
+        'worklet';
+        const t = e.allTouches[0];
+        if (!t) return;
+        const dx = t.absoluteX - startX.value;
+        const dy = t.absoluteY - startY.value;
+        if (decided.value === 0) {
+          // 竖着滑（呼出/收起工具栏）→ 不是我们的
+          if (Math.abs(dy) > 14 && Math.abs(dy) > Math.abs(dx)) { decided.value = 2; sm.fail(); return; }
+          // 按住不动超过一会儿 → 是长按选字，让给页面
+          if (Date.now() - downAt.value > HOLD_MS) { decided.value = 2; sm.fail(); return; }
+          if (Math.abs(dx) > 10 && Math.abs(dx) > Math.abs(dy) * 1.2) {
+            decided.value = 1;
+            baseDx.value = dx; // 从"开始拖"这一刻算起，页面不会一下子跳 10px
+            busySV.value = true;
+            sm.activate();
+            runOnJS(dragStartJS)();
+          } else {
+            return;
+          }
+        }
+        if (decided.value === 1) {
+          let x = dx - baseDx.value;
+          // 对面没有可翻的页：只给一点阻尼位移，暗示"到头了"
+          if ((x < 0 && !hasNextSV.value) || (x > 0 && !hasPrevSV.value)) x *= 0.25;
+          x = Math.max(-width, Math.min(width, x));
+          curTx.value = x;
+          // 下一页层级比上一页高：往前翻（向右拖）时把下一页挪到屏幕右侧之外，才能露出上一页
+          if (nextTx) nextTx.value = x > 0 ? width : 0;
+        }
+      })
+      .onEnd((e) => {
+        'worklet';
+        if (decided.value !== 1) return;
+        const x = curTx.value;
+        const v = e.velocityX;
+        const dir = x < 0 ? 1 : -1; // 1=往后翻(下一页) -1=往前翻
+        const can = dir === 1 ? hasNextSV.value : hasPrevSV.value;
+        const progress = Math.abs(x) / width;
+        const along = dir === 1 ? -v : v; // 沿"翻页方向"的速度，正=朝翻页方向甩
+        // 拖过 30% 且没有往回甩 → 翻；没到 30% 但朝翻页方向甩得够快 → 也翻
+        const go = can && (progress > 0.3 ? along > -300 : (along > 700 && progress > 0.03));
+        if (go) {
+          const remaining = width - Math.abs(x);
+          const speed = Math.max(Math.abs(v), 900);
+          const dur = Math.max(110, Math.min(260, (remaining / speed) * 1000 + 70));
+          curTx.value = withTiming(dir === 1 ? -width : width, { duration: dur, easing: Easing.out(Easing.cubic) }, (finished) => {
+            'worklet';
+            if (finished) runOnJS(finishJS)(dir);
+          });
+        } else {
+          curTx.value = withTiming(0, { duration: 200, easing: Easing.out(Easing.cubic) }, (finished) => {
+            'worklet';
+            if (finished) {
+              if (nextTx) nextTx.value = 0;
+              busySV.value = false;
+              runOnJS(cancelJS)();
+            }
+          });
+        }
+      });
+  }, [curTx, nextTx, width, dragEnabled, startX, startY, downAt, baseDx, decided, busySV, hasNextSV, hasPrevSV, dragStartJS, finishJS, cancelJS]);
 
   useImperativeHandle(ref, () => ({
     isBusy: () => busyRef.current,
@@ -183,97 +318,69 @@ const StandardPager = forwardRef(function StandardPager({
     // 换主题：不重建页面，直接把新的底色/字色注入所有已挂载的页面
     applyTheme: (t) => {
       themeRef.current = t;
-      webMapRef.current.forEach((w) => w && w.injectJavaScript && w.injectJavaScript(themeScript(t)));
+      const js = `(function(){var d=document,b=d.body;if(!b)return;d.documentElement.style.background='${t.background}';b.style.background='${t.background}';b.style.color='${t.color}';})();true;`;
+      webMapRef.current.forEach((w) => w && w.injectJavaScript && w.injectJavaScript(js));
     },
-    // 翻一页：dir = +1（下一页）/ -1（上一页）。对面没有页面（还没加载）返回 false，
-    // 由外面退回"不带动画的直接跳转"。动画结束后回调 onCommit，让外面把页码真正 ±1。
-    turn: (dir, onCommit) => {
-      const target = dir > 0 ? pagesRef.current.next : pagesRef.current.prev;
-      const startKey = pagesRef.current.cur ? pagesRef.current.cur.key : null;
-      if (!target || !startKey || !width || busyRef.current) return false;
+    // 点边缘翻一页（一段固定动画）：dir = +1（下一页）/ -1（上一页）。
+    // 对面页面还没挂上/没加载好会先等一小会儿；对面根本没有页面返回 false，外面退回"直接跳转"。
+    turn: (dir) => {
+      const p = pagesRef.current;
+      const target = dir > 0 ? p.next : p.prev;
+      if (!p.cur || !target || !width || busyRef.current) return false;
+      const startKey = p.cur.key;
       busyRef.current = true;
+      busySV.value = true;
       let started = false;
       const run = () => {
         if (started) return;
         started = true;
-        if (!pagesRef.current.cur || pagesRef.current.cur.key !== startKey) {
-          setPrepPrev(false);
-          busyRef.current = false;
+        const q = pagesRef.current;
+        if (!q.cur || q.cur.key !== startKey) { busyRef.current = false; busySV.value = false; return; }
+        const c = getTx(startKey);
+        const n = q.next ? getTx(q.next.key) : null;
+        if (dir < 0 && n) n.value = width; // 往前翻：先把下一页挪开，露出上一页
+        if (reduceMotionRef.current) {
+          c.value = dir > 0 ? -width : width;
+          finishJS(dir);
           return;
         }
-        progress.setValue(0);
-        pendingRef.current = { startKey, onCommit };
-        setTurning({ dir });
+        c.value = withTiming(dir > 0 ? -width : width, { duration: TURN_MS, easing: Easing.out(Easing.cubic) }, (finished) => {
+          'worklet';
+          if (finished) runOnJS(finishJS)(dir);
+        });
       };
-      const waitLoaded = (afterMs) => {
-        if (loadedRef.current.has(target.key)) {
-          setTimeout(run, afterMs);
-        } else {
-          // 目标页还没加载完：等它加载完再滑（最多等 LOAD_WAIT_MAX_MS），
-          // 不然会滑出来一张空白页，比直接慢半拍还难受
-          const waiters = loadWaitersRef.current.get(target.key) || [];
-          waiters.push(() => setTimeout(run, afterMs));
-          loadWaitersRef.current.set(target.key, waiters);
-          setTimeout(run, LOAD_WAIT_MAX_MS + afterMs);
-        }
-      };
-      if (dir > 0) {
-        // 下一页一直常驻，通常已画好，直接滑
-        if (loadedRef.current.has(target.key)) run(); else waitLoaded(0);
+      if (loadedRef.current.has(target.key) && mountedKeysRef.current.has(target.key)) {
+        run();
       } else {
-        // 上一页没有常驻：先挂上（压在当前页下面），等它加载完 + 留一小段时间让它绘制，再滑
-        loadedRef.current.delete(target.key);
-        setPrepPrev(true);
-        waitLoaded(PREV_RASTER_MS);
+        const waiters = loadWaitersRef.current.get(target.key) || [];
+        waiters.push(run);
+        loadWaitersRef.current.set(target.key, waiters);
+        setTimeout(run, LOAD_WAIT_MAX_MS);
       }
       return true;
     },
-  }), [progress, width]);
+  }), [width, busySV, finishJS]);
 
-  // 每一页当前的位置与层级
-  const dir = turning ? turning.dir : 0;
-  const curX = useMemo(
-    () => progress.interpolate({ inputRange: [0, 1], outputRange: [0, -width] }),
-    [progress, width],
-  );
-  const prevInX = useMemo(
-    () => progress.interpolate({ inputRange: [0, 1], outputRange: [-width, 0] }),
-    [progress, width],
-  );
-  const styleFor = (role) => {
-    if (role === 'cur') return { translateX: dir === 1 ? curX : 0, zIndex: 3 };
-    if (role === 'next') return { translateX: 0, zIndex: 2 };
-    // 上一页（只在往前翻期间才挂载）：准备阶段压在最底层；开滑后提到最上层、从左边滑进来
-    return { translateX: dir === -1 ? prevInX : 0, zIndex: dir === -1 ? 4 : 1 };
-  };
-
-  // 挂载哪几页：平时 当前+下一页；往前翻期间 上一页+当前（下一页先卸掉，保证同时最多 2 个）
-  const backMode = prepPrev || dir === -1;
-  const list = (backMode
-    ? [
-      pages.prev ? { role: 'prev', page: pages.prev } : null,
-      pages.cur ? { role: 'cur', page: pages.cur } : null,
-    ]
-    : [
-      pages.cur ? { role: 'cur', page: pages.cur } : null,
-      pages.next ? { role: 'next', page: pages.next } : null,
-    ]).filter(Boolean);
+  const list = [
+    showPrev && pages.prev ? { role: 'prev', page: pages.prev } : null,
+    cur ? { role: 'cur', page: cur } : null,
+    showNext && pages.next ? { role: 'next', page: pages.next } : null,
+  ].filter(Boolean);
 
   return (
-    <View
-      style={[styles.host, { backgroundColor: background }]}
-      onLayout={(e) => setWidth(Math.round(e.nativeEvent.layout.width))}
-    >
-      {width > 0 ? list.map(({ role, page }) => {
-        const st = styleFor(role);
-        return (
+    <GestureDetector gesture={gesture}>
+      <View
+        collapsable={false}
+        style={[styles.host, { backgroundColor: background }]}
+        onLayout={(e) => setWidth(Math.round(e.nativeEvent.layout.width))}
+      >
+        {width > 0 ? list.map(({ role, page }) => (
           <PagerPage
             key={page.key}
             page={page}
+            role={role}
             width={width}
-            translateX={st.translateX}
-            zIndex={st.zIndex}
-            isCurrent={role === 'cur'}
+            tx={getTx(page.key)}
             isCurrentRef={isCurrentRef}
             onMessageRef={onMessageRef}
             registerWeb={registerWeb}
@@ -282,9 +389,9 @@ const StandardPager = forwardRef(function StandardPager({
             allowFileAccess={allowFileAccess}
             background={background}
           />
-        );
-      }) : null}
-    </View>
+        )) : null}
+      </View>
+    </GestureDetector>
   );
 });
 

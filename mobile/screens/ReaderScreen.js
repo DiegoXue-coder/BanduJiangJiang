@@ -701,6 +701,11 @@ function buildStandardPageHtml({
         }
         } catch(err) { post({type:'standardSelectionError'}); }
       }, {passive:true});
+      // 安卓翻页容器接管横向拖动时，原生层会给页面发 touchcancel（不会再有 touchend）：
+      // 把长按计时器和"移动过"标记复位，免得拖动结束后又冒出长按选字
+      document.addEventListener('touchcancel', function(){
+        clearTimeout(longTimer); longTimer=null; moved=false;
+      }, {passive:true});
       document.addEventListener('message', function(e){
         if(e && e.data === 'standardClearSelection') window.__standardClearSelection();
       });
@@ -2222,59 +2227,60 @@ function ReaderInner({
     `);
   }
 
-  // 翻页：先让翻页容器做滑动动画，动画结束才真正改页码/章节（commit）。
-  // 容器那一侧还没有页面（相邻章节没读进来）时，退回原来的"直接跳转"，功能不打折。
-  function goStandardPrev() {
-    if (!readerInteractionReady) return;
-    if (standardPagerRef.current?.isBusy()) { queueTurn(-1); return; }
-    if (closeReaderPanels()) return;
-    clearStandardSelection();
-    if (standardPageIndex > 0) {
-      const commit = () => setStandardPageIndex((prev) => Math.max(0, prev - 1));
-      if (!standardPagerRef.current?.turn(-1, commit)) commit();
-      return;
-    }
-    if (standardChapterIndex > 0) {
-      // 往前翻进上一章：落在上一章的最后一页
-      const landing = prevChapterPages && prevChapterPages.length ? prevChapterPages.length - 1 : null;
-      const commit = () => {
-        if (landing !== null) {
-          landingPageRef.current = landing;
-          setStandardChapterIndex((prev) => Math.max(0, prev - 1));
-          setStandardPageIndex(landing);
-        } else {
-          // 上一章还没读进来，页数未知：交给"跳章后落到目标页"的老机制，落在末页
-          pendingSeekRef.current = { chapterIndex: standardChapterIndex - 1, frac: 1 };
-          setStandardChapterIndex((prev) => Math.max(0, prev - 1));
-          setStandardPageIndex(0);
-        }
-      };
-      if (!standardPagerRef.current?.turn(-1, commit)) commit();
-      return;
-    }
-    queuedTurnRef.current = { dir: 0, n: 0 }; // 已经是第一页，剩下的排队作废
-  }
-
-  function goStandardNext() {
-    if (!readerInteractionReady) return;
-    if (standardPagerRef.current?.isBusy()) { queueTurn(1); return; }
-    if (closeReaderPanels()) return;
-    clearStandardSelection();
-    if (standardPageIndex < standardPages.length - 1) {
-      const commit = () => setStandardPageIndex((prev) => Math.min(standardPages.length - 1, prev + 1));
-      if (!standardPagerRef.current?.turn(1, commit)) commit();
-      return;
-    }
-    if (standardChapterIndex < (readingChapters?.length || 0) - 1) {
-      const commit = () => {
+  // 翻页分两步：① 翻页容器把页面滑到位（点边缘=一段动画；手指拖=跟着手走，松手再吸附）；
+  // ② 滑到位之后容器回调 commitStandardTurn(dir)，这里才真正改页码/章节。
+  // 容器那一侧还没有页面（相邻章节没读进来）、或者 iOS（没有翻页容器）时，
+  // 直接调 commitStandardTurn 做"不带动画的跳转"，功能不打折。
+  function commitStandardTurn(dir) {
+    if (dir > 0) {
+      if (standardPageIndex < standardPages.length - 1) {
+        setStandardPageIndex((prev) => Math.min(standardPages.length - 1, prev + 1));
+      } else if (standardChapterIndex < (readingChapters?.length || 0) - 1) {
         setStandardChapterIndex((prev) => Math.min((readingChapters?.length || 1) - 1, prev + 1));
         setStandardPageIndex(0);
-      };
-      if (!standardPagerRef.current?.turn(1, commit)) commit();
+      }
       return;
     }
-    queuedTurnRef.current = { dir: 0, n: 0 }; // 已经是最后一页，剩下的排队作废
+    if (standardPageIndex > 0) {
+      setStandardPageIndex((prev) => Math.max(0, prev - 1));
+    } else if (standardChapterIndex > 0) {
+      // 往前翻进上一章：落在上一章的最后一页
+      const landing = prevChapterPages && prevChapterPages.length ? prevChapterPages.length - 1 : null;
+      if (landing !== null) {
+        landingPageRef.current = landing;
+        setStandardChapterIndex((prev) => Math.max(0, prev - 1));
+        setStandardPageIndex(landing);
+      } else {
+        // 上一章还没读进来，页数未知：交给"跳章后落到目标页"的老机制，落在末页
+        pendingSeekRef.current = { chapterIndex: standardChapterIndex - 1, frac: 1 };
+        setStandardChapterIndex((prev) => Math.max(0, prev - 1));
+        setStandardPageIndex(0);
+      }
+    }
   }
+
+  function canTurnStandard(dir) {
+    return dir > 0
+      ? (standardPageIndex < standardPages.length - 1 || standardChapterIndex < (readingChapters?.length || 0) - 1)
+      : (standardPageIndex > 0 || standardChapterIndex > 0);
+  }
+
+  function goStandardTurn(dir) {
+    if (!readerInteractionReady) return;
+    // 注意 iOS 上这个 ref 指向的是 WebView，没有 isBusy/turn，所以都用可选调用
+    if (standardPagerRef.current?.isBusy?.()) { queueTurn(dir); return; }
+    if (closeReaderPanels()) return;
+    clearStandardSelection();
+    if (!canTurnStandard(dir)) {
+      queuedTurnRef.current = { dir: 0, n: 0 }; // 已经到头了，剩下的排队作废
+      return;
+    }
+    if (!standardPagerRef.current?.turn?.(dir)) commitStandardTurn(dir);
+  }
+
+  function goStandardPrev() { goStandardTurn(-1); }
+
+  function goStandardNext() { goStandardTurn(1); }
 
   // 页码/章节变了 = 上一次翻页已提交：如果动画期间有排队的点击，接着翻
   useEffect(() => {
@@ -2629,6 +2635,11 @@ function ReaderInner({
                     allowFileAccess={!!standardFontUrl}
                     background={THEMES[themeName].body.background}
                     onMessage={handleStandardWebViewMessage}
+                    onCommit={commitStandardTurn}
+                    // 手指开始拖页面：清掉选区。工具栏展开时不响应拖动（横滑交给页面脚本，
+                    // 走"收起工具栏"的老逻辑）。
+                    onDragStart={clearStandardSelection}
+                    dragEnabled={!chromeOpen && readerInteractionReady}
                   />
                 ) : (
                   // iOS 暂不启用翻页容器（还没在 iOS 上验证过滑动翻页），保持原来的"每页一个 WebView"
