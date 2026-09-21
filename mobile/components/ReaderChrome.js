@@ -139,7 +139,7 @@ function GlassBackground() {
 export default function ReaderChrome({
   open,
   insets,
-  readerTheme, // 'paper' | 'light' | 'dark'（阅读主题，决定信息条字色与主题按钮高亮）
+  readerTheme, // 当前阅读主题的 key（paper/light/light_blue/light_green/dark/dark_black/dark_gray）
   bookTitle,
   chapterTitle,
   percent, // 0~100 整数
@@ -150,7 +150,7 @@ export default function ReaderChrome({
   fonts, // [{key,label,previewFamily}]
   fontKey,
   onFont,
-  themes, // [{key,label,swatch}]
+  themeFamilies, // [{key,label,variants:[{key,label,swatch}]}]：一级=大类，二级=底色
   onTheme,
   onBack,
   onToc,
@@ -167,7 +167,30 @@ export default function ReaderChrome({
   useEffect(() => { if (!open) setPanel(null); }, [open]);
   const clock = useClock();
   const battery = useBatteryLevel();
-  const muted = MUTED_BY_THEME[readerTheme] || MUTED_BY_THEME.paper;
+  // 当前主题属于哪个大类（信息条字色按大类取）
+  const currentFamily = (themeFamilies || []).find((f) => f.variants.some((v) => v.key === readerTheme));
+  const familyKey = currentFamily ? currentFamily.key : 'paper';
+  const muted = MUTED_BY_THEME[familyKey] || MUTED_BY_THEME.paper;
+  // 三级主题的二级展开：null | 大类 key。每个大类记住上次选的底色，切回来时还是它
+  const [themeSub, setThemeSub] = useState(null);
+  const lastVariantRef = useRef({});
+  useEffect(() => {
+    if (readerTheme && currentFamily) lastVariantRef.current[currentFamily.key] = readerTheme;
+  }, [readerTheme, currentFamily]);
+  useEffect(() => {
+    if (panel === 'theme') setThemeSub(currentFamily && currentFamily.variants.length > 1 ? currentFamily.key : null);
+  }, [panel]); // eslint-disable-line react-hooks/exhaustive-deps
+  const onPickFamily = (f) => {
+    if (f.key !== familyKey) {
+      // 换到另一个大类：应用它上次选的底色（没选过就是它的第一个）
+      onTheme && onTheme(lastVariantRef.current[f.key] || f.variants[0].key);
+      setThemeSub(f.variants.length > 1 ? f.key : null);
+    } else {
+      // 点当前大类：有多个底色就收起/展开二级
+      setThemeSub((s) => (s === f.key || f.variants.length < 2 ? null : f.key));
+    }
+  };
+  const subFamily = themeSub ? (themeFamilies || []).find((f) => f.key === themeSub) : null;
 
   useEffect(() => {
     if (reduceMotion) { anim.setValue(open ? 1 : 0); return; }
@@ -287,22 +310,47 @@ export default function ReaderChrome({
         ) : null}
 
         {panel === 'theme' ? (
-          <View style={[styles.subPanel, styles.themes]}>
-            {themes.map((t) => {
-              const on = t.key === readerTheme;
-              return (
-                <TouchableOpacity
-                  key={t.key}
-                  disabled={!enabled}
-                  style={styles.sw}
-                  onPress={() => onTheme && onTheme(t.key)}
-                  accessibilityState={{ selected: on }}
-                >
-                  <View style={[styles.swDot, { backgroundColor: t.swatch }, on && styles.swDotOn]} />
-                  <Text style={styles.swText}>{t.label}</Text>
-                </TouchableOpacity>
-              );
-            })}
+          <View style={[styles.subPanel, { gap: 14 }]}>
+            {/* 一级：大类。当前大类的圆点显示它正在用的那个底色 */}
+            <View style={styles.themes}>
+              {(themeFamilies || []).map((f) => {
+                const on = f.key === familyKey;
+                const shown = on && currentFamily ? currentFamily.variants.find((v) => v.key === readerTheme) : null;
+                const swatch = (shown || f.variants[0]).swatch;
+                return (
+                  <TouchableOpacity
+                    key={f.key}
+                    disabled={!enabled}
+                    style={styles.sw}
+                    onPress={() => onPickFamily(f)}
+                    accessibilityState={{ selected: on }}
+                  >
+                    <View style={[styles.swDot, { backgroundColor: swatch }, on && styles.swDotOn]} />
+                    <Text style={styles.swText}>{f.label}{f.variants.length > 1 ? (themeSub === f.key ? ' ▴' : ' ▾') : ''}</Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+            {/* 二级：这个大类下的几种底色 */}
+            {subFamily ? (
+              <View style={[styles.themes, styles.themesSub]}>
+                {subFamily.variants.map((v) => {
+                  const on = v.key === readerTheme;
+                  return (
+                    <TouchableOpacity
+                      key={v.key}
+                      disabled={!enabled}
+                      style={styles.sw}
+                      onPress={() => onTheme && onTheme(v.key)}
+                      accessibilityState={{ selected: on }}
+                    >
+                      <View style={[styles.swDot, { backgroundColor: v.swatch }, on && styles.swDotOn]} />
+                      <Text style={styles.swText}>{v.label}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            ) : null}
           </View>
         ) : null}
 
@@ -375,6 +423,8 @@ const styles = StyleSheet.create({
   segTextOn: { color: '#54402c', fontWeight: '600' },
 
   themes: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around' },
+  // 二级底色行：和一级之间一条淡分隔线
+  themesSub: { paddingTop: 12, borderTopWidth: 1, borderTopColor: GLASS_LINE },
   sw: { flexDirection: 'row', alignItems: 'center', gap: 8, padding: 2 },
   swDot: { width: 24, height: 24, borderRadius: 12, borderWidth: 2, borderColor: 'rgba(255,255,255,0.5)' },
   swDotOn: { borderColor: '#fff', shadowColor: '#fff', shadowOpacity: 0.35, shadowRadius: 0, elevation: 0 },

@@ -87,12 +87,41 @@ const THEMES = {
   light: { body: { background: '#ffffff', color: '#1a1a2e', 'line-height': READING_LINE_HEIGHT } },
   paper: { body: { background: '#f4ecd8', color: '#5b4636', 'line-height': READING_LINE_HEIGHT } },
   dark:  { body: { background: '#1a1a2e', color: '#dcdce6', 'line-height': READING_LINE_HEIGHT } },
+  // 用户要求的"三级主题"：浅色/晚间各有几种底色可选（先做出来让用户体验，再决定保留哪些）。
+  // 文字色跟着底色调过：浅色底配深墨色字，纯黑底的字色压暗一点（纯白字在纯黑底上太刺眼）。
+  light_blue:  { body: { background: '#e6eef7', color: '#243447', 'line-height': READING_LINE_HEIGHT } },
+  light_green: { body: { background: '#e2eedf', color: '#22352a', 'line-height': READING_LINE_HEIGHT } },
+  dark_black:  { body: { background: '#000000', color: '#b9b9bd', 'line-height': READING_LINE_HEIGHT } },
+  dark_gray:   { body: { background: '#2b2b2e', color: '#cfcfd3', 'line-height': READING_LINE_HEIGHT } },
 };
+// 旧的三档（iOS 的老主题面板还在用，也是历史设置里存的值）；新增的四个底色只在安卓沉浸式工具栏里选
 const THEME_ORDER = ['light', 'paper', 'dark'];
-const IMMERSIVE_THEME_CHOICES = [
-  { key: 'paper', label: '护眼', swatch: '#f4ecd8' },
-  { key: 'light', label: '默认', swatch: '#ffffff' },
-  { key: 'dark', label: '晚间', swatch: '#1a1a2e' },
+// 每个主题属于哪一"大类"：决定全局界面色（theme.js 只有 light/eyecare/dark 三种模式）
+const THEME_FAMILY = {
+  light: 'light', light_blue: 'light', light_green: 'light',
+  paper: 'paper',
+  dark: 'dark', dark_black: 'dark', dark_gray: 'dark',
+};
+const THEME_MODE_BY_FAMILY = { light: 'light', paper: 'eyecare', dark: 'dark' };
+// 沉浸式工具栏的"两级主题"：一级=大类（护眼/浅色/晚间），点了有多个底色的大类再展开二级
+const IMMERSIVE_THEME_FAMILIES = [
+  { key: 'paper', label: '护眼', variants: [{ key: 'paper', label: '暖纸', swatch: '#f4ecd8' }] },
+  {
+    key: 'light', label: '浅色',
+    variants: [
+      { key: 'light', label: '白', swatch: '#ffffff' },
+      { key: 'light_blue', label: '浅蓝', swatch: '#e6eef7' },
+      { key: 'light_green', label: '浅绿', swatch: '#e2eedf' },
+    ],
+  },
+  {
+    key: 'dark', label: '晚间',
+    variants: [
+      { key: 'dark', label: '深蓝', swatch: '#1a1a2e' },
+      { key: 'dark_black', label: '纯黑', swatch: '#000000' },
+      { key: 'dark_gray', label: '深灰', swatch: '#2b2b2e' },
+    ],
+  },
 ];
 // 阶段十一：颜色/主题从"点一下循环切换"改成"三档横向切换控件"，标签跟着改
 const THEME_SEGMENT_LABEL = { light: '默认', paper: '护眼模式', dark: '晚间阅读' };
@@ -1055,9 +1084,9 @@ function ReaderInner({
         if (BODY_FONT_KEYS.includes(saved.bodyFontKey)) {
           setBodyFontKey(saved.bodyFontKey);
         }
-        if (THEME_ORDER.includes(saved.themeName)) {
+        if (THEMES[saved.themeName]) {
           setThemeName(saved.themeName);
-          setThemeMode(saved.themeName === 'paper' ? 'eyecare' : saved.themeName);
+          setThemeMode(THEME_MODE_BY_FAMILY[THEME_FAMILY[saved.themeName]]);
         }
         if (bookSource !== 'imported' && READER_MODE_ORDER.includes(saved.readerMode)) {
           setReaderMode(saved.readerMode);
@@ -1887,7 +1916,7 @@ function ReaderInner({
     if (!readerInteractionReady) return;
     setThemeName(next);
     changeTheme(THEMES[next]);
-    setThemeMode(next === 'paper' ? 'eyecare' : next);
+    setThemeMode(THEME_MODE_BY_FAMILY[THEME_FAMILY[next]]);
   }
 
   function toggleThemePanel() {
@@ -2726,7 +2755,7 @@ function ReaderInner({
           fonts={BODY_FONT_OPTIONS.map((o) => ({ key: o.key, label: o.label, previewFamily: o.previewFamily }))}
           fontKey={bodyFontKey}
           onFont={selectBodyFont}
-          themes={IMMERSIVE_THEME_CHOICES}
+          themeFamilies={IMMERSIVE_THEME_FAMILIES}
           onTheme={selectTheme}
           onBack={() => navigation.goBack()}
           onToc={() => { setChromeOpen(false); setShowToc(true); }}
