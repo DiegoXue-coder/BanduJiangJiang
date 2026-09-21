@@ -301,15 +301,19 @@ const StandardPager = forwardRef(function StandardPager({
         if (decided.value !== 1) return;
         const x = curTx.value;
         // 松手前 80ms 内手指已经停住了（比如拖到一半停下再松手）→ 速度按 0 算，不能把之前的速度带过来
-        const v = Date.now() - lastT.value > 80 ? 0 : velX.value;
+        // 触摸事件稀疏时（一甩只有两三个事件）平滑速度会偏低，再算一个"整段平均速度"，两个取大的
+        const heldMs = Math.max(1, Date.now() - downAt.value);
+        const avgV = ((x + baseDx.value) / heldMs) * 1000;
+        const sm = Date.now() - lastT.value > 80 ? 0 : velX.value;
+        const v = Math.abs(avgV) > Math.abs(sm) && (avgV * sm >= 0 || sm === 0) ? avgV : sm;
         const dir = x < 0 ? 1 : -1; // 1=往后翻(下一页) -1=往前翻
         const can = dir === 1 ? hasNextSV.value : hasPrevSV.value;
         const progress = Math.abs(x) / width;
         const along = dir === 1 ? -v : v; // 沿"翻页方向"的速度，正=朝翻页方向甩
         // 拖过 30% 且没有明显往回甩 → 翻；没到 30% 但朝翻页方向甩得够快 → 也翻。
         // 注意手势库的速度单位是 dp/秒（不是像素）：普通手指轻轻一甩约 500~1500，
-        // 门槛取 450，太高的话正常的轻甩翻不动。
-        const go = can && (progress > 0.3 ? along > -200 : (along > 450 && progress > 0.03));
+        // 门槛取 350，太高的话正常的轻甩翻不动。
+        const go = can && (progress > 0.3 ? along > -200 : (along > 350 && progress > 0.03));
         if (go) {
           const remaining = width - Math.abs(x);
           const speed = Math.max(Math.abs(v), 600);
