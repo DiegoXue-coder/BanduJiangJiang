@@ -10,7 +10,7 @@ import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import {
   View, Text, StyleSheet, TouchableOpacity, TextInput,
   ActivityIndicator, ScrollView, Platform, KeyboardAvoidingView, Switch,
-  Modal,
+  Modal, Animated,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Audio, InterruptionModeIOS, InterruptionModeAndroid } from 'expo-av';
@@ -21,36 +21,32 @@ import {
   IconChevronLeft, IconList, IconVolume, IconBolt,
   IconPlayerTrackPrevFilled, IconPlayerTrackNextFilled,
   IconPlayerPlayFilled, IconPlayerPauseFilled,
-  IconMicrophone, IconMicrophoneOff, IconSend,
-  IconX,
+  IconMicrophone, IconSend,
 } from '@tabler/icons-react-native';
 import {
   getBookContext, getChapterText, getStandardChapterText, getTtsPlayUrl, transcribeAudio,
   streamAsk, saveHighlight, saveQaHistory, classifyIntent, submitVoiceLatencyMetric,
 } from '../lib/api';
 import { useAuthGate } from '../lib/authGate';
+import { FONTS } from '../fonts';
 
-// 接替1号任务1：听书界面视觉改造，精确规格来自决策层定稿的设计稿
-// docs/设计稿/听书界面-设计稿.html——颜色/间距/圆角这些数值直接照抄那份
-// 文件里的CSS变量和px值，不是凭感觉重新设计。这套"沉光共读"配色是专门
-// 给听书这一个页面用的暗色调，跟App其它页面common的theme.js（暖纸古风）
-// 是两套独立的视觉语言，不共用、不修改theme.js——设计稿本身也只覆盖
-// 听书这一个页面，不是全局换肤。
+// 听书页使用最终原型 listen-final-prototype 的中性炭黑暗色，不再沿用旧版
+// 暖棕背景。棕色只作为细节强调色，避免整屏偏棕。
 const EMBER = {
-  ink: '#241a12',
-  dusk: '#33241a',
-  dusk2: '#443021',
-  paper: '#f2e6d2',
-  paperDim: '#cbb896',
-  inkSoft: '#b8a488',
-  ember: '#e2963a',
-  emberBright: '#f3b563',
-  emberDim: '#8c5a22',
+  ink: '#101113',
+  dusk: '#1a1c1f',
+  dusk2: '#222428',
+  paper: '#efede8',
+  paperDim: '#9c9da0',
+  inkSoft: '#676a70',
+  ember: '#b17c43',
+  emberBright: '#b17c43',
+  emberDim: '#6f4e2d',
   jade: '#6fa088',
   jadeDim: '#3d5b4c',
-  screenBg1: '#2c2015',
-  screenBg2: '#1c130d',
-  screenBg3: '#150e09',
+  screenBg1: '#1a1c1f',
+  screenBg2: '#141517',
+  screenBg3: '#101113',
 };
 
 // 决策层这轮派发的任务之一：语速/声音可调。不做完整的14个声音选择器，
@@ -296,6 +292,99 @@ function mergeParagraphsForNarration(paragraphs) {
   return merged;
 }
 
+function splitCaptionSentences(text) {
+  if (!text) return [];
+  const ranges = [];
+  const re = /[^。！？；\n]+[。！？；\n]?/g;
+  let match;
+  while ((match = re.exec(text)) !== null) {
+    ranges.push({ text: match[0], start: match.index, end: match.index + match[0].length });
+  }
+  return ranges.length ? ranges : [{ text, start: 0, end: text.length }];
+}
+
+function sentenceIndexAtOffset(sentences, offset) {
+  if (!sentences.length) return 0;
+  const safeOffset = Math.max(0, Number(offset) || 0);
+  const found = sentences.findIndex((sentence) => safeOffset < sentence.end);
+  return found === -1 ? sentences.length - 1 : found;
+}
+
+// TTS 为减少网络停顿按约 60 字切块，但字幕需要一个稳定的“段落视窗”。
+// 把当前块前后相邻块一起展示，确保即使当前 TTS 块只有一句，用户仍能看到
+// 已读句淡出和后文预告；朗读位置仍只对应当前音频块，不改变播放队列。
+function buildCaptionContext(chunks, currentIndex) {
+  const safeChunks = Array.isArray(chunks) ? chunks : [];
+  if (!safeChunks.length) return { text: '', currentStart: 0 };
+  const index = Math.max(0, Math.min(currentIndex, safeChunks.length - 1));
+  let start = 0;
+  let end = 0;
+  while (start < safeChunks.length) {
+    end = start;
+    let length = 0;
+    while (end < safeChunks.length
+      && ((end - start) < 2 || length < 180)
+      && (end - start) < 3) {
+      length += safeChunks[end].length;
+      end += 1;
+    }
+    if (index < end) break;
+    start = end;
+  }
+  const before = safeChunks.slice(start, index).join('');
+  return {
+    text: safeChunks.slice(start, end).join(''),
+    currentStart: before.length,
+  };
+}
+
+function NarrationParagraph({ text, activeIndex }) {
+  const sentences = useMemo(() => splitCaptionSentences(text), [text]);
+  const animationRef = useRef({ key: '', opacity: [], emphasis: [] });
+  if (animationRef.current.key !== text) {
+    animationRef.current = {
+      key: text,
+      opacity: sentences.map((_, index) => new Animated.Value(index === activeIndex ? 1 : index < activeIndex ? 0.36 : 0.62)),
+      emphasis: sentences.map((_, index) => new Animated.Value(index === activeIndex ? 1 : 0)),
+    };
+  }
+
+  useEffect(() => {
+    const animations = sentences.flatMap((_, index) => [
+      Animated.timing(animationRef.current.opacity[index], {
+        toValue: index === activeIndex ? 1 : index < activeIndex ? 0.36 : 0.62,
+        duration: 480,
+        useNativeDriver: false,
+      }),
+      Animated.timing(animationRef.current.emphasis[index], {
+        toValue: index === activeIndex ? 1 : 0,
+        duration: 420,
+        useNativeDriver: false,
+      }),
+    ]);
+    const parallel = Animated.parallel(animations);
+    parallel.start();
+    return () => parallel.stop();
+  }, [activeIndex, sentences, text]);
+
+  return (
+    <Text style={styles.captionParagraphText}>
+      {sentences.map((sentence, index) => (
+        <Animated.Text
+          key={`${sentence.start}-${sentence.end}`}
+          style={{
+            color: index === activeIndex ? EMBER.paper : index < activeIndex ? EMBER.paperDim : EMBER.inkSoft,
+            opacity: animationRef.current.opacity[index],
+            fontSize: animationRef.current.emphasis[index].interpolate({ inputRange: [0, 1], outputRange: [16.5, 19.5] }),
+          }}
+        >
+          {sentence.text}
+        </Animated.Text>
+      ))}
+    </Text>
+  );
+}
+
 export default function ListenScreen({ route, navigation }) {
   const { bookId, bookTitle, author, initialChapterTitle, startFraction } = route.params;
   const insets = useSafeAreaInsets();
@@ -309,13 +398,13 @@ export default function ListenScreen({ route, navigation }) {
   const [errorMsg, setErrorMsg] = useState('');
   const [chapterTitle, setChapterTitle] = useState('');
   const [progressLabel, setProgressLabel] = useState('');
-  // 接替1号任务1（视觉改造匹配设计稿）：设计稿要求朗读区域"字幕一次只
-  // 显示一句，自动往下滚（实际由TTS播放进度驱动）"——之前只有笼统的
+  // 听书正文保留完整段落，由TTS播放进度驱动当前句高亮和已读句淡出。
   // "正在朗读…"文案，这次改成显示当前实际在念的那一段文字本身，跟
   // progressLabel在同一处更新（真正开始出声那一刻，不是还在加载的时候，
   // 见onAudioStart回调的既有注释）。currentSegCount记"当前第几段/共几段"，
   // 拿来算进度条位置和"句 X/Y"这个计数，复用同一份数据不重复维护。
   const [currentCaption, setCurrentCaption] = useState('');
+  const [captionSentenceIndex, setCaptionSentenceIndex] = useState(0);
   const [currentSegCount, setCurrentSegCount] = useState({ idx: 0, total: 0 });
   // 播放/暂停按钮的"暂停"是纯音频暂停，不进对话视图（见handleInterrupt
   // 旁边togglePlayPause的注释）——每次真正有新的一段开始播放都要重置回
@@ -354,12 +443,11 @@ export default function ListenScreen({ route, navigation }) {
   const [isRecording, setIsRecording] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [recordingStatus, setRecordingStatus] = useState('');
-  // 方案B：免提打断总开关（默认关闭，用户自己选择开启，不是默认行为）；
-  // 静音只在免提开启时有意义，作用是"临时不响应自动打断"，不拆连接——
-  // 连接本身开着，随时切回来不用重新连一次（重连有InCallManager+
-  // getUserMedia这一整套流程，有肉眼可感的延迟）。
-  const [handsFreeEnabled, setHandsFreeEnabled] = useState(false);
-  const [handsFreeMuted, setHandsFreeMuted] = useState(false);
+  // 语音提问现在是听书页的默认能力：进入页面就展示长按麦克风，不再经过
+  // “进入语音提问”的二级入口。MANUAL_HOLD_TO_TALK模式下只有实际长按时
+  // 才申请权限并开始录音，默认常驻按钮不等于后台持续收音。
+  const [handsFreeEnabled, setHandsFreeEnabled] = useState(true);
+  const [handsFreeMuted, setHandsFreeMuted] = useState(true);
   const [handsFreeStatus, setHandsFreeStatus] = useState('');
   const [voiceMicError, setVoiceMicError] = useState('');
   // 免提"一轮对话"独立状态机：''表示没有正在进行的免提轮次（这时候ambient
@@ -370,6 +458,11 @@ export default function ListenScreen({ route, navigation }) {
   // 干扰"。
   const [hfStage, setHfStage] = useState(''); // '' | 'listening' | 'thinking' | 'replying'
   const [voiceMessages, setVoiceMessages] = useState([]);
+  const [conversationExpanded, setConversationExpanded] = useState(false);
+  const [conversationDrawerMounted, setConversationDrawerMounted] = useState(false);
+  const [mainStageHeight, setMainStageHeight] = useState(0);
+  const conversationDrawerProgress = useRef(new Animated.Value(0)).current;
+  const micVisualProgress = useRef(new Animated.Value(0)).current;
   const voiceMessageIdRef = useRef(0);
   const voiceConversationRef = useRef(null);
   const voiceAutoScrollRef = useRef(true);
@@ -382,6 +475,27 @@ export default function ListenScreen({ route, navigation }) {
   const voiceRef = useRef(voice);
   useEffect(() => { rateRef.current = rate; }, [rate]);
   useEffect(() => { voiceRef.current = voice; }, [voice]);
+  useEffect(() => {
+    if (conversationExpanded) setConversationDrawerMounted(true);
+    const animation = Animated.timing(conversationDrawerProgress, {
+      toValue: conversationExpanded ? 1 : 0,
+      duration: 360,
+      useNativeDriver: true,
+    });
+    animation.start(({ finished }) => {
+      if (finished && !conversationExpanded) setConversationDrawerMounted(false);
+    });
+    return () => animation.stop();
+  }, [conversationDrawerProgress, conversationExpanded]);
+  useEffect(() => {
+    const animation = Animated.timing(micVisualProgress, {
+      toValue: hfStage === 'listening' ? 1 : 0,
+      duration: 160,
+      useNativeDriver: false,
+    });
+    animation.start();
+    return () => animation.stop();
+  }, [hfStage, micVisualProgress]);
 
   const chaptersRef = useRef([]); // 已经过滤掉"目录"章节的列表
   const standardChaptersRef = useRef(false);
@@ -438,6 +552,7 @@ export default function ListenScreen({ route, navigation }) {
   const hfListenResolveRef = useRef(null); // 让cancelHandsFreeTurn能立刻唤醒hfRecordUntilSilence里还在等待的Promise，不用干等到超时才发现被取消了
   const voiceHoldActiveRef = useRef(false);
   const micGestureHandlersRef = useRef({ grant: null, release: null, cancel: null });
+  const drawerGestureHandlersRef = useRef({ expand: null, collapse: null, toggle: null });
   const hfAbortRef = useRef(null);
   const hfReplyInterruptingRef = useRef(false);
   const hfTimingRef = useRef(null);
@@ -625,14 +740,16 @@ export default function ListenScreen({ route, navigation }) {
           const ratio = Math.max(0, Math.min(1, s.positionMillis / s.durationMillis));
           const baseOffset = progressMeta.baseOffset || 0;
           const playTextLength = progressMeta.playTextLength || progressMeta.sourceLength || 0;
+          const charOffset = Math.min(
+            progressMeta.sourceLength,
+            baseOffset + Math.floor(playTextLength * ratio),
+          );
           paragraphProgressRef.current = {
             chapterIdx: progressMeta.chapterIdx,
             paragraphIdx: progressMeta.paragraphIdx,
-            charOffset: Math.min(
-              progressMeta.sourceLength,
-              baseOffset + Math.floor(playTextLength * ratio),
-            ),
+            charOffset,
           };
+          progressMeta.onCharOffset?.(charOffset);
         }
         if (s.isLoaded && s.isPlaying) notifyAudioStart();
         if (!s.isLoaded || s.didJustFinish) finish();
@@ -722,6 +839,12 @@ export default function ListenScreen({ route, navigation }) {
           ? getResumeSlice(paragraphs[pi], resumeProgress.charOffset)
           : { text: paragraphs[pi], startOffset: 0 };
         const textToPlay = resumeSlice.text;
+        const captionContext = buildCaptionContext(paragraphs, pi);
+        const captionSentences = splitCaptionSentences(captionContext.text);
+        let lastCaptionSentenceIndex = sentenceIndexAtOffset(
+          captionSentences,
+          captionContext.currentStart + resumeSlice.startOffset,
+        );
         if (shouldResumeWithinParagraph) {
           presetPromise = null; // 段内恢复文本已经变短，不能复用原整段预取音频
         }
@@ -740,7 +863,8 @@ export default function ListenScreen({ route, navigation }) {
               paragraphProgressRef.current = { chapterIdx: ci, paragraphIdx: pi, charOffset: 0 };
             }
             setProgressLabel(`第${pi + 1}/${paragraphs.length}段`);
-            setCurrentCaption(textToPlay);
+            setCurrentCaption(captionContext.text);
+            setCaptionSentenceIndex(lastCaptionSentenceIndex);
             setCurrentSegCount({ idx: pi, total: paragraphs.length });
             console.log(`[听书诊断] 开始出声 章节="${chapter.title}" 第${pi + 1}/${paragraphs.length}段`);
             if (hfResumePendingRef.current) {
@@ -770,6 +894,16 @@ export default function ListenScreen({ route, navigation }) {
             sourceLength: paragraphs[pi].length,
             baseOffset: resumeSlice.startOffset,
             playTextLength: textToPlay.length,
+            onCharOffset: (charOffset) => {
+              const nextSentenceIndex = sentenceIndexAtOffset(
+                captionSentences,
+                captionContext.currentStart + charOffset,
+              );
+              if (nextSentenceIndex !== lastCaptionSentenceIndex) {
+                lastCaptionSentenceIndex = nextSentenceIndex;
+                setCaptionSentenceIndex(nextSentenceIndex);
+              }
+            },
           });
           console.log(`[听书诊断] 播放完成 章节="${chapter.title}" 第${pi + 1}/${paragraphs.length}段`);
         } catch (e) {
@@ -1187,6 +1321,7 @@ export default function ListenScreen({ route, navigation }) {
     }
     const messageId = ++voiceMessageIdRef.current;
     setVoiceMessages((prev) => [...prev, { id: messageId, role: 'user', content: text }]);
+    setConversationExpanded(true);
     await askHandsFree(text);
   }
 
@@ -1565,9 +1700,25 @@ export default function ListenScreen({ route, navigation }) {
       if (!success) micGestureHandlersRef.current.cancel?.();
     }), []);
 
-  function handleVoiceModeStatusPress() {
-    // 2026-09-06安卓P0：语音收音只能由麦克风长按触发，状态区轻点不再打断。
-  }
+  drawerGestureHandlersRef.current = {
+    expand: () => setConversationExpanded(true),
+    collapse: () => setConversationExpanded(false),
+    toggle: () => setConversationExpanded((value) => !value),
+  };
+  const conversationDrawerGesture = useMemo(() => Gesture.Exclusive(
+    Gesture.Pan()
+      .activeOffsetY([-10, 10])
+      .runOnJS(true)
+      .onEnd((event) => {
+        if (event.translationY < -24) drawerGestureHandlersRef.current.expand?.();
+        if (event.translationY > 24) drawerGestureHandlersRef.current.collapse?.();
+      }),
+    Gesture.Tap()
+      .runOnJS(true)
+      .onEnd((_event, success) => {
+        if (success) drawerGestureHandlersRef.current.toggle?.();
+      }),
+  ), []);
 
   // 决策层这轮派发：连续追问改成"对话式"UI——之前点"继续追问"会跳回
   // 一个空白提问页，之前问过的内容全部看不见，用户反馈"像打断感"。改成
@@ -1852,8 +2003,8 @@ export default function ListenScreen({ route, navigation }) {
   async function startHandsFreeAmbient() {
     try {
       if (MANUAL_HOLD_TO_TALK) {
-        const { status: perm } = await Audio.requestPermissionsAsync();
-        if (perm !== 'granted') {
+        const { status: perm } = await Audio.getPermissionsAsync();
+        if (perm === 'denied') {
           setVoiceMicError('麦克风权限未开启，请在系统设置中允许 ChatBook 使用麦克风');
         }
         await restorePlaybackAudioMode().catch(() => {});
@@ -1943,40 +2094,68 @@ export default function ListenScreen({ route, navigation }) {
           ? '正在思考…'
           : '开始提问';
   const voiceModeStatus = (!hfStage && voiceMicError) ? voiceMicError : hfStage
-    ? (hfStage === 'listening' ? '松开后发送问题' : hfStage === 'thinking' ? '正在识别和思考…' : '按住麦克风打断追问')
+    ? (hfStage === 'listening' ? '已锁定当前句 · 松开发送' : hfStage === 'thinking' ? '正在识别和思考…' : '按住麦克风打断追问')
     : handsFreeMuted
-      ? (MANUAL_HOLD_TO_TALK ? '按住麦克风说话' : '已静音 · 继续讲书')
+      ? (MANUAL_HOLD_TO_TALK ? '按住左下角麦克风随时提问' : '已静音 · 继续讲书')
       : MANUAL_HOLD_TO_TALK
         ? '松开后发送问题'
         : '正在听 · 你可以直接说话';
   const transportControls = (
     <View style={styles.transport}>
-      <TouchableOpacity
-        style={styles.transportIconBtn}
-        onPress={() => handleJumpToChapter(posRef.current.chapterIdx - 1)}
-        accessibilityLabel="上一章"
-      >
-        <IconPlayerTrackPrevFilled color={EMBER.paperDim} size={18} />
-      </TouchableOpacity>
-      <TouchableOpacity
-        style={styles.transportPlayBtn}
-        onPress={togglePlayPause}
-        disabled={phase !== 'playing'}
-        accessibilityLabel={isManuallyPaused ? '继续播放' : '暂停播放'}
-      >
-        {isManuallyPaused
-          ? <IconPlayerPlayFilled color={EMBER.emberBright} size={20} />
-          : <IconPlayerPauseFilled color={EMBER.emberBright} size={20} />}
-      </TouchableOpacity>
-      <TouchableOpacity
-        style={styles.transportIconBtn}
-        onPress={() => handleJumpToChapter(posRef.current.chapterIdx + 1)}
-        accessibilityLabel="下一章"
-      >
-        <IconPlayerTrackNextFilled color={EMBER.paperDim} size={18} />
-      </TouchableOpacity>
+      <View style={styles.transportSlot}>
+        <TouchableOpacity
+          style={styles.transportIconBtn}
+          onPress={() => handleJumpToChapter(posRef.current.chapterIdx - 1)}
+          accessibilityLabel="上一章"
+        >
+          <IconPlayerTrackPrevFilled color={EMBER.paperDim} size={18} />
+        </TouchableOpacity>
+      </View>
+      <View style={styles.transportSlot}>
+        <TouchableOpacity
+          style={styles.transportPlayBtn}
+          onPress={togglePlayPause}
+          disabled={phase !== 'playing'}
+          accessibilityLabel={isManuallyPaused ? '继续播放' : '暂停播放'}
+        >
+          {isManuallyPaused
+            ? <IconPlayerPlayFilled color={EMBER.emberBright} size={20} />
+            : <IconPlayerPauseFilled color={EMBER.emberBright} size={20} />}
+        </TouchableOpacity>
+      </View>
+      <View style={styles.transportSlot}>
+        <TouchableOpacity
+          style={styles.transportIconBtn}
+          onPress={() => handleJumpToChapter(posRef.current.chapterIdx + 1)}
+          accessibilityLabel="下一章"
+        >
+          <IconPlayerTrackNextFilled color={EMBER.paperDim} size={18} />
+        </TouchableOpacity>
+      </View>
     </View>
   );
+  const captionSentenceCount = splitCaptionSentences(currentCaption).length;
+  const captionMarkerTop = captionSentenceCount > 1
+    ? `${22 + (Math.min(captionSentenceIndex, captionSentenceCount - 1) / (captionSentenceCount - 1)) * 56}%`
+    : '48%';
+  const drawerClosedOffset = Math.max(0, (mainStageHeight || 800) * 0.66 - 42);
+  const drawerTranslateY = conversationDrawerProgress.interpolate({
+    inputRange: [0, 1],
+    outputRange: [drawerClosedOffset, 0],
+  });
+  const readingTranslateY = conversationDrawerProgress.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0, mainStageHeight * -0.16],
+  });
+  const micVisualStyle = {
+    backgroundColor: micVisualProgress.interpolate({
+      inputRange: [0, 1],
+      outputRange: ['rgba(177,124,67,0.14)', EMBER.emberBright],
+    }),
+    transform: [{
+      scale: micVisualProgress.interpolate({ inputRange: [0, 1], outputRange: [1, 0.94] }),
+    }],
+  };
 
   return (
     <View style={styles.stage}>
@@ -1989,7 +2168,7 @@ export default function ListenScreen({ route, navigation }) {
             <Text style={styles.bookTitleText} numberOfLines={1}>{bookTitle}</Text>
             <Text style={styles.chapCrumbText} numberOfLines={1}>{chapterTitle}</Text>
           </View>
-          <View style={{ width: 30 }} />
+          <View style={{ width: 44 }} />
         </View>
 
         {(inNarrating || inConversation) && (
@@ -2031,28 +2210,66 @@ export default function ListenScreen({ route, navigation }) {
 
           {(inNarrating || inConversation) && (
             <>
-              <View style={[styles.mainStage, handsFreeEnabled && styles.mainStageVoiceMode]}>
+              <View
+                style={[styles.mainStage, handsFreeEnabled && styles.mainStageVoiceMode]}
+                onLayout={({ nativeEvent }) => setMainStageHeight(nativeEvent.layout.height)}
+              >
                 {inNarrating ? (
                   <>
-                    <View style={[
+                    {conversationExpanded && (
+                      <TouchableOpacity
+                        style={styles.conversationDismissLayer}
+                        activeOpacity={1}
+                        onPress={() => setConversationExpanded(false)}
+                        accessibilityLabel="收起对话记录"
+                      />
+                    )}
+                    <Animated.View style={[
                       styles.captionZone,
                       handsFreeEnabled ? styles.captionZoneVoiceMode : styles.captionZoneReading,
-                      handsFreeEnabled && voiceMessages.length > 0 && styles.captionZoneWithConversation,
+                      {
+                        opacity: conversationDrawerProgress.interpolate({ inputRange: [0, 1], outputRange: [1, 0.42] }),
+                        transform: [{ translateY: readingTranslateY }],
+                      },
                     ]}>
                       {phase === 'loading-chapter' ? (
                         <ActivityIndicator color={EMBER.emberBright} />
                       ) : (
                         <ScrollView style={styles.captionScroll} contentContainerStyle={styles.captionScrollContent}>
-                          <Text style={styles.captionTextEl}>{currentCaption}</Text>
-                          {currentSegCount.total > 0 && (
-                            <Text style={styles.captionCountText}>句 {currentSegCount.idx + 1}/{currentSegCount.total}</Text>
+                          <View style={styles.captionReadingRail}>
+                            <View style={styles.captionReadingLine} />
+                            <View style={[styles.captionReadingMarker, { top: captionMarkerTop }]} />
+                          </View>
+                          <NarrationParagraph text={currentCaption} activeIndex={captionSentenceIndex} />
+                          {captionSentenceCount > 0 && (
+                            <Text style={styles.captionCountText}>
+                              当前段落 · 第 {Math.min(captionSentenceIndex + 1, captionSentenceCount)} / {captionSentenceCount} 句
+                            </Text>
                           )}
                         </ScrollView>
                       )}
-                    </View>
-                    {handsFreeEnabled && (voiceMessages.length > 0 || !!hfStage) && (
-                      <View style={[styles.voiceConversationArea, voiceMessages.length > 0 && styles.voiceConversationFilled]}>
-                        {voiceMessages.length > 0 && (
+                      {phase !== 'loading-chapter' && (
+                        <Text style={styles.captionVoiceStatus}>{voiceModeStatus}</Text>
+                      )}
+                    </Animated.View>
+                    <Animated.View style={[
+                      styles.voiceConversationArea,
+                      { transform: [{ translateY: drawerTranslateY }] },
+                    ]}>
+                      <GestureDetector gesture={conversationDrawerGesture}>
+                        <View
+                          style={styles.conversationHandle}
+                          accessible
+                          accessibilityRole="button"
+                          accessibilityLabel={`${conversationExpanded ? '收起' : '展开'}对话记录，共${voiceMessages.length}条`}
+                        >
+                          <View style={styles.conversationHandleMark} />
+                          <Text style={styles.conversationHandleText}>对话记录{voiceMessages.length ? ` · ${voiceMessages.length}` : ''}</Text>
+                        </View>
+                      </GestureDetector>
+                      {conversationDrawerMounted && (
+                        <>
+                          {voiceMessages.length > 0 ? (
                           <ScrollView
                             ref={voiceConversationRef}
                             style={styles.voiceConversationScroll}
@@ -2070,23 +2287,35 @@ export default function ListenScreen({ route, navigation }) {
                               voiceAutoScrollRef.current = contentOffset.y + layoutMeasurement.height >= contentSize.height - 40;
                             }}
                           >
+                            <Text style={styles.conversationDrawerTitle}>本轮围绕原文的提问</Text>
                             {voiceMessages.map((msg) => (
-                              <View key={msg.id} style={[styles.bubble, msg.role === 'user' ? styles.bubbleUser : styles.bubbleAi]}>
-                                <Text style={msg.role === 'user' ? styles.bubbleUserText : styles.bubbleAiText}>{msg.content}</Text>
+                              <View
+                                key={msg.id}
+                                style={[styles.conversationMessage, msg.role === 'user' ? styles.conversationMessageUser : styles.conversationMessageAi]}
+                              >
+                                <Text style={styles.conversationSpeaker}>{msg.role === 'user' ? '我' : 'AI'}</Text>
+                                <View style={[styles.bubble, msg.role === 'user' ? styles.bubbleUser : styles.bubbleAi]}>
+                                  <Text style={msg.role === 'user' ? styles.bubbleUserText : styles.bubbleAiText}>{msg.content}</Text>
+                                </View>
                               </View>
                             ))}
                           </ScrollView>
-                        )}
-                        {!!hfStage && (
-                          <View style={styles.voiceStageRow}>
-                            {hfStage === 'thinking' && <ActivityIndicator size="small" color={EMBER.emberBright} />}
-                            <Text style={styles.voiceStageText}>
-                              {hfStage === 'listening' ? '正在聆听…' : hfStage === 'thinking' ? 'AI正在思考…' : 'AI正在回答'}
-                            </Text>
-                          </View>
-                        )}
-                      </View>
-                    )}
+                          ) : (
+                            <View style={styles.conversationEmpty}>
+                              <Text style={styles.voiceStageText}>还没有对话</Text>
+                            </View>
+                          )}
+                          {!!hfStage && (
+                            <View style={styles.voiceStageRow}>
+                              {hfStage === 'thinking' && <ActivityIndicator size="small" color={EMBER.emberBright} />}
+                              <Text style={styles.voiceStageText}>
+                                {hfStage === 'listening' ? '正在聆听…' : hfStage === 'thinking' ? 'AI正在思考…' : 'AI正在回答'}
+                              </Text>
+                            </View>
+                          )}
+                        </>
+                      )}
+                    </Animated.View>
                   </>
                 ) : (
                   <ScrollView contentContainerStyle={styles.chatBody}>
@@ -2155,66 +2384,28 @@ export default function ListenScreen({ route, navigation }) {
 
                 {inNarrating ? (
                   <>
-                    {handsFreeEnabled && (
-                      <TouchableOpacity
-                        style={styles.voiceModeStatusButton}
-                        onPress={handleVoiceModeStatusPress}
-                        disabled={MANUAL_HOLD_TO_TALK}
-                        accessibilityLabel={voiceModeStatus}
-                      >
-                        <View style={[styles.voiceModeDots, hfStage === 'replying' && styles.voiceModeDotsStop]}>
-                          <View style={hfStage === 'replying' ? styles.voiceModeStopDot : styles.voiceModeDot} />
-                          {hfStage !== 'replying' && <View style={styles.voiceModeDot} />}
-                          {hfStage !== 'replying' && <View style={styles.voiceModeDot} />}
-                        </View>
-                        <Text style={styles.voiceModeStatusText} numberOfLines={1}>{voiceModeStatus}</Text>
-                      </TouchableOpacity>
-                    )}
-
                     <View style={styles.controlDock}>
-                      {transportControls}
-
-                      {handsFreeEnabled ? (
-                        <View style={styles.voiceModeActions}>
+                      <View style={styles.micControlSlot}>
                         <GestureDetector gesture={micHoldGesture}>
-                          <View
+                          <Animated.View
                             style={[
                               styles.voiceModeRoundBtn,
-                              !handsFreeMuted && styles.voiceModeMicBtnActive,
-                              handsFreeMuted && styles.voiceModeMicBtnMuted,
+                              hfStage === 'listening' ? styles.voiceModeMicBtnActive : styles.voiceModeMicBtnMuted,
+                              micVisualStyle,
                             ]}
                             accessible
                             accessibilityRole="button"
                             accessibilityLabel={manualAskLabel}
                           >
-                            {handsFreeMuted
-                              ? <IconMicrophoneOff color={EMBER.paperDim} size={23} strokeWidth={2.2} />
-                              : <IconMicrophone color={EMBER.ink} size={25} strokeWidth={2.2} />}
-                          </View>
+                            <IconMicrophone
+                              color={hfStage === 'listening' ? EMBER.ink : EMBER.emberBright}
+                              size={24}
+                              strokeWidth={2.2}
+                            />
+                          </Animated.View>
                         </GestureDetector>
-                        <TouchableOpacity
-                          style={[styles.voiceModeRoundBtn, styles.voiceModeExitBtn]}
-                          onPress={() => { setHandsFreeEnabled(false); setVoiceMessages([]); voiceAutoScrollRef.current = true; }}
-                          accessibilityLabel="退出语音模式"
-                        >
-                          <IconX color="#ff5f57" size={24} strokeWidth={2.5} />
-                        </TouchableOpacity>
-                        </View>
-                      ) : (
-                        <TouchableOpacity
-                          style={styles.interruptBtnEl}
-                          onPress={() => {
-                            if (!requireAuth('ai')) return;
-                            setVoiceMessages([]);
-                            voiceAutoScrollRef.current = true;
-                            setHandsFreeMuted(true);
-                            setHandsFreeEnabled(true);
-                          }}
-                        >
-                          <IconMicrophone color={EMBER.ink} size={16} strokeWidth={2.2} />
-                          <Text style={styles.interruptBtnElText}>语音提问</Text>
-                        </TouchableOpacity>
-                      )}
+                      </View>
+                      {transportControls}
                     </View>
                   </>
                 ) : (
@@ -2342,17 +2533,17 @@ const styles = StyleSheet.create({
 
   bar: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    paddingHorizontal: 18, paddingBottom: 4,
+    paddingHorizontal: 14, paddingBottom: 8,
   },
-  iconBtn: { width: 30, height: 30, alignItems: 'center', justifyContent: 'center' },
+  iconBtn: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center' },
   crumb: { flex: 1, alignItems: 'center' },
-  bookTitleText: { fontSize: 15, color: EMBER.paper, fontWeight: '600' },
-  chapCrumbText: { fontSize: 10.5, color: EMBER.inkSoft, marginTop: 3, letterSpacing: 0.3 },
+  bookTitleText: { fontSize: 15, color: EMBER.paper, fontWeight: '500', fontFamily: FONTS.serifRegular },
+  chapCrumbText: { fontSize: 11, color: EMBER.paperDim, marginTop: 4 },
 
   quickSettings: {
     flexDirection: 'row', alignSelf: 'center', justifyContent: 'center',
-    marginTop: 6, marginBottom: 4, paddingHorizontal: 4,
-    backgroundColor: 'rgba(255,255,255,0.035)', borderRadius: 8,
+    height: 35, paddingHorizontal: 4,
+    borderBottomWidth: 0.5, borderBottomColor: 'rgba(239,237,232,0.1)',
   },
   settingChip: {
     flexDirection: 'row', alignItems: 'center', gap: 5,
@@ -2364,26 +2555,58 @@ const styles = StyleSheet.create({
   errorText: { fontSize: 14, textAlign: 'center', color: EMBER.paperDim },
   doneText: { fontSize: 17, color: EMBER.paper, fontWeight: '600' },
 
-  mainStage: { flex: 1, minHeight: 0 },
+  mainStage: { flex: 1, minHeight: 0, position: 'relative', overflow: 'hidden' },
   mainStageVoiceMode: { justifyContent: 'center' },
   captionZone: {
-    paddingHorizontal: 30, paddingBottom: 8, minHeight: 90,
-    alignItems: 'center', justifyContent: 'center',
+    ...StyleSheet.absoluteFillObject,
+    paddingTop: 28, paddingRight: 31, paddingBottom: 48, paddingLeft: 46,
+    alignItems: 'stretch', justifyContent: 'center', zIndex: 1,
   },
-  captionZoneReading: { flex: 1 },
-  captionZoneVoiceMode: { flex: 1, paddingTop: 18, paddingBottom: 18 },
-  captionZoneWithConversation: { flex: 0.46, maxHeight: 230, paddingTop: 12, paddingBottom: 14 },
+  captionZoneReading: {},
+  captionZoneVoiceMode: {},
   captionScroll: { flex: 1, alignSelf: 'stretch' },
-  captionScrollContent: { flexGrow: 1, alignItems: 'center', justifyContent: 'center' },
-  captionTextEl: { fontSize: 17, lineHeight: 27, textAlign: 'center', color: EMBER.paper },
-  captionCountText: { fontSize: 10.5, color: EMBER.inkSoft, marginTop: 8, letterSpacing: 0.5 },
-  voiceConversationArea: {
-    paddingHorizontal: 20, paddingTop: 8, paddingBottom: 4,
-    borderTopWidth: 0.5, borderTopColor: 'rgba(255,255,255,0.08)',
+  captionScrollContent: {
+    flexGrow: 1, alignItems: 'flex-start', justifyContent: 'center', position: 'relative',
   },
-  voiceConversationFilled: { flex: 0.54, minHeight: 0 },
+  captionParagraphText: {
+    fontSize: 17, lineHeight: 32.3, textAlign: 'left', color: EMBER.paper,
+    fontFamily: FONTS.serifRegular,
+  },
+  captionReadingRail: { position: 'absolute', left: -19, top: '17%', bottom: '17%', width: 10, alignItems: 'center' },
+  captionReadingLine: { position: 'absolute', top: 0, bottom: 0, width: 0.5, backgroundColor: 'rgba(239,237,232,0.1)' },
+  captionReadingMarker: {
+    position: 'absolute', top: '48%', width: 7, height: 7, borderRadius: 3.5,
+    backgroundColor: EMBER.emberBright, shadowColor: EMBER.emberBright,
+    shadowOpacity: 0.32, shadowRadius: 7, shadowOffset: { width: 0, height: 0 }, elevation: 3,
+  },
+  captionCountText: { fontSize: 11, color: EMBER.paperDim, marginTop: 17, alignSelf: 'flex-start' },
+  captionVoiceStatus: {
+    position: 'absolute', left: 0, right: 0, bottom: 7,
+    fontSize: 11, color: EMBER.paperDim, textAlign: 'center',
+  },
+  conversationDismissLayer: {
+    ...StyleSheet.absoluteFillObject, zIndex: 2, backgroundColor: 'rgba(0,0,0,0.08)',
+  },
+  voiceConversationArea: {
+    position: 'absolute', left: 0, right: 0, bottom: 0, height: '66%', zIndex: 4,
+    backgroundColor: EMBER.ink,
+    borderTopWidth: 0.5, borderTopColor: 'rgba(239,237,232,0.1)',
+    shadowColor: '#000', shadowOpacity: 0.2, shadowRadius: 21,
+    shadowOffset: { width: 0, height: -9 }, elevation: 16,
+  },
+  conversationHandle: {
+    height: 42, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+  },
+  conversationHandleMark: { width: 28, height: 3, borderRadius: 1.5, backgroundColor: EMBER.inkSoft },
+  conversationHandleText: { fontSize: 11, color: EMBER.inkSoft },
+  conversationEmpty: { flex: 1, minHeight: 80, alignItems: 'center', justifyContent: 'center' },
   voiceConversationScroll: { flex: 1 },
-  voiceConversationContent: { paddingVertical: 8, gap: 12 },
+  voiceConversationContent: { paddingHorizontal: 20, paddingTop: 10, paddingBottom: 24, gap: 15 },
+  conversationDrawerTitle: { marginBottom: 1, fontSize: 11, color: EMBER.paperDim },
+  conversationMessage: { width: '100%' },
+  conversationMessageUser: { alignItems: 'flex-end' },
+  conversationMessageAi: { alignItems: 'flex-start' },
+  conversationSpeaker: { marginBottom: 5, fontSize: 10, color: EMBER.paperDim },
   voiceStageRow: { minHeight: 28, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
   voiceStageText: { fontSize: 12, color: EMBER.inkSoft },
 
@@ -2394,14 +2617,13 @@ const styles = StyleSheet.create({
   },
   contextChipLbl: { fontSize: 10, color: EMBER.ember, marginBottom: 4, textTransform: 'uppercase' },
   contextChipText: { fontSize: 12.5, lineHeight: 19, color: EMBER.paperDim },
-  bubble: { padding: 12, borderRadius: 16, maxWidth: '82%' },
-  bubbleUser: { alignSelf: 'flex-end', backgroundColor: EMBER.emberDim, borderBottomRightRadius: 4 },
+  bubble: { paddingHorizontal: 11, paddingVertical: 9, borderRadius: 6, maxWidth: '87%' },
+  bubbleUser: { alignSelf: 'flex-end', backgroundColor: '#ebe8e1' },
   bubbleAi: {
-    alignSelf: 'flex-start', backgroundColor: 'rgba(255,255,255,0.06)',
-    borderWidth: 0.5, borderColor: 'rgba(255,255,255,0.08)', borderBottomLeftRadius: 4,
+    alignSelf: 'flex-start', backgroundColor: EMBER.dusk,
   },
-  bubbleUserText: { fontSize: 13.5, lineHeight: 20, color: EMBER.paper },
-  bubbleAiText: { fontSize: 13.5, lineHeight: 20, color: EMBER.paper },
+  bubbleUserText: { fontSize: 13, lineHeight: 20.8, color: '#202123' },
+  bubbleAiText: { fontSize: 13, lineHeight: 20.8, color: EMBER.paper },
   thinkingRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 4 },
   thinkingText: { fontSize: 13, color: EMBER.paperDim },
   resumeRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 2 },
@@ -2417,8 +2639,9 @@ const styles = StyleSheet.create({
   resumeBtnText: { fontSize: 14, color: EMBER.ink, fontWeight: '700' },
 
   controls: {
-    paddingHorizontal: 20, paddingTop: 7, paddingBottom: 18, gap: 8,
-    borderTopWidth: 0.5, borderTopColor: 'rgba(255,255,255,0.07)',
+    minHeight: 118, paddingHorizontal: 18, paddingTop: 8, paddingBottom: 14, gap: 5,
+    backgroundColor: EMBER.ink,
+    borderTopWidth: 0.5, borderTopColor: 'rgba(239,237,232,0.1)',
   },
   controlsVoiceMode: { paddingBottom: 14 },
   progress: { gap: 2 },
@@ -2426,44 +2649,28 @@ const styles = StyleSheet.create({
   progressTimes: { flexDirection: 'row', justifyContent: 'space-between' },
   progressTimeText: { fontSize: 10.5, color: EMBER.inkSoft, letterSpacing: 0.3, maxWidth: '55%' },
 
-  controlDock: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', minHeight: 58 },
+  controlDock: { flexDirection: 'row', alignItems: 'center', minHeight: 58 },
   conversationTransport: { alignItems: 'center', paddingVertical: 2 },
-  transport: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  transportIconBtn: { width: 38, height: 38, alignItems: 'center', justifyContent: 'center' },
+  micControlSlot: { width: '25%', alignItems: 'center', justifyContent: 'center' },
+  transport: { width: '75%', flexDirection: 'row', alignItems: 'center' },
+  transportSlot: { width: '33.3333%', alignItems: 'center', justifyContent: 'center' },
+  transportIconBtn: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
   transportPlayBtn: {
-    width: 46, height: 46, borderRadius: 23,
-    backgroundColor: 'rgba(226,150,58,0.14)', borderWidth: 1, borderColor: 'rgba(226,150,58,0.35)',
+    width: 52, height: 52, borderRadius: 26,
+    backgroundColor: EMBER.dusk,
     alignItems: 'center', justifyContent: 'center',
   },
 
-  askZone: { minHeight: 34, alignItems: 'center', justifyContent: 'center' },
-  interruptBtnEl: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7,
-    backgroundColor: EMBER.ember, borderRadius: 999, paddingHorizontal: 17, paddingVertical: 10,
-  },
-  interruptBtnElDisabled: { opacity: 0.62 },
-  interruptBtnElText: { fontSize: 14, color: EMBER.ink, fontWeight: '600' },
-  voiceModeStatusButton: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
-    minHeight: 24, paddingHorizontal: 12,
-  },
-  voiceModeDots: { flexDirection: 'row', gap: 4, alignItems: 'center', justifyContent: 'center', minHeight: 12 },
-  voiceModeDotsStop: { gap: 0 },
-  voiceModeDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: EMBER.inkSoft },
-  voiceModeStopDot: { width: 10, height: 10, borderRadius: 3, backgroundColor: EMBER.inkSoft },
-  voiceModeStatusText: { fontSize: 12.5, color: EMBER.inkSoft, textAlign: 'center', letterSpacing: 0.2 },
-  voiceModeActions: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10 },
   voiceModeRoundBtn: {
-    width: 58, height: 58, borderRadius: 29, alignItems: 'center', justifyContent: 'center',
+    width: 54, height: 54, borderRadius: 27, alignItems: 'center', justifyContent: 'center',
   },
   voiceModeMicBtnActive: {
-    backgroundColor: 'rgba(242,230,210,0.9)',
-    shadowColor: EMBER.emberBright, shadowOpacity: 0.22, shadowRadius: 16, shadowOffset: { width: 0, height: 6 },
+    backgroundColor: EMBER.emberBright,
+    transform: [{ scale: 0.94 }],
+    shadowColor: EMBER.emberBright, shadowOpacity: 0.22, shadowRadius: 12, shadowOffset: { width: 0, height: 4 },
   },
-  voiceModeMicBtnMuted: { backgroundColor: 'rgba(255,255,255,0.08)', borderWidth: 0.5, borderColor: 'rgba(255,255,255,0.12)' },
-  voiceModeExitBtn: {
-    width: 46, height: 46, borderRadius: 23,
-    backgroundColor: 'rgba(255,255,255,0.07)', borderWidth: 0.5, borderColor: 'rgba(255,255,255,0.1)',
+  voiceModeMicBtnMuted: {
+    backgroundColor: 'rgba(226,150,58,0.12)', borderWidth: 1, borderColor: 'rgba(226,150,58,0.38)',
   },
   hfLive: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   listeningTag: { fontSize: 11.5, color: EMBER.emberBright, letterSpacing: 0.3 },
