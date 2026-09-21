@@ -145,6 +145,11 @@ const READER_SETTINGS_KEY = 'chatbook_reader_typography_settings_v1';
 const READER_MODE_ORDER = ['epub', 'standard'];
 const READER_MODE_LABEL = { epub: '原版', standard: '标准' };
 const READER_DEFAULT_MODE = 'standard';
+// 标准阅读的"整页滑动翻页容器"（跟手翻页、上一页/下一页常驻）启用的平台。
+// 9/21 用户要求"安卓的设计和苹果同步"，苹果也启用。注意：苹果端是在**没有 iOS 真机/模拟器**的环境里
+// 移植的（只做了打包和逻辑对照检查），如果苹果真机上翻页容器出问题，把 'ios' 从这个数组里去掉、
+// 发一次 OTA，就退回到"每页一个 WebView"的旧做法（旧做法的代码还在，见下面渲染处）。
+const STANDARD_PAGER_PLATFORMS = ['android', 'ios'];
 const STANDARD_PAGE_MIN_CHARS = 80;
 const STANDARD_PAGE_MAX_CHARS = 430;
 const STANDARD_READING_LINE_HEIGHT = 1.56;
@@ -1047,9 +1052,10 @@ function ReaderInner({
     ? READER_DEFAULT_MODE
     : (bookSource === 'imported' ? 'epub' : READER_DEFAULT_MODE);
   const [readerMode, setReaderMode] = useState(defaultReaderMode);
-  // 沉浸式阅读器（任务卡 08 §3.2）：先只在安卓的标准阅读启用；iOS 和原版 EPUB 保持旧壳，
-  // 等安卓验证完再对比移植（用户 9/20 决定"先做安卓，再移植苹果"）。
-  const immersive = Platform.OS === 'android' && readerMode === 'standard';
+  // 沉浸式阅读器（任务卡 08 §3.2）：标准阅读模式下启用（安卓、苹果一致）；原版 EPUB 模式保持旧壳
+  // （任务卡 §4 关于原版 EPUB 是否套壳的决策还没定）。用户 9/20 决定"先做安卓，再移植苹果"，9/21 要求同步苹果。
+  const immersive = readerMode === 'standard';
+  const pagerEnabled = STANDARD_PAGER_PLATFORMS.includes(Platform.OS);
   const [chromeOpen, setChromeOpen] = useState(false);
   const pendingSeekRef = useRef(null); // 进度条跳到别的章节时，等那一章加载完再定位到页
   const [standardChapterIndex, setStandardChapterIndex] = useState(0);
@@ -2100,7 +2106,7 @@ function ReaderInner({
   // html 都不依赖主题（themeDep 固定）；iOS 仍走旧的"换主题=换 key 重建"。
   const themeRef = useRef(themeName);
   themeRef.current = themeName;
-  const themeDep = Platform.OS === 'android' ? 'static' : themeName;
+  const themeDep = pagerEnabled ? 'static' : themeName;
   const standardStyleSig = `${bodyFontKey}-${themeDep}-${standardFontUrl ? 'file' : (standardFontBase64 ? 'font' : 'fallback')}`;
   const makeStandardPage = useMemo(() => (blocks, chapterId, pageIndex, chapterIdx) => ({
     key: `${chapterId}:${pageIndex}:${standardStyleSig}`,
@@ -2138,7 +2144,7 @@ function ReaderInner({
   ]);
   // 换主题：把新颜色注入现有页面（新建的页面 html 里本来就是当前主题）
   useEffect(() => {
-    if (Platform.OS !== 'android') return;
+    if (!pagerEnabled) return;
     standardPagerRef.current?.applyTheme?.(THEMES[themeName].body);
   }, [themeName]);
   const prevChapterId = readingChapters?.[standardChapterIndex - 1]?.id || '';
@@ -2174,8 +2180,8 @@ function ReaderInner({
   // 预读：当前章排好之后，往后读 3 章、往前读 1 章，放进内存缓存。往后多读几章是因为
   // 有的章只有一页，连翻几下就会用到后面的章。预读一章完成就 tick 一下，让翻页容器补上页面。
   useEffect(() => {
-    // 只有安卓的翻页容器需要预读相邻章节；iOS 保持原来只预热下一章的行为
-    if (Platform.OS !== 'android' || readerMode !== 'standard' || !readingChapters?.length) return undefined;
+    // 只有启用翻页容器的平台需要预读相邻章节（后 3 章、前 1 章）
+    if (!pagerEnabled || readerMode !== 'standard' || !readingChapters?.length) return undefined;
     if (!standardChapterText || standardChapterText.chapterId !== readingChapters[standardChapterIndex]?.id) return undefined;
     let cancelled = false;
     (async () => {
@@ -2663,7 +2669,7 @@ function ReaderInner({
               </View>
             ) : (
               <>
-                {Platform.OS === 'android' ? (
+                {pagerEnabled ? (
                   <StandardPager
                     ref={standardWebViewRef}
                     pages={pagerPages}
@@ -2679,9 +2685,11 @@ function ReaderInner({
                     // 走"收起工具栏"的老逻辑）。
                     onDragStart={clearStandardSelection}
                     dragEnabled={!chromeOpen && readerInteractionReady}
+                    // 长按选字的触发时间：安卓 720ms、苹果 320ms（见页面脚本 longPressMs）；拖页手势要在长按触发之前让位
+                    holdMs={Platform.OS === 'ios' ? 280 : 450}
                   />
                 ) : (
-                  // iOS 暂不启用翻页容器（还没在 iOS 上验证过滑动翻页），保持原来的"每页一个 WebView"
+                  // 没启用翻页容器的平台（STANDARD_PAGER_PLATFORMS 里没有的）：保持旧的"每页一个 WebView"
                   <WebView
                     ref={standardWebViewRef}
                     key={`${standardChapterIndex}-${standardPageIndex}-${bodyFontKey}-${themeName}-${standardFontUrl ? 'file' : (standardFontBase64 ? 'font' : 'fallback')}`}

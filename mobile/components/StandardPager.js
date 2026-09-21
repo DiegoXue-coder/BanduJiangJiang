@@ -110,8 +110,9 @@ const PagerPage = React.memo(function PagerPage({
 // onCommit(dir)：翻页动画结束（页面已经滑到位）后调用，外面据此把页码 ±1。
 // onDragStart：手指开始拖页面时调用（外面用来清掉选区）。
 // dragEnabled：false 时不响应拖动（比如工具栏展开着），触摸原样交给页面里的脚本。
+// holdMs：按住不动超过这个时间就当作长按选字、拖页手势让位（要小于页面脚本的长按触发时间）。
 const StandardPager = forwardRef(function StandardPager({
-  pages, baseUrl, allowFileAccess, background, onMessage, onCommit, onDragStart, dragEnabled = true,
+  pages, baseUrl, allowFileAccess, background, onMessage, onCommit, onDragStart, dragEnabled = true, holdMs = HOLD_MS,
 }, ref) {
   const [width, setWidth] = useState(0);
   const [, setLoadTick] = useState(0); // 有页面加载完就 +1，让"能不能挂邻页/能不能拖"重新计算
@@ -284,7 +285,7 @@ const StandardPager = forwardRef(function StandardPager({
           // 竖着滑（呼出/收起工具栏）→ 不是我们的
           if (Math.abs(dy) > 14 && Math.abs(dy) > Math.abs(dx)) { decided.value = 2; sm.fail(); return; }
           // 按住不动超过一会儿 → 是长按选字，让给页面
-          if (Date.now() - downAt.value > HOLD_MS) { decided.value = 2; sm.fail(); return; }
+          if (Date.now() - downAt.value > holdMs) { decided.value = 2; sm.fail(); return; }
           if (Math.abs(dx) > 10 && Math.abs(dx) > Math.abs(dy) * 1.2) {
             decided.value = 1;
             // 从"开始拖"这一刻算起，页面不会一下子跳 10 多 px；但最多只扣 12：
@@ -378,7 +379,7 @@ const StandardPager = forwardRef(function StandardPager({
           });
         }
       });
-  }, [curTx, prevTx, width, dragEnabled, startX, startY, downAt, baseDx, velX, lastDx, lastT, decided, dragX, busySV, hasNextSV, hasPrevSV, dragStartJS, finishJS, cancelJS]);
+  }, [curTx, prevTx, width, dragEnabled, holdMs, startX, startY, downAt, baseDx, velX, lastDx, lastT, decided, dragX, busySV, hasNextSV, hasPrevSV, dragStartJS, finishJS, cancelJS]);
 
   useImperativeHandle(ref, () => ({
     isBusy: () => busyRef.current,
