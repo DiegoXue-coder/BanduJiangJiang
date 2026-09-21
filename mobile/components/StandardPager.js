@@ -3,25 +3,28 @@
 // ── 历史 ──────────────────────────────────────────────────────────────────────
 // 改造前：一页一个 WebView，翻页=销毁旧的、新建一个、重新排版（250~450ms），画面直接跳变。
 // 第一版（点一下放一段固定动画）：当前页/下一页常驻，翻页时用原生动画把当前页滑走 260ms。
-//   遗留两个问题：① 动画是"写死的"，不跟手；② 往前翻时上一页没常驻，要现挂现等约 0.3s。
-// 现在这版：手指按住页面横向拖，页面就跟着手指走（挪到哪跟到哪，挪开一半就走一半，挪回来就回来），
-//   松手时按"拖了多远/甩得多快"决定翻过去还是弹回来；点边缘翻页仍然是一段动画。
-//   上一页/当前页/下一页三个 WebView 常驻，往前翻也是即点即滑。
+// 第二版：跟手（手指拖到哪页面跟到哪，松手按距离/速度决定翻过去还是弹回），上一页也常驻。
+// 现在这版：往前翻改成"上一页从左边滑进来盖住当前页"，并且**任何时候都不改页面层级**（见下）。
 //
 // ── 怎么做到不卡 ─────────────────────────────────────────────────────────────
 // 页面位置由 Reanimated 的"共享值"驱动，手势回调和动画都跑在原生 UI 线程，
 // 手指每动一下，位置直接在 UI 线程更新，不经过 JS 线程（JS 线程忙于排版也不影响跟手）。
 //
-// ── 页面怎么摆 ───────────────────────────────────────────────────────────────
-// 三页始终叠在屏幕范围内（当前页在最上面）——屏幕外的 WebView 不会被绘制（实测滑进来时下半截空白），
-// 所以不能把邻页排到屏幕外等着：
+// ── 页面怎么摆（重点）─────────────────────────────────────────────────────────
+// 三个 WebView（上一页/当前页/下一页）常驻，而且都必须"在屏幕范围内被绘制着"：
+// 完全移到屏幕外的 WebView 不会被绘制，滑进来时会先露出空白/半截内容（实测）。
 //   往后翻（手指向左拖）：当前页向左滑走，露出压在下面的下一页；
-//   往前翻（手指向右拖）：**上一页从左边滑进来，盖在当前页上面**，当前页自己不动。
-//     （第一版是"当前页向右滑走、露出下面不动的上一页"，用户反馈看不出是在翻回去——
-//      翻回去应该是"把上一页拉回来"，所以改成上一页作为被拖动的那一页。）
-// 静止时上一页压在最底层（保证它一直被绘制过）；往前翻期间临时把它提到最上层（backMode）。
-// 每个页面实例有自己的位移共享值（不是按"当前/上一页/下一页"角色共用一个）：
-// 翻完之后各页角色互换时，每个实例的位置一像素都不用改，不会闪。
+//   往前翻（手指向右拖）：上一页从左边滑进来盖在当前页上面，当前页自己不动。
+// 往前翻要求"上一页的层级高于当前页"，往后翻要求"当前页高于下一页"——所以**层级按页在书里的
+// 先后固定**：越靠前的页层级越高（z = 基数 − 页序号），一个页面的层级一辈子不变。
+// 上一页平时停在屏幕最左边、只露出 2dp 的窄边（页面左右边距是同色空白，看不出来）：
+// 既一直被绘制着，又不需要在往前翻的时候临时提层。
+//
+// 为什么这么在意"不改层级"：一开始是静止时让上一页压在最底层、往前翻时才把它提到最上层，
+// 录屏逐帧检测发现：提层（或翻完后降层）的那一帧，整页正文会空白一下（用户看到的"闪一下"），
+// 点边缘往回翻大约 1/4 会闪，往后翻（没有层级变化）一次都没闪。
+// 每个页面实例有自己的位移共享值：翻完之后角色互换，只有"刚滑走的旧当前页"需要从屏幕外
+// 挪到左侧窄边位置（都在屏幕外，看不见），其余页的位置一像素都不用改。
 //
 // ── 内存 ────────────────────────────────────────────────────────────────────
 // 三个整屏 WebView 同时叠着，模拟器（2.5GB）上多个页面同时重载会让 Chromium 报
@@ -44,24 +47,22 @@ const LOAD_WAIT_MAX_MS = 700; // 目标页还没加载完时，点边缘翻页�
 // 按住不动超过这个时间就当作"长按选字"，手势让给页面自己处理（页面里长按选字是 720ms，取个更早的值）
 const HOLD_MS = 450;
 const NEIGHBOR_RELOAD_DELAY = { next: 350, prev: 700 };
-const Z = { prev: 1, next: 2, cur: 3 };
+const Z_BASE = 1000000; // 层级 = Z_BASE − 页序号（页序号越小=越靠前=层级越高）
+const SLIVER = 2; // 上一页平时露在屏幕最左边的宽度（dp）
 
 const PagerPage = React.memo(function PagerPage({
-  page, role, width, tx, backMode, isCurrentRef, onMessageRef, registerWeb, onLoaded,
+  page, role, width, tx, isCurrentRef, onMessageRef, registerWeb, onLoaded,
   baseUrl, allowFileAccess, background,
 }) {
-  // 往前翻期间上一页要盖在当前页上面（层级 4），平时压在最底层
-  const zIndex = role === 'prev' && backMode ? 4 : Z[role];
+  // 层级固定（见文件头）：按页序号；没有序号（不该发生）时退回按角色
+  const zIndex = page.order != null ? Z_BASE - page.order : ({ prev: 3, cur: 2, next: 1 }[role]);
   // 位置：只由自己的共享值决定（UI 线程更新）
   const animatedStyle = useAnimatedStyle(() => ({ transform: [{ translateX: tx.value }] }));
   const setWebRef = useCallback((instance) => registerWeb(page.key, instance), [registerWeb, page.key]);
   // 邻页在"整批换内容"时错开重载：当前页立刻换，下一页晚 350ms，上一页晚 700ms
   const [html, setHtml] = useState(page.html);
-  useEffect(() => { console.log('[pager-diag] mount', page.key); return () => console.log('[pager-diag] unmount', page.key); }, [page.key]);
-  useEffect(() => { console.log('[pager-diag] role', page.key, role); }, [page.key, role]);
   useEffect(() => {
     if (page.html === html) return undefined;
-    console.log('[pager-diag] html-change', page.key, role);
     const delay = NEIGHBOR_RELOAD_DELAY[role] || 0;
     if (!delay) { setHtml(page.html); return undefined; }
     const t = setTimeout(() => setHtml(page.html), delay);
@@ -73,13 +74,13 @@ const PagerPage = React.memo(function PagerPage({
     [html, baseUrl],
   );
   const handleMessage = useCallback((event) => {
-    // 只有"当前页"的消息算数：压在下面的邻页（比如它们自己的字体自检消息）一律忽略
+    // 只有"当前页"的消息算数：邻页（比如它们自己的字体自检消息）一律忽略
     if (!isCurrentRef.current || isCurrentRef.current !== page.key) return;
     onMessageRef.current && onMessageRef.current(event);
   }, [isCurrentRef, onMessageRef, page.key]);
   return (
     <Animated.View
-      // 只有当前页接收触摸；邻页压在下面，不能被误点
+      // 只有当前页接收触摸；邻页不能被误点
       pointerEvents={role === 'cur' ? 'auto' : 'none'}
       style={[styles.slot, { width, zIndex, backgroundColor: background }, animatedStyle]}
     >
@@ -92,7 +93,7 @@ const PagerPage = React.memo(function PagerPage({
         style={[styles.web, { backgroundColor: background }]}
         containerStyle={[styles.web, { backgroundColor: background }]}
         onMessage={handleMessage}
-        onLoadEnd={() => { console.log('[pager-diag] loadEnd', page.key); onLoaded(page.key); }}
+        onLoadEnd={() => onLoaded(page.key)}
         showsVerticalScrollIndicator={false}
         showsHorizontalScrollIndicator={false}
         scrollEnabled={false}
@@ -103,8 +104,9 @@ const PagerPage = React.memo(function PagerPage({
   );
 });
 
-// pages: { prev, cur, next }，每个是 { key, html } 或 null（书的首页没有上一页 / 末页没有下一页 /
-//        相邻章节还没读进来）。key 要能唯一标识"这一页的位置+字体"，同一页不变。
+// pages: { prev, cur, next }，每个是 { key, order, html } 或 null（书的首页没有上一页 / 末页没有下一页 /
+//        相邻章节还没读进来）。key 要能唯一标识"这一页的位置+字体"，同一页不变；
+//        order 是这一页在整本书里的先后序号（章序号×10000+页序号），决定它一辈子的层级。
 // onCommit(dir)：翻页动画结束（页面已经滑到位）后调用，外面据此把页码 ±1。
 // onDragStart：手指开始拖页面时调用（外面用来清掉选区）。
 // dragEnabled：false 时不响应拖动（比如工具栏展开着），触摸原样交给页面里的脚本。
@@ -114,9 +116,6 @@ const StandardPager = forwardRef(function StandardPager({
   const [width, setWidth] = useState(0);
   const [, setLoadTick] = useState(0); // 有页面加载完就 +1，让"能不能挂邻页/能不能拖"重新计算
   const [prevForce, setPrevForce] = useState(false);
-  // 往前翻期间为 true：上一页提到最上层。backSV 是同一份状态的 UI 线程副本（手势回调里读写）
-  const [backMode, setBackMode] = useState(false);
-  const backSV = useSharedValue(false);
 
   const pagesRef = useRef(pages);
   pagesRef.current = pages;
@@ -140,10 +139,19 @@ const StandardPager = forwardRef(function StandardPager({
   const themeRef = useRef(null);
   const releaseTimerRef = useRef(null);
 
-  const getTx = (key) => {
+  // 上一页平时停的位置：屏幕左侧之外，只露出 SLIVER 宽的窄边；其他页平时在 0
+  const restOf = (role) => (role === 'prev' ? -width + SLIVER : 0);
+  const getTx = (key, role) => {
     let sv = txMapRef.current.get(key);
-    if (!sv) { sv = makeMutable(0); txMapRef.current.set(key, sv); }
+    if (!sv) { sv = makeMutable(restOf(role)); txMapRef.current.set(key, sv); }
     return sv;
+  };
+  // 所有页回到各自角色的停靠位置
+  const restAll = () => {
+    const p = pagesRef.current;
+    txMapRef.current.forEach((sv, k) => {
+      sv.value = (p.prev && p.prev.key === k) ? -width + SLIVER : 0;
+    });
   };
   const registerWeb = useCallback((key, instance) => {
     if (instance) webMapRef.current.set(key, instance); else webMapRef.current.delete(key);
@@ -155,6 +163,9 @@ const StandardPager = forwardRef(function StandardPager({
     const sub = AccessibilityInfo.addEventListener?.('reduceMotionChanged', (v) => { reduceMotionRef.current = !!v; });
     return () => { alive = false; sub && sub.remove && sub.remove(); };
   }, []);
+
+  // 页宽变了（旋转/折叠屏）：上一页的停靠位置要跟着重算
+  useEffect(() => { if (width) restAll(); }, [width]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleLoaded = useCallback((key) => {
     loadedRef.current.add(key);
@@ -201,19 +212,13 @@ const StandardPager = forwardRef(function StandardPager({
     const alive = new Set([pages.prev?.key, pages.cur?.key, pages.next?.key].filter(Boolean));
     loadedRef.current.forEach((k) => { if (!alive.has(k)) loadedRef.current.delete(k); });
     txMapRef.current.forEach((sv, k) => { if (!alive.has(k)) txMapRef.current.delete(k); });
-    // 所有页位移归零：刚滑走的旧当前页现在是"上一页/下一页"，压在新当前页下面，归零看不出来；
-    // 新当前页原本就压在下面、位移是 0。归零发生在角色互换之后，所以不会闪。
-    txMapRef.current.forEach((sv) => { sv.value = 0; });
+    // 各页回到自己新角色的停靠位置：往后翻后，刚滑走的旧当前页（在屏幕左侧之外）成了上一页，
+    // 只是从"完全在外"挪到"露 2dp 窄边"；往前翻后，滑进来的那页成了当前页，位置本来就是 0。
+    restAll();
     busyRef.current = false;
     busySV.value = false;
-    backSV.value = false;
-    setBackMode(false);
     if (releaseTimerRef.current) { clearTimeout(releaseTimerRef.current); releaseTimerRef.current = null; }
   }, [curKey]); // eslint-disable-line react-hooks/exhaustive-deps
-  // 退出 backMode（翻完 / 松手弹回）：上一页已经回到最底层，位移归零让它重新压在当前页下面
-  useEffect(() => {
-    if (!backMode) txMapRef.current.forEach((sv) => { sv.value = 0; });
-  }, [backMode]);
   const listKeys = [showPrev && pages.prev, cur, showNext && pages.next].filter(Boolean).map((p) => p.key).join('|');
   useEffect(() => {
     mountedKeysRef.current = new Set(listKeys ? listKeys.split('|') : []);
@@ -221,7 +226,6 @@ const StandardPager = forwardRef(function StandardPager({
 
   // ── 翻页动画结束（不管是点边缘还是松手）：通知外面页码 ±1 ──
   const finishJS = useCallback((dir) => {
-    console.log('[pager-diag] finish', dir);
     onCommitRef.current && onCommitRef.current(dir);
     // 兜底：万一外面没让当前页 key 变（比如翻页被拒绝），别让"忙"状态卡住
     if (releaseTimerRef.current) clearTimeout(releaseTimerRef.current);
@@ -229,16 +233,12 @@ const StandardPager = forwardRef(function StandardPager({
       releaseTimerRef.current = null;
       busyRef.current = false;
       busySV.value = false;
-      backSV.value = false;
-      setBackMode(false);
-      txMapRef.current.forEach((sv) => { sv.value = 0; });
+      restAll();
     }, 600);
-  }, [busySV, backSV]);
+  }, [busySV]); // eslint-disable-line react-hooks/exhaustive-deps
   const cancelJS = useCallback(() => {
     busyRef.current = false;
-    setBackMode(false);
   }, []);
-  const setBackJS = useCallback((on) => { setBackMode(on); }, []);
   const dragStartJS = useCallback(() => {
     busyRef.current = true;
     onDragStartRef.current && onDragStartRef.current();
@@ -254,9 +254,9 @@ const StandardPager = forwardRef(function StandardPager({
   const lastDx = useSharedValue(0);
   const lastT = useSharedValue(0);
   const decided = useSharedValue(0); // 0 还没定 / 1 正在拖 / 2 不是横拖（放弃）
-  const curTx = cur ? getTx(cur.key) : null;
-  const prevTx = pages.prev ? getTx(pages.prev.key) : null;
   const dragX = useSharedValue(0); // 手指当前带来的位移（<0 往后翻，>0 往前翻），松手判定用
+  const curTx = cur ? getTx(cur.key, 'cur') : null;
+  const prevTx = pages.prev ? getTx(pages.prev.key, 'prev') : null;
   const gesture = useMemo(() => {
     if (!curTx || !width) return Gesture.Pan().enabled(false);
     return Gesture.Pan()
@@ -316,13 +316,12 @@ const StandardPager = forwardRef(function StandardPager({
           dragX.value = x;
           if (x > 0 && hasPrevSV.value) {
             // 往前翻：上一页从左边滑进来盖住当前页，当前页不动
-            if (!backSV.value) { backSV.value = true; runOnJS(setBackJS)(true); }
             curTx.value = 0;
-            if (prevTx) prevTx.value = -width + x;
+            if (prevTx) prevTx.value = Math.min(0, -width + SLIVER + x);
           } else {
             // 往后翻（当前页向左走）；或者到头了没有可翻的页（当前页带一点阻尼位移）
             curTx.value = x;
-            if (prevTx && backSV.value) prevTx.value = -width; // 手指从右拖又拖回左边：上一页退回屏幕左侧之外
+            if (prevTx) prevTx.value = -width + SLIVER; // 手指从右拖又拖回左边：上一页回到左侧窄边
           }
         }
       })
@@ -330,12 +329,12 @@ const StandardPager = forwardRef(function StandardPager({
         'worklet';
         if (decided.value !== 1) return;
         const x = dragX.value;
-        // 松手前 80ms 内手指已经停住了（比如拖到一半停下再松手）→ 速度按 0 算，不能把之前的速度带过来
-        // 触摸事件稀疏时（一甩只有两三个事件）平滑速度会偏低，再算一个"整段平均速度"，两个取大的
+        // 触摸事件稀疏时（一甩只有两三个事件）平滑速度会偏低，再算一个"整段平均速度"，两个取大的；
+        // 松手前 80ms 内手指已经停住了（拖到一半停下再松手）→ 平滑速度按 0 算
         const heldMs = Math.max(1, Date.now() - downAt.value);
         const avgV = ((x + baseDx.value) / heldMs) * 1000;
-        const sm = Date.now() - lastT.value > 80 ? 0 : velX.value;
-        const v = Math.abs(avgV) > Math.abs(sm) && (avgV * sm >= 0 || sm === 0) ? avgV : sm;
+        const smooth = Date.now() - lastT.value > 80 ? 0 : velX.value;
+        const v = Math.abs(avgV) > Math.abs(smooth) && (avgV * smooth >= 0 || smooth === 0) ? avgV : smooth;
         const dir = x < 0 ? 1 : -1; // 1=往后翻(下一页) -1=往前翻
         const can = dir === 1 ? hasNextSV.value : hasPrevSV.value;
         const progress = Math.abs(x) / width;
@@ -360,12 +359,11 @@ const StandardPager = forwardRef(function StandardPager({
               if (finished) runOnJS(finishJS)(dir);
             });
           }
-        } else if (backSV.value && prevTx && x > 0) {
-          // 往前翻没拖够：上一页退回屏幕左侧之外，再回到最底层
-          prevTx.value = withTiming(-width, { duration: 200, easing: Easing.out(Easing.cubic) }, (finished) => {
+        } else if (x > 0 && prevTx && hasPrevSV.value) {
+          // 往前翻没拖够：上一页退回左侧窄边
+          prevTx.value = withTiming(-width + SLIVER, { duration: 200, easing: Easing.out(Easing.cubic) }, (finished) => {
             'worklet';
             if (finished) {
-              backSV.value = false;
               busySV.value = false;
               runOnJS(cancelJS)();
             }
@@ -374,14 +372,13 @@ const StandardPager = forwardRef(function StandardPager({
           curTx.value = withTiming(0, { duration: 200, easing: Easing.out(Easing.cubic) }, (finished) => {
             'worklet';
             if (finished) {
-              backSV.value = false;
               busySV.value = false;
               runOnJS(cancelJS)();
             }
           });
         }
       });
-  }, [curTx, prevTx, width, dragEnabled, startX, startY, downAt, baseDx, velX, lastDx, lastT, decided, dragX, busySV, backSV, hasNextSV, hasPrevSV, dragStartJS, setBackJS, finishJS, cancelJS]);
+  }, [curTx, prevTx, width, dragEnabled, startX, startY, downAt, baseDx, velX, lastDx, lastT, decided, dragX, busySV, hasNextSV, hasPrevSV, dragStartJS, finishJS, cancelJS]);
 
   useImperativeHandle(ref, () => ({
     isBusy: () => busyRef.current,
@@ -403,6 +400,7 @@ const StandardPager = forwardRef(function StandardPager({
       const target = dir > 0 ? p.next : p.prev;
       if (!p.cur || !target || !width || busyRef.current) return false;
       const startKey = p.cur.key;
+      const targetKey = target.key;
       busyRef.current = true;
       busySV.value = true;
       let started = false;
@@ -410,47 +408,30 @@ const StandardPager = forwardRef(function StandardPager({
         if (started) return;
         started = true;
         const q = pagesRef.current;
-        if (!q.cur || q.cur.key !== startKey) { busyRef.current = false; busySV.value = false; return; }
-        if (dir > 0) {
-          // 往后翻：当前页向左滑走，露出下一页
-          const c = getTx(startKey);
-          if (reduceMotionRef.current) { c.value = -width; finishJS(dir); return; }
-          c.value = withTiming(-width, { duration: TURN_MS, easing: Easing.out(Easing.cubic) }, (finished) => {
-            'worklet';
-            if (finished) runOnJS(finishJS)(dir);
-          });
-          return;
+        const t = dir > 0 ? q.next : q.prev;
+        if (!q.cur || q.cur.key !== startKey || !t || t.key !== targetKey) {
+          busyRef.current = false; busySV.value = false; return;
         }
-        // 往前翻：上一页从左边滑进来盖住当前页。先把它挪到屏幕左侧之外、再提到最上层，
-        // 等这次渲染生效（约 2 帧）再开始滑，否则上一页会在当前页上面闪一下
-        const pv = getTx(q.prev.key);
-        const prevKey = q.prev.key;
-        pv.value = -width;
-        backSV.value = true;
-        setBackMode(true);
-        setTimeout(() => {
-          const r = pagesRef.current;
-          if (!r.cur || r.cur.key !== startKey || !r.prev || r.prev.key !== prevKey) {
-            backSV.value = false; setBackMode(false); busyRef.current = false; busySV.value = false; return;
-          }
-          if (reduceMotionRef.current) { pv.value = 0; finishJS(dir); return; }
-          pv.value = withTiming(0, { duration: TURN_MS, easing: Easing.out(Easing.cubic) }, (finished) => {
-            'worklet';
-            if (finished) runOnJS(finishJS)(dir);
-          });
-        }, 40);
+        // 往后翻：动的是当前页（向左滑走）；往前翻：动的是上一页（从左侧窄边滑进来）
+        const mover = dir > 0 ? getTx(startKey, 'cur') : getTx(targetKey, 'prev');
+        const to = dir > 0 ? -width : 0;
+        if (reduceMotionRef.current) { mover.value = to; finishJS(dir); return; }
+        mover.value = withTiming(to, { duration: TURN_MS, easing: Easing.out(Easing.cubic) }, (finished) => {
+          'worklet';
+          if (finished) runOnJS(finishJS)(dir);
+        });
       };
-      if (loadedRef.current.has(target.key) && mountedKeysRef.current.has(target.key)) {
+      if (loadedRef.current.has(targetKey) && mountedKeysRef.current.has(targetKey)) {
         run();
       } else {
-        const waiters = loadWaitersRef.current.get(target.key) || [];
+        const waiters = loadWaitersRef.current.get(targetKey) || [];
         waiters.push(run);
-        loadWaitersRef.current.set(target.key, waiters);
+        loadWaitersRef.current.set(targetKey, waiters);
         setTimeout(run, LOAD_WAIT_MAX_MS);
       }
       return true;
     },
-  }), [width, busySV, backSV, finishJS]);
+  }), [width, busySV, finishJS]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const list = [
     showPrev && pages.prev ? { role: 'prev', page: pages.prev } : null,
@@ -471,8 +452,7 @@ const StandardPager = forwardRef(function StandardPager({
             page={page}
             role={role}
             width={width}
-            tx={getTx(page.key)}
-            backMode={backMode}
+            tx={getTx(page.key, role)}
             isCurrentRef={isCurrentRef}
             onMessageRef={onMessageRef}
             registerWeb={registerWeb}

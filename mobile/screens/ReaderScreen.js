@@ -2069,8 +2069,10 @@ function ReaderInner({
   themeRef.current = themeName;
   const themeDep = Platform.OS === 'android' ? 'static' : themeName;
   const standardStyleSig = `${bodyFontKey}-${themeDep}-${standardFontUrl ? 'file' : (standardFontBase64 ? 'font' : 'fallback')}`;
-  const makeStandardPage = useMemo(() => (blocks, chapterId, pageIndex) => ({
+  const makeStandardPage = useMemo(() => (blocks, chapterId, pageIndex, chapterIdx) => ({
     key: `${chapterId}:${pageIndex}:${standardStyleSig}`,
+    // 这一页在整本书里的先后序号：翻页容器按它固定每一页的层级（越靠前层级越高），层级一辈子不变
+    order: chapterIdx * 10000 + pageIndex,
     html: buildStandardPageHtml({
       blocks,
       fontFamily: bodyFont.family,
@@ -2120,16 +2122,16 @@ function ReaderInner({
     : (nextChapterPages && nextChapterPages.length ? nextChapterPages[0] : null);
   const nextPageRefIndex = safePageIndex < standardPages.length - 1 ? safePageIndex + 1 : 0;
   const curPage = useMemo(
-    () => (curPageBlocks ? makeStandardPage(curPageBlocks, standardChapterId, safePageIndex) : null),
-    [curPageBlocks, makeStandardPage, standardChapterId, safePageIndex],
+    () => (curPageBlocks ? makeStandardPage(curPageBlocks, standardChapterId, safePageIndex, standardChapterIndex) : null),
+    [curPageBlocks, makeStandardPage, standardChapterId, safePageIndex, standardChapterIndex],
   );
   const prevPage = useMemo(
-    () => (prevPageBlocks ? makeStandardPage(prevPageBlocks, safePageIndex > 0 ? standardChapterId : prevChapterId, prevPageRefIndex) : null),
-    [prevPageBlocks, makeStandardPage, standardChapterId, prevChapterId, safePageIndex, prevPageRefIndex],
+    () => (prevPageBlocks ? makeStandardPage(prevPageBlocks, safePageIndex > 0 ? standardChapterId : prevChapterId, prevPageRefIndex, safePageIndex > 0 ? standardChapterIndex : standardChapterIndex - 1) : null),
+    [prevPageBlocks, makeStandardPage, standardChapterId, prevChapterId, safePageIndex, prevPageRefIndex, standardChapterIndex],
   );
   const nextPage = useMemo(
-    () => (nextPageBlocks ? makeStandardPage(nextPageBlocks, safePageIndex < standardPages.length - 1 ? standardChapterId : nextChapterId, nextPageRefIndex) : null),
-    [nextPageBlocks, makeStandardPage, standardChapterId, nextChapterId, safePageIndex, standardPages.length, nextPageRefIndex],
+    () => (nextPageBlocks ? makeStandardPage(nextPageBlocks, safePageIndex < standardPages.length - 1 ? standardChapterId : nextChapterId, nextPageRefIndex, safePageIndex < standardPages.length - 1 ? standardChapterIndex : standardChapterIndex + 1) : null),
+    [nextPageBlocks, makeStandardPage, standardChapterId, nextChapterId, safePageIndex, standardPages.length, nextPageRefIndex, standardChapterIndex],
   );
   const pagerPages = useMemo(
     () => ({ prev: prevPage, cur: curPage, next: nextPage }),
