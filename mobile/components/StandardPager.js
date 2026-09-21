@@ -228,6 +228,10 @@ const StandardPager = forwardRef(function StandardPager({
   const startY = useSharedValue(0);
   const downAt = useSharedValue(0);
   const baseDx = useSharedValue(0);
+  // 自己算的手指速度（dp/秒）：手势库在"手动激活"模式下给的 velocityX 不可靠（实测一甩就是 0）
+  const velX = useSharedValue(0);
+  const lastDx = useSharedValue(0);
+  const lastT = useSharedValue(0);
   const decided = useSharedValue(0); // 0 还没定 / 1 正在拖 / 2 不是横拖（放弃）
   const curTx = cur ? getTx(cur.key) : null;
   const nextTx = pages.next ? getTx(pages.next.key) : null;
@@ -244,6 +248,9 @@ const StandardPager = forwardRef(function StandardPager({
         startY.value = t.absoluteY;
         downAt.value = Date.now();
         decided.value = busySV.value ? 2 : 0;
+        velX.value = 0;
+        lastDx.value = 0;
+        lastT.value = Date.now();
       })
       .onTouchesMove((e, sm) => {
         'worklet';
@@ -261,6 +268,8 @@ const StandardPager = forwardRef(function StandardPager({
             // 从"开始拖"这一刻算起，页面不会一下子跳 10 多 px；但最多只扣 12：
             // 快速甩动时第一个触摸事件可能已经走了一大截，全扣掉会把这一甩吃掉
             baseDx.value = Math.max(-12, Math.min(12, dx));
+            lastDx.value = dx;
+            lastT.value = Date.now();
             busySV.value = true;
             sm.activate();
             runOnJS(dragStartJS)();
@@ -269,6 +278,15 @@ const StandardPager = forwardRef(function StandardPager({
           }
         }
         if (decided.value === 1) {
+          // 手指速度：相邻两次触摸事件之间的位移/时间，做一点平滑（取最近几次的加权）
+          const now = Date.now();
+          const dt = now - lastT.value;
+          if (dt > 0) {
+            const inst = ((dx - lastDx.value) / dt) * 1000;
+            velX.value = velX.value * 0.4 + inst * 0.6;
+            lastDx.value = dx;
+            lastT.value = now;
+          }
           let x = dx - baseDx.value;
           // 对面没有可翻的页：只给一点阻尼位移，暗示"到头了"
           if ((x < 0 && !hasNextSV.value) || (x > 0 && !hasPrevSV.value)) x *= 0.25;
@@ -282,7 +300,8 @@ const StandardPager = forwardRef(function StandardPager({
         'worklet';
         if (decided.value !== 1) return;
         const x = curTx.value;
-        const v = e.velocityX;
+        // 松手前 80ms 内手指已经停住了（比如拖到一半停下再松手）→ 速度按 0 算，不能把之前的速度带过来
+        const v = Date.now() - lastT.value > 80 ? 0 : velX.value;
         const dir = x < 0 ? 1 : -1; // 1=往后翻(下一页) -1=往前翻
         const can = dir === 1 ? hasNextSV.value : hasPrevSV.value;
         const progress = Math.abs(x) / width;
@@ -310,7 +329,7 @@ const StandardPager = forwardRef(function StandardPager({
           });
         }
       });
-  }, [curTx, nextTx, width, dragEnabled, startX, startY, downAt, baseDx, decided, busySV, hasNextSV, hasPrevSV, dragStartJS, finishJS, cancelJS]);
+  }, [curTx, nextTx, width, dragEnabled, startX, startY, downAt, baseDx, velX, lastDx, lastT, decided, busySV, hasNextSV, hasPrevSV, dragStartJS, finishJS, cancelJS]);
 
   useImperativeHandle(ref, () => ({
     isBusy: () => busyRef.current,
