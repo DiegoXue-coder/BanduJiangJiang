@@ -732,7 +732,10 @@ function buildStandardPageHtml({
           post({type:'standardVSwipe', dir: dy>0 ? 'down' : 'up'});
           return;
         }
-        if(Math.abs(dx)>54 && Math.abs(dx)>Math.abs(dy)*1.45){ post({type:dx<0?'standardNext':'standardPrev'}); return; }
+        // 横向滑动：发独立的 standardSwipe 消息（和下面的边缘点击 standardPrev/Next 区分开）。
+        // 启用了翻页容器时，横向拖动由容器的原生手势处理；苹果上手势库接管拖动后页面照样会收到 touchend，
+        // 脚本这里就会重复触发一次翻页（用户反馈：往左翻到下一页后马上往右滑，会连翻两页），RN 侧据此去重。
+        if(Math.abs(dx)>54 && Math.abs(dx)>Math.abs(dy)*1.45){ post({type:'standardSwipe', dir: dx<0 ? 1 : -1}); return; }
         if(!moved && held<420){
           var w=window.innerWidth || document.documentElement.clientWidth;
           if(t.clientX < w*.14) { clearTokenSelection(); post({type:'standardPrev'}); return; }
@@ -1093,6 +1096,8 @@ function ReaderInner({
   // 翻页动画进行中又点了一下：记下来，动画一结束（页码变了）就接着翻，
   // 不然连点会"吞"掉点击。同方向最多攒 3 下（再多就是乱点了），方向变了就重新计。
   const queuedTurnRef = useRef({ dir: 0, n: 0 });
+  // 翻页容器最近一次开始拖动/完成翻页的时间：脚本的滑动消息如果紧跟在它后面，就是重复触发，要丢掉
+  const lastPagerTurnAtRef = useRef(0);
   const queueTurn = (dir) => {
     const q = queuedTurnRef.current;
     queuedTurnRef.current = q.dir === dir ? { dir, n: Math.min(3, q.n + 1) } : { dir, n: 1 };
@@ -2280,6 +2285,7 @@ function ReaderInner({
   // 容器那一侧还没有页面（相邻章节没读进来）、或者 iOS（没有翻页容器）时，
   // 直接调 commitStandardTurn 做"不带动画的跳转"，功能不打折。
   function commitStandardTurn(dir) {
+    lastPagerTurnAtRef.current = Date.now();
     if (dir > 0) {
       if (standardPageIndex < standardPages.length - 1) {
         setStandardPageIndex((prev) => Math.min(standardPages.length - 1, prev + 1));
@@ -2401,6 +2407,15 @@ function ReaderInner({
     }
     if (data?.type === 'standardClearSelection') {
       clearStandardSelection();
+      return;
+    }
+    if (data?.type === 'standardSwipe') {
+      // 翻页容器接管了横向拖动（工具栏没展开时）：脚本的滑动判定是重复触发，丢掉。
+      // 只有容器没接管（没启用容器 / 工具栏展开着 / 容器的手势没激活）才按脚本的判定翻页。
+      const pagerHandled = pagerEnabled && !chromeOpen
+        && (standardPagerRef.current?.isBusy?.() || Date.now() - lastPagerTurnAtRef.current < 900);
+      if (pagerHandled) return;
+      goStandardTurn(data.dir > 0 ? 1 : -1);
       return;
     }
     if (data?.type === 'standardPrev') {
@@ -2690,7 +2705,7 @@ function ReaderInner({
                     onCommit={commitStandardTurn}
                     // 手指开始拖页面：清掉选区。工具栏展开时不响应拖动（横滑交给页面脚本，
                     // 走"收起工具栏"的老逻辑）。
-                    onDragStart={clearStandardSelection}
+                    onDragStart={() => { lastPagerTurnAtRef.current = Date.now(); clearStandardSelection(); }}
                     dragEnabled={!chromeOpen && readerInteractionReady}
                     // 长按选字的触发时间：安卓 720ms、苹果 320ms（见页面脚本 longPressMs）；拖页手势要在长按触发之前让位
                     holdMs={Platform.OS === 'ios' ? 280 : 450}
