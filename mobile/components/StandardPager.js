@@ -57,8 +57,11 @@ const PagerPage = React.memo(function PagerPage({
   const setWebRef = useCallback((instance) => registerWeb(page.key, instance), [registerWeb, page.key]);
   // 邻页在"整批换内容"时错开重载：当前页立刻换，下一页晚 350ms，上一页晚 700ms
   const [html, setHtml] = useState(page.html);
+  useEffect(() => { console.log('[pager-diag] mount', page.key); return () => console.log('[pager-diag] unmount', page.key); }, [page.key]);
+  useEffect(() => { console.log('[pager-diag] role', page.key, role); }, [page.key, role]);
   useEffect(() => {
     if (page.html === html) return undefined;
+    console.log('[pager-diag] html-change', page.key, role);
     const delay = NEIGHBOR_RELOAD_DELAY[role] || 0;
     if (!delay) { setHtml(page.html); return undefined; }
     const t = setTimeout(() => setHtml(page.html), delay);
@@ -89,7 +92,7 @@ const PagerPage = React.memo(function PagerPage({
         style={[styles.web, { backgroundColor: background }]}
         containerStyle={[styles.web, { backgroundColor: background }]}
         onMessage={handleMessage}
-        onLoadEnd={() => onLoaded(page.key)}
+        onLoadEnd={() => { console.log('[pager-diag] loadEnd', page.key); onLoaded(page.key); }}
         showsVerticalScrollIndicator={false}
         showsHorizontalScrollIndicator={false}
         scrollEnabled={false}
@@ -218,6 +221,7 @@ const StandardPager = forwardRef(function StandardPager({
 
   // ── 翻页动画结束（不管是点边缘还是松手）：通知外面页码 ±1 ──
   const finishJS = useCallback((dir) => {
+    console.log('[pager-diag] finish', dir);
     onCommitRef.current && onCommitRef.current(dir);
     // 兜底：万一外面没让当前页 key 变（比如翻页被拒绝），别让"忙"状态卡住
     if (releaseTimerRef.current) clearTimeout(releaseTimerRef.current);
