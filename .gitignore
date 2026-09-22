@@ -20,3 +20,6 @@ node_modules/
 # 系统
 .DS_Store
 Thumbs.db
+
+# EPUB 目录测试工具：本地详情报告含正文摘录，绝不提交（任务卡10的数据安全边界）
+tools/epub_toc_audit/_local/

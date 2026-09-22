@@ -1,0 +1,687 @@
+{
+  "generated_at": "2026-09-23 02:23:32",
+  "books_dir_book_count": 13,
+  "unique_book_count": 12,
+  "duplicate_file_count": 1,
+  "parse_error_count": 0,
+  "books": [
+    {
+      "book_id": "a4d5b1e569",
+      "title": "中国的奋斗 : 1600—2000",
+      "spine_doc_count": 74,
+      "toc_like_doc_count": 0,
+      "raw_total_chars": 913553,
+      "raw_total_images": 125,
+      "raw_total_tables": 0,
+      "toc_total_entries": 61,
+      "toc_max_depth": 1,
+      "toc_group_node_count": 7,
+      "toc_unique_files_referenced": 61,
+      "current": {
+        "chapter_count": 66,
+        "total_chars": 678197,
+        "total_images": 125,
+        "total_tables": 0,
+        "short_chapters": 15,
+        "exact_title_dup_groups": 0,
+        "exact_title_dup_extra": 0,
+        "chapter_num_prefix_dup_groups": 0,
+        "chapter_num_prefix_dup_extra": 0,
+        "fabricated_placeholder_titles": 15
+      },
+      "hybrid": {
+        "chapter_count": 66,
+        "total_chars": 678197,
+        "total_images": 125,
+        "total_tables": 0,
+        "short_chapters": 15,
+        "low_confidence_titles": 13,
+        "same_scope_title_dup_extra": 0,
+        "chapter_num_prefix_dup_groups_before_disambiguation": 0,
+        "distinct_group_paths": 7,
+        "max_group_depth": 1,
+        "folded_beyond_2_levels": 0,
+        "outlier_long_chapters": 1,
+        "fabricated_placeholder_titles": 0
+      },
+      "severe_flag_count": 0,
+      "warn_flag_count": 1,
+      "flags": [
+        {
+          "level": "info",
+          "code": "shared_text_gap",
+          "message": "当前算法和混合方案的正文字数（678197/678197）都比原始 spine 全文本（913553）少，是两边共用的抽取函数已知特征（正文不在 &lt;p&gt; 标签内时不一定被抽到），非本次改动引入"
+        },
+        {
+          "level": "warn",
+          "code": "fabricated_title_current",
+          "message": "当前生产算法生成了 15 个无来源依据的\"第N章\"占位标题"
+        },
+        {
+          "level": "info",
+          "code": "outlier_long_hybrid",
+          "message": "混合方案有 1 章明显偏长（>中位数3倍），建议人工看一眼是不是又把多章合并了"
+        }
+      ]
+    },
+    {
+      "book_id": "9c4e5718d5",
+      "title": "原则",
+      "spine_doc_count": 65,
+      "toc_like_doc_count": 0,
+      "raw_total_chars": 276078,
+      "raw_total_images": 53,
+      "raw_total_tables": 0,
+      "toc_total_entries": 51,
+      "toc_max_depth": 0,
+      "toc_group_node_count": 0,
+      "toc_unique_files_referenced": 51,
+      "current": {
+        "chapter_count": 62,
+        "total_chars": 267201,
+        "total_images": 53,
+        "total_tables": 0,
+        "short_chapters": 16,
+        "exact_title_dup_groups": 0,
+        "exact_title_dup_extra": 0,
+        "chapter_num_prefix_dup_groups": 0,
+        "chapter_num_prefix_dup_extra": 0,
+        "fabricated_placeholder_titles": 18
+      },
+      "hybrid": {
+        "chapter_count": 62,
+        "total_chars": 267201,
+        "total_images": 53,
+        "total_tables": 0,
+        "short_chapters": 16,
+        "low_confidence_titles": 14,
+        "same_scope_title_dup_extra": 0,
+        "chapter_num_prefix_dup_groups_before_disambiguation": 0,
+        "distinct_group_paths": 0,
+        "max_group_depth": 0,
+        "folded_beyond_2_levels": 0,
+        "outlier_long_chapters": 15,
+        "fabricated_placeholder_titles": 0
+      },
+      "severe_flag_count": 0,
+      "warn_flag_count": 1,
+      "flags": [
+        {
+          "level": "info",
+          "code": "shared_text_gap",
+          "message": "当前算法和混合方案的正文字数（267201/267201）都比原始 spine 全文本（276078）少，是两边共用的抽取函数已知特征（正文不在 &lt;p&gt; 标签内时不一定被抽到），非本次改动引入"
+        },
+        {
+          "level": "warn",
+          "code": "fabricated_title_current",
+          "message": "当前生产算法生成了 18 个无来源依据的\"第N章\"占位标题"
+        },
+        {
+          "level": "info",
+          "code": "outlier_long_hybrid",
+          "message": "混合方案有 15 章明显偏长（>中位数3倍），建议人工看一眼是不是又把多章合并了"
+        }
+      ]
+    },
+    {
+      "book_id": "a6c0a676af",
+      "title": "宋史（中国断代史系列）",
+      "spine_doc_count": 90,
+      "toc_like_doc_count": 1,
+      "raw_total_chars": 527599,
+      "raw_total_images": 127,
+      "raw_total_tables": 0,
+      "toc_total_entries": 304,
+      "toc_max_depth": 2,
+      "toc_group_node_count": 21,
+      "toc_unique_files_referenced": 88,
+      "current": {
+        "chapter_count": 88,
+        "total_chars": 514722,
+        "total_images": 127,
+        "total_tables": 0,
+        "short_chapters": 4,
+        "exact_title_dup_groups": 0,
+        "exact_title_dup_extra": 0,
+        "chapter_num_prefix_dup_groups": 4,
+        "chapter_num_prefix_dup_extra": 57,
+        "fabricated_placeholder_titles": 3
+      },
+      "hybrid": {
+        "chapter_count": 88,
+        "total_chars": 514722,
+        "total_images": 127,
+        "total_tables": 0,
+        "short_chapters": 4,
+        "low_confidence_titles": 1,
+        "same_scope_title_dup_extra": 0,
+        "chapter_num_prefix_dup_groups_before_disambiguation": 0,
+        "distinct_group_paths": 21,
+        "max_group_depth": 1,
+        "folded_beyond_2_levels": 0,
+        "outlier_long_chapters": 4,
+        "fabricated_placeholder_titles": 0
+      },
+      "severe_flag_count": 0,
+      "warn_flag_count": 2,
+      "flags": [
+        {
+          "level": "info",
+          "code": "shared_text_gap",
+          "message": "当前算法和混合方案的正文字数（514722/514722）都比原始 spine 全文本（527599）少，是两边共用的抽取函数已知特征（正文不在 &lt;p&gt; 标签内时不一定被抽到），非本次改动引入"
+        },
+        {
+          "level": "warn",
+          "code": "fabricated_title_current",
+          "message": "当前生产算法生成了 3 个无来源依据的\"第N章\"占位标题"
+        },
+        {
+          "level": "warn",
+          "code": "dup_chapter_num_current",
+          "message": "当前生产算法里有 4 组重复章号前缀（多 57 条），无法从标题看出属于哪一册"
+        },
+        {
+          "level": "info",
+          "code": "outlier_long_hybrid",
+          "message": "混合方案有 4 章明显偏长（>中位数3倍），建议人工看一眼是不是又把多章合并了"
+        }
+      ]
+    },
+    {
+      "book_id": "74df4f2487",
+      "title": "富爸爸商学院+富爸爸致富需要做的6件事+富爸爸穷爸爸+富爸爸提高你的财商+富爸爸财务自由之路(修订版)(套装共5册)",
+      "spine_doc_count": 90,
+      "toc_like_doc_count": 6,
+      "raw_total_chars": 518448,
+      "raw_total_images": 198,
+      "raw_total_tables": 0,
+      "toc_total_entries": 85,
+      "toc_max_depth": 2,
+      "toc_group_node_count": 10,
+      "toc_unique_files_referenced": 72,
+      "current": {
+        "chapter_count": 81,
+        "total_chars": 507367,
+        "total_images": 198,
+        "total_tables": 0,
+        "short_chapters": 11,
+        "exact_title_dup_groups": 1,
+        "exact_title_dup_extra": 2,
+        "chapter_num_prefix_dup_groups": 13,
+        "chapter_num_prefix_dup_extra": 25,
+        "fabricated_placeholder_titles": 16
+      },
+      "hybrid": {
+        "chapter_count": 81,
+        "total_chars": 507367,
+        "total_images": 198,
+        "total_tables": 0,
+        "short_chapters": 11,
+        "low_confidence_titles": 10,
+        "same_scope_title_dup_extra": 0,
+        "chapter_num_prefix_dup_groups_before_disambiguation": 10,
+        "distinct_group_paths": 10,
+        "max_group_depth": 2,
+        "folded_beyond_2_levels": 0,
+        "outlier_long_chapters": 17,
+        "fabricated_placeholder_titles": 0
+      },
+      "severe_flag_count": 0,
+      "warn_flag_count": 2,
+      "flags": [
+        {
+          "level": "info",
+          "code": "shared_text_gap",
+          "message": "当前算法和混合方案的正文字数（507367/507367）都比原始 spine 全文本（518448）少，是两边共用的抽取函数已知特征（正文不在 &lt;p&gt; 标签内时不一定被抽到），非本次改动引入"
+        },
+        {
+          "level": "warn",
+          "code": "fabricated_title_current",
+          "message": "当前生产算法生成了 16 个无来源依据的\"第N章\"占位标题"
+        },
+        {
+          "level": "warn",
+          "code": "dup_chapter_num_current",
+          "message": "当前生产算法里有 13 组重复章号前缀（多 25 条），无法从标题看出属于哪一册"
+        },
+        {
+          "level": "info",
+          "code": "outlier_long_hybrid",
+          "message": "混合方案有 17 章明显偏长（>中位数3倍），建议人工看一眼是不是又把多章合并了"
+        }
+      ]
+    },
+    {
+      "book_id": "9ebc35620d",
+      "title": "明史纪事本末",
+      "spine_doc_count": 101,
+      "toc_like_doc_count": 0,
+      "raw_total_chars": 997326,
+      "raw_total_images": 1,
+      "raw_total_tables": 0,
+      "toc_total_entries": 101,
+      "toc_max_depth": 1,
+      "toc_group_node_count": 2,
+      "toc_unique_files_referenced": 101,
+      "current": {
+        "chapter_count": 101,
+        "total_chars": 989542,
+        "total_images": 1,
+        "total_tables": 0,
+        "short_chapters": 2,
+        "exact_title_dup_groups": 0,
+        "exact_title_dup_extra": 0,
+        "chapter_num_prefix_dup_groups": 0,
+        "chapter_num_prefix_dup_extra": 0,
+        "fabricated_placeholder_titles": 1
+      },
+      "hybrid": {
+        "chapter_count": 101,
+        "total_chars": 989542,
+        "total_images": 1,
+        "total_tables": 0,
+        "short_chapters": 2,
+        "low_confidence_titles": 0,
+        "same_scope_title_dup_extra": 0,
+        "chapter_num_prefix_dup_groups_before_disambiguation": 0,
+        "distinct_group_paths": 2,
+        "max_group_depth": 1,
+        "folded_beyond_2_levels": 0,
+        "outlier_long_chapters": 5,
+        "fabricated_placeholder_titles": 0
+      },
+      "severe_flag_count": 0,
+      "warn_flag_count": 1,
+      "flags": [
+        {
+          "level": "warn",
+          "code": "fabricated_title_current",
+          "message": "当前生产算法生成了 1 个无来源依据的\"第N章\"占位标题"
+        },
+        {
+          "level": "info",
+          "code": "outlier_long_hybrid",
+          "message": "混合方案有 5 章明显偏长（>中位数3倍），建议人工看一眼是不是又把多章合并了"
+        }
+      ]
+    },
+    {
+      "book_id": "fe4fb4497f",
+      "title": "未来简史",
+      "spine_doc_count": 26,
+      "toc_like_doc_count": 1,
+      "raw_total_chars": 326227,
+      "raw_total_images": 53,
+      "raw_total_tables": 0,
+      "toc_total_entries": 79,
+      "toc_max_depth": 2,
+      "toc_group_node_count": 3,
+      "toc_unique_files_referenced": 18,
+      "current": {
+        "chapter_count": 25,
+        "total_chars": 322193,
+        "total_images": 53,
+        "total_tables": 0,
+        "short_chapters": 10,
+        "exact_title_dup_groups": 0,
+        "exact_title_dup_extra": 0,
+        "chapter_num_prefix_dup_groups": 6,
+        "chapter_num_prefix_dup_extra": 6,
+        "fabricated_placeholder_titles": 8
+      },
+      "hybrid": {
+        "chapter_count": 25,
+        "total_chars": 322193,
+        "total_images": 53,
+        "total_tables": 0,
+        "short_chapters": 10,
+        "low_confidence_titles": 8,
+        "same_scope_title_dup_extra": 0,
+        "chapter_num_prefix_dup_groups_before_disambiguation": 0,
+        "distinct_group_paths": 3,
+        "max_group_depth": 1,
+        "folded_beyond_2_levels": 0,
+        "outlier_long_chapters": 12,
+        "fabricated_placeholder_titles": 0
+      },
+      "severe_flag_count": 0,
+      "warn_flag_count": 2,
+      "flags": [
+        {
+          "level": "warn",
+          "code": "fabricated_title_current",
+          "message": "当前生产算法生成了 8 个无来源依据的\"第N章\"占位标题"
+        },
+        {
+          "level": "warn",
+          "code": "dup_chapter_num_current",
+          "message": "当前生产算法里有 6 组重复章号前缀（多 6 条），无法从标题看出属于哪一册"
+        },
+        {
+          "level": "info",
+          "code": "outlier_long_hybrid",
+          "message": "混合方案有 12 章明显偏长（>中位数3倍），建议人工看一眼是不是又把多章合并了"
+        }
+      ]
+    },
+    {
+      "book_id": "877211a998",
+      "title": "火与冰：后唐庄宗李存勖",
+      "spine_doc_count": 52,
+      "toc_like_doc_count": 0,
+      "raw_total_chars": 165010,
+      "raw_total_images": 4,
+      "raw_total_tables": 0,
+      "toc_total_entries": 194,
+      "toc_max_depth": 2,
+      "toc_group_node_count": 5,
+      "toc_unique_files_referenced": 46,
+      "current": {
+        "chapter_count": 51,
+        "total_chars": 160763,
+        "total_images": 4,
+        "total_tables": 0,
+        "short_chapters": 9,
+        "exact_title_dup_groups": 0,
+        "exact_title_dup_extra": 0,
+        "chapter_num_prefix_dup_groups": 0,
+        "chapter_num_prefix_dup_extra": 0,
+        "fabricated_placeholder_titles": 5
+      },
+      "hybrid": {
+        "chapter_count": 51,
+        "total_chars": 160763,
+        "total_images": 4,
+        "total_tables": 0,
+        "short_chapters": 9,
+        "low_confidence_titles": 5,
+        "same_scope_title_dup_extra": 0,
+        "chapter_num_prefix_dup_groups_before_disambiguation": 0,
+        "distinct_group_paths": 5,
+        "max_group_depth": 1,
+        "folded_beyond_2_levels": 0,
+        "outlier_long_chapters": 1,
+        "fabricated_placeholder_titles": 0
+      },
+      "severe_flag_count": 0,
+      "warn_flag_count": 1,
+      "flags": [
+        {
+          "level": "info",
+          "code": "shared_text_gap",
+          "message": "当前算法和混合方案的正文字数（160763/160763）都比原始 spine 全文本（165010）少，是两边共用的抽取函数已知特征（正文不在 &lt;p&gt; 标签内时不一定被抽到），非本次改动引入"
+        },
+        {
+          "level": "warn",
+          "code": "fabricated_title_current",
+          "message": "当前生产算法生成了 5 个无来源依据的\"第N章\"占位标题"
+        },
+        {
+          "level": "info",
+          "code": "outlier_long_hybrid",
+          "message": "混合方案有 1 章明显偏长（>中位数3倍），建议人工看一眼是不是又把多章合并了"
+        }
+      ]
+    },
+    {
+      "book_id": "1d78a226bd",
+      "title": "真需求 (梁宁)",
+      "spine_doc_count": 473,
+      "toc_like_doc_count": 0,
+      "raw_total_chars": 227128,
+      "raw_total_images": 48,
+      "raw_total_tables": 0,
+      "toc_total_entries": 191,
+      "toc_max_depth": 0,
+      "toc_group_node_count": 0,
+      "toc_unique_files_referenced": 191,
+      "current": {
+        "chapter_count": 472,
+        "total_chars": 220010,
+        "total_images": 48,
+        "total_tables": 0,
+        "short_chapters": 35,
+        "exact_title_dup_groups": 4,
+        "exact_title_dup_extra": 184,
+        "chapter_num_prefix_dup_groups": 0,
+        "chapter_num_prefix_dup_extra": 0,
+        "fabricated_placeholder_titles": 281
+      },
+      "hybrid": {
+        "chapter_count": 472,
+        "total_chars": 220010,
+        "total_images": 48,
+        "total_tables": 0,
+        "short_chapters": 35,
+        "low_confidence_titles": 281,
+        "same_scope_title_dup_extra": 184,
+        "chapter_num_prefix_dup_groups_before_disambiguation": 0,
+        "distinct_group_paths": 0,
+        "max_group_depth": 0,
+        "folded_beyond_2_levels": 0,
+        "outlier_long_chapters": 0,
+        "fabricated_placeholder_titles": 0
+      },
+      "severe_flag_count": 0,
+      "warn_flag_count": 2,
+      "flags": [
+        {
+          "level": "info",
+          "code": "shared_text_gap",
+          "message": "当前算法和混合方案的正文字数（220010/220010）都比原始 spine 全文本（227128）少，是两边共用的抽取函数已知特征（正文不在 &lt;p&gt; 标签内时不一定被抽到），非本次改动引入"
+        },
+        {
+          "level": "warn",
+          "code": "fabricated_title_current",
+          "message": "当前生产算法生成了 281 个无来源依据的\"第N章\"占位标题"
+        },
+        {
+          "level": "warn",
+          "code": "dup_same_scope_hybrid",
+          "message": "混合方案里同一分组下仍有 184 条重复标题（分组没能消歧）"
+        }
+      ]
+    },
+    {
+      "book_id": "f6a2784818",
+      "title": "细说宋朝",
+      "spine_doc_count": 96,
+      "toc_like_doc_count": 0,
+      "raw_total_chars": 396114,
+      "raw_total_images": 1,
+      "raw_total_tables": 0,
+      "toc_total_entries": 96,
+      "toc_max_depth": 0,
+      "toc_group_node_count": 0,
+      "toc_unique_files_referenced": 96,
+      "current": {
+        "chapter_count": 96,
+        "total_chars": 392435,
+        "total_images": 1,
+        "total_tables": 0,
+        "short_chapters": 1,
+        "exact_title_dup_groups": 0,
+        "exact_title_dup_extra": 0,
+        "chapter_num_prefix_dup_groups": 0,
+        "chapter_num_prefix_dup_extra": 0,
+        "fabricated_placeholder_titles": 0
+      },
+      "hybrid": {
+        "chapter_count": 96,
+        "total_chars": 392435,
+        "total_images": 1,
+        "total_tables": 0,
+        "short_chapters": 1,
+        "low_confidence_titles": 0,
+        "same_scope_title_dup_extra": 0,
+        "chapter_num_prefix_dup_groups_before_disambiguation": 0,
+        "distinct_group_paths": 0,
+        "max_group_depth": 0,
+        "folded_beyond_2_levels": 0,
+        "outlier_long_chapters": 0,
+        "fabricated_placeholder_titles": 0
+      },
+      "severe_flag_count": 0,
+      "warn_flag_count": 0,
+      "flags": []
+    },
+    {
+      "book_id": "8ac97f13f5",
+      "title": "绍兴十二年",
+      "spine_doc_count": 30,
+      "toc_like_doc_count": 1,
+      "raw_total_chars": 224442,
+      "raw_total_images": 0,
+      "raw_total_tables": 0,
+      "toc_total_entries": 52,
+      "toc_max_depth": 1,
+      "toc_group_node_count": 0,
+      "toc_unique_files_referenced": 15,
+      "current": {
+        "chapter_count": 28,
+        "total_chars": 222212,
+        "total_images": 0,
+        "total_tables": 0,
+        "short_chapters": 1,
+        "exact_title_dup_groups": 0,
+        "exact_title_dup_extra": 0,
+        "chapter_num_prefix_dup_groups": 0,
+        "chapter_num_prefix_dup_extra": 0,
+        "fabricated_placeholder_titles": 13
+      },
+      "hybrid": {
+        "chapter_count": 28,
+        "total_chars": 222212,
+        "total_images": 0,
+        "total_tables": 0,
+        "short_chapters": 1,
+        "low_confidence_titles": 13,
+        "same_scope_title_dup_extra": 0,
+        "chapter_num_prefix_dup_groups_before_disambiguation": 0,
+        "distinct_group_paths": 0,
+        "max_group_depth": 0,
+        "folded_beyond_2_levels": 0,
+        "outlier_long_chapters": 13,
+        "fabricated_placeholder_titles": 0
+      },
+      "severe_flag_count": 0,
+      "warn_flag_count": 1,
+      "flags": [
+        {
+          "level": "warn",
+          "code": "fabricated_title_current",
+          "message": "当前生产算法生成了 13 个无来源依据的\"第N章\"占位标题"
+        },
+        {
+          "level": "info",
+          "code": "outlier_long_hybrid",
+          "message": "混合方案有 13 章明显偏长（>中位数3倍），建议人工看一眼是不是又把多章合并了"
+        }
+      ]
+    },
+    {
+      "book_id": "34601d0e8f",
+      "title": "续资治通鉴长编",
+      "spine_doc_count": 523,
+      "toc_like_doc_count": 0,
+      "raw_total_chars": 6399706,
+      "raw_total_images": 1,
+      "raw_total_tables": 0,
+      "toc_total_entries": 523,
+      "toc_max_depth": 0,
+      "toc_group_node_count": 0,
+      "toc_unique_files_referenced": 523,
+      "current": {
+        "chapter_count": 523,
+        "total_chars": 6339492,
+        "total_images": 1,
+        "total_tables": 0,
+        "short_chapters": 1,
+        "exact_title_dup_groups": 1,
+        "exact_title_dup_extra": 4,
+        "chapter_num_prefix_dup_groups": 0,
+        "chapter_num_prefix_dup_extra": 0,
+        "fabricated_placeholder_titles": 0
+      },
+      "hybrid": {
+        "chapter_count": 523,
+        "total_chars": 6339492,
+        "total_images": 1,
+        "total_tables": 0,
+        "short_chapters": 1,
+        "low_confidence_titles": 0,
+        "same_scope_title_dup_extra": 4,
+        "chapter_num_prefix_dup_groups_before_disambiguation": 0,
+        "distinct_group_paths": 0,
+        "max_group_depth": 0,
+        "folded_beyond_2_levels": 0,
+        "outlier_long_chapters": 0,
+        "fabricated_placeholder_titles": 0
+      },
+      "severe_flag_count": 0,
+      "warn_flag_count": 1,
+      "flags": [
+        {
+          "level": "warn",
+          "code": "dup_same_scope_hybrid",
+          "message": "混合方案里同一分组下仍有 4 条重复标题（分组没能消歧）"
+        }
+      ]
+    },
+    {
+      "book_id": "476bde17ca",
+      "title": "西游记（人文社经典彩皮版，长销70年，以明代世德堂本为底本；三次修订重校；豆瓣上万条评论；2020年教育部指导目录图书）",
+      "spine_doc_count": 118,
+      "toc_like_doc_count": 2,
+      "raw_total_chars": 794583,
+      "raw_total_images": 419,
+      "raw_total_tables": 0,
+      "toc_total_entries": 119,
+      "toc_max_depth": 0,
+      "toc_group_node_count": 0,
+      "toc_unique_files_referenced": 117,
+      "current": {
+        "chapter_count": 116,
+        "total_chars": 781160,
+        "total_images": 419,
+        "total_tables": 0,
+        "short_chapters": 11,
+        "exact_title_dup_groups": 0,
+        "exact_title_dup_extra": 0,
+        "chapter_num_prefix_dup_groups": 0,
+        "chapter_num_prefix_dup_extra": 0,
+        "fabricated_placeholder_titles": 12
+      },
+      "hybrid": {
+        "chapter_count": 116,
+        "total_chars": 781160,
+        "total_images": 419,
+        "total_tables": 0,
+        "short_chapters": 11,
+        "low_confidence_titles": 1,
+        "same_scope_title_dup_extra": 5,
+        "chapter_num_prefix_dup_groups_before_disambiguation": 0,
+        "distinct_group_paths": 0,
+        "max_group_depth": 0,
+        "folded_beyond_2_levels": 0,
+        "outlier_long_chapters": 0,
+        "fabricated_placeholder_titles": 0
+      },
+      "severe_flag_count": 0,
+      "warn_flag_count": 2,
+      "flags": [
+        {
+          "level": "warn",
+          "code": "fabricated_title_current",
+          "message": "当前生产算法生成了 12 个无来源依据的\"第N章\"占位标题"
+        },
+        {
+          "level": "warn",
+          "code": "dup_same_scope_hybrid",
+          "message": "混合方案里同一分组下仍有 5 条重复标题（分组没能消歧）"
+        }
+      ]
+    }
+  ],
+  "parse_errors": []
+}
