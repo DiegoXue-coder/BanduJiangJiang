@@ -7,8 +7,9 @@
 - 日期：`YYYY-MM-DD`
 - 评测集 SHA-256：`<dataset_sha256>`
 - 题目数：`42`
-- 基线配置：`<config/model>`
-- 候选配置：`<config/model>`
+- 直连基线配置：`<config/model>`
+- 直连候选配置：`<config/model>`
+- ChatBook 生产接口配置：`<base-url/server-model>`
 - 成功请求数：`<n>`
 - 失败请求数：`<n>`
 - 人工评审者：`<role-or-anonymous-id>`
@@ -17,8 +18,9 @@
 
 | 配置 | 平均总分 / 12 | 依据准确 / 2 | 事实正确 / 2 | 诚实不确定 / 2 | 深度 / 2 | 清晰 / 2 | 证据标注 / 2 | 平均 TTFT | 平均总耗时 | 估算总成本 |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| baseline |  |  |  |  |  |  |  |  |  |  |
-| candidate |  |  |  |  |  |  |  |  |  |  |
+| direct_baseline |  |  |  |  |  |  |  |  |  |  |
+| direct_candidate |  |  |  |  |  |  |  |  |  |  |
+| chatbook_production |  |  |  |  |  |  |  |  |  |  |
 
 ## 分类结果
 

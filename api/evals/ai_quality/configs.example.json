@@ -1,14 +1,15 @@
 {
-  "schema_version": 1,
-  "request": {
-    "provider": "openai_compatible",
-    "endpoint": "https://api.example.invalid/v1/chat/completions",
-    "api_key_env": "AI_QUALITY_API_KEY",
-    "timeout_seconds": 60
-  },
+  "schema_version": 2,
   "configs": [
     {
-      "id": "baseline",
+      "id": "direct_baseline",
+      "adapter": "direct_model",
+      "request": {
+        "provider": "openai_compatible",
+        "endpoint": "https://api.example.invalid/v1/chat/completions",
+        "api_key_env": "AI_QUALITY_API_KEY",
+        "timeout_seconds": 60
+      },
       "model": "replace-with-baseline-model",
       "temperature": 0.2,
       "max_tokens": 800,
@@ -17,13 +18,34 @@
       "system_prompt": "你是阅读助手。回答必须区分给定材料、用户记忆与一般知识；依据不足时明确说明。"
     },
     {
-      "id": "candidate",
+      "id": "direct_candidate",
+      "adapter": "direct_model",
+      "request": {
+        "provider": "openai_compatible",
+        "endpoint": "https://api.example.invalid/v1/chat/completions",
+        "api_key_env": "AI_QUALITY_API_KEY",
+        "timeout_seconds": 60
+      },
       "model": "replace-with-candidate-model",
       "temperature": 0.2,
       "max_tokens": 800,
       "input_cost_per_million": 0,
       "output_cost_per_million": 0,
       "system_prompt": "你是阅读助手。优先依据给定材料，标明依据类型，不伪造原文；高风险问题说明边界与不确定性。"
+    },
+    {
+      "id": "chatbook_production",
+      "adapter": "chatbook_api",
+      "request": {
+        "base_url": "https://chatbook.example.invalid",
+        "path": "/ask/stream",
+        "extension_token_env": "CHATBOOK_EXTENSION_TOKEN",
+        "auth_token_env": "CHATBOOK_AUTH_TOKEN",
+        "deepseek_key_env": "CHATBOOK_DEEPSEEK_KEY",
+        "timeout_seconds": 90
+      },
+      "style": "simple",
+      "model": "server-configured"
     }
   ]
 }
