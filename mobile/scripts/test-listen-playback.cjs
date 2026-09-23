@@ -6,6 +6,8 @@ const {
   preparedSoundMatches,
   resolveNarrationStep,
   resolveJumpTarget,
+  splitCaptionPhrases,
+  rangeIndexAtOffset,
 } = require('../lib/listenPlayback');
 
 assert.equal(captionOpacityForIndex(3, 3), 1, '当前句必须首帧直接亮起');
@@ -69,5 +71,24 @@ assert.deepEqual(resolveJumpTarget({
   chunkLengths: [60, 55, 70], chapterIdx: 4, charOffset: 10000,
 }), { chapterIdx: 4, paragraphIdx: 2, charOffset: 70 }, '超出总长度兜底落在最后一块末尾');
 assert.equal(resolveJumpTarget({ chunkLengths: [], chapterIdx: 0, charOffset: 5 }), null, '空章节没有可跳转的块');
+
+const phraseText = '第一小段，第二小段：第三小段。最后一句';
+const phrases = splitCaptionPhrases(phraseText, 24);
+assert.deepEqual(phrases.map((item) => item.text), ['第一小段，', '第二小段：', '第三小段。', '最后一句']);
+assert.equal(phrases.map((item) => item.text).join(''), phraseText, '短语切分不能增删正文字符');
+assert(phrases.every((item, index) => index === 0 || item.start === phrases[index - 1].end), '短语字符范围必须连续');
+assert.equal(rangeIndexAtOffset(phrases, 0), 0);
+assert.equal(rangeIndexAtOffset(phrases, phrases[0].end), 1, '标点后的首字应进入下一短语');
+assert.equal(rangeIndexAtOffset(phrases, phraseText.length + 50), phrases.length - 1);
+
+const longPhrases = splitCaptionPhrases('甲'.repeat(53), 12);
+assert.deepEqual(longPhrases.map((item) => item.text.length), [12, 12, 12, 12, 5], '无标点长句必须按最大长度兜底');
+assert.equal(longPhrases.map((item) => item.text).join(''), '甲'.repeat(53));
+assert(splitCaptionPhrases('乙'.repeat(45)).every((item) => item.text.length <= 14), '默认短语长度应适配小屏单行');
+
+const quotedPhrases = splitCaptionPhrases('他说：“可以。”然后继续。', 24);
+assert.equal(quotedPhrases[0].text, '他说：');
+assert.equal(quotedPhrases[1].text, '“可以。”', '句末引号应跟随前面的自然停顿');
+assert.equal(quotedPhrases.map((item) => item.text).join(''), '他说：“可以。”然后继续。');
 
 console.log('listen playback tests passed');

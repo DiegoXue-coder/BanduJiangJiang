@@ -1,6 +1,7 @@
 const ACTIVE_CAPTION_OPACITY = 1;
 const READ_CAPTION_OPACITY = 0.36;
 const UPCOMING_CAPTION_OPACITY = 0.62;
+const DEFAULT_CAPTION_PHRASE_MAX_LENGTH = 14;
 
 function captionOpacityForIndex(index, activeIndex) {
   if (index === activeIndex) return ACTIVE_CAPTION_OPACITY;
@@ -75,6 +76,44 @@ function resolveJumpTarget({ chunkLengths, chapterIdx, charOffset }) {
   return null; // 不可达：lengths非空时循环一定会在isLast命中返回
 }
 
+function splitCaptionPhrases(text, maxLength = DEFAULT_CAPTION_PHRASE_MAX_LENGTH) {
+  if (!text) return [];
+  const safeMaxLength = Math.max(8, Number(maxLength) || DEFAULT_CAPTION_PHRASE_MAX_LENGTH);
+  const ranges = [];
+  const naturalBreak = /[，、：；。！？,;:!?\n]/;
+  const closingMark = /[”’」』】）》〉]/;
+  let start = 0;
+  let index = 0;
+
+  const pushRange = (end) => {
+    if (end <= start) return;
+    ranges.push({ text: text.slice(start, end), start, end });
+    start = end;
+  };
+
+  while (index < text.length) {
+    const length = index - start + 1;
+    if (naturalBreak.test(text[index])) {
+      let end = index + 1;
+      while (end < text.length && closingMark.test(text[end])) end += 1;
+      pushRange(end);
+      index = end;
+      continue;
+    }
+    if (length >= safeMaxLength) pushRange(index + 1);
+    index += 1;
+  }
+  pushRange(text.length);
+  return ranges;
+}
+
+function rangeIndexAtOffset(ranges, offset) {
+  if (!Array.isArray(ranges) || ranges.length === 0) return 0;
+  const safeOffset = Math.max(0, Number(offset) || 0);
+  const found = ranges.findIndex((range) => safeOffset < range.end);
+  return found === -1 ? ranges.length - 1 : found;
+}
+
 module.exports = {
   captionOpacityForIndex,
   centeredScrollOffset,
@@ -82,4 +121,6 @@ module.exports = {
   preparedSoundMatches,
   resolveNarrationStep,
   resolveJumpTarget,
+  splitCaptionPhrases,
+  rangeIndexAtOffset,
 };

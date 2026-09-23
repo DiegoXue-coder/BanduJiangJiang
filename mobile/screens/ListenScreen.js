@@ -44,6 +44,8 @@ const {
   preparedSoundMatches,
   resolveNarrationStep,
   resolveJumpTarget,
+  splitCaptionPhrases,
+  rangeIndexAtOffset,
 } = require('../lib/listenPlayback');
 
 // 听书页使用最终原型 listen-final-prototype 的中性炭黑暗色，不再沿用旧版
@@ -245,6 +247,8 @@ const CAPTION_IDLE_SNAPBACK_MS = 4000;
 // 惯性结束事件、弹回计时器永远不会启动。这个等待窗口只是用来分辨
 // "松手即静止"和"松手后还在惯性滑"两种情况，不是弹回倒计时本身。
 const CAPTION_MOMENTUM_WAIT_MS = 80;
+const CAPTION_MOMENTUM_SAFETY_MS = 450;
+const CAPTION_STALL_REALIGN_MS = 600;
 const LISTEN_PROGRESS_SAVE_INTERVAL_MS = 3000;
 const LISTEN_HISTORY_TURNS = 4;
 const NARRATION_STATUS_INTERVAL_MS = 100;
@@ -393,52 +397,60 @@ function buildCaptionContext(chunks, currentIndex) {
 // 第二阶段追加：每句是独立Text，天然自带onPress，不需要额外套
 // Pressable/TouchableOpacity——点按跳转朗读复用的是这同一批盒子。
 function NarrationParagraph({
-  text, activeIndex, onContainerLayout, onSentenceLayout, onSentencePress,
+  text,
+  activePhraseIndex,
+  candidateSentenceIndex,
+  candidatePhraseIndex,
+  onContainerLayout,
+  onPhraseLayout,
+  onSentenceCandidate,
+  onConfirmSentence,
+  onInteractivePressIn,
 }) {
   const sentences = useMemo(() => splitCaptionSentences(text), [text]);
-  const animationRef = useRef({ key: '', opacity: [] });
-  if (animationRef.current.key !== text) {
-    animationRef.current = {
-      key: text,
-      opacity: sentences.map((_, index) => new Animated.Value(captionOpacityForIndex(index, activeIndex))),
-    };
-  }
-
-  useEffect(() => {
-    // 当前句必须在React提交这一帧就直接亮起，不能从上一档灰色慢慢过渡。
-    // 只有已经念过/尚未念到的句子继续淡变，保留原有的柔和层次。
-    animationRef.current.opacity[activeIndex]?.setValue(1);
-    const animations = sentences
-      .map((_, index) => (index === activeIndex ? null : Animated.timing(animationRef.current.opacity[index], {
-        toValue: captionOpacityForIndex(index, activeIndex),
-        duration: 320,
-        useNativeDriver: false,
-      })))
-      .filter(Boolean);
-    const parallel = Animated.parallel(animations);
-    parallel.start();
-    return () => parallel.stop();
-  }, [activeIndex, sentences, text]);
+  const phrases = useMemo(() => splitCaptionPhrases(text).map((phrase) => ({
+    ...phrase,
+    sentenceIndex: rangeIndexAtOffset(sentences, phrase.start),
+  })), [sentences, text]);
 
   return (
     <View style={styles.captionFlow} onLayout={onContainerLayout}>
-      {sentences.map((sentence, index) => (
-        <Animated.Text
-          key={`${sentence.start}-${sentence.end}`}
-          onLayout={onSentenceLayout ? (e) => onSentenceLayout(index, e.nativeEvent.layout) : undefined}
-          onPress={onSentencePress ? () => onSentencePress(index) : undefined}
-          suppressHighlighting
-          style={[
-            styles.captionParagraphText,
-            {
-              color: index === activeIndex ? EMBER.paper : index < activeIndex ? EMBER.paperDim : EMBER.inkSoft,
-              opacity: index === activeIndex ? 1 : animationRef.current.opacity[index],
-            },
-          ]}
-        >
-          {sentence.text}
-        </Animated.Text>
-      ))}
+      {phrases.map((phrase, index) => {
+        const showJumpButton = candidateSentenceIndex === phrase.sentenceIndex && candidatePhraseIndex === index;
+        return (
+          <React.Fragment key={`${phrase.start}-${phrase.end}`}>
+            <Text
+              onLayout={onPhraseLayout ? (e) => onPhraseLayout(index, e.nativeEvent.layout) : undefined}
+              onPressIn={onInteractivePressIn}
+              onPress={onSentenceCandidate ? () => onSentenceCandidate(phrase.sentenceIndex, index) : undefined}
+              suppressHighlighting
+              style={[
+                styles.captionParagraphText,
+                {
+                  color: index === activePhraseIndex ? EMBER.paper : index < activePhraseIndex ? EMBER.paperDim : EMBER.inkSoft,
+                  opacity: captionOpacityForIndex(index, activePhraseIndex),
+                },
+              ]}
+            >
+              {phrase.text}
+            </Text>
+            {showJumpButton && (
+              <View style={styles.captionJumpButtonSlot}>
+                <TouchableOpacity
+                  style={styles.captionJumpButton}
+                  hitSlop={{ top: 7, bottom: 7, left: 7, right: 7 }}
+                  onPressIn={onInteractivePressIn}
+                  onPress={() => onConfirmSentence?.(phrase.sentenceIndex)}
+                  accessibilityRole="button"
+                  accessibilityLabel="从这句话开始播放"
+                >
+                  <IconPlayerPlayFilled color={EMBER.paper} size={12} />
+                </TouchableOpacity>
+              </View>
+            )}
+          </React.Fragment>
+        );
+      })}
     </View>
   );
 }
@@ -463,6 +475,9 @@ export default function ListenScreen({ route, navigation }) {
   // 拿来算进度条位置和"句 X/Y"这个计数，复用同一份数据不重复维护。
   const [currentCaption, setCurrentCaption] = useState('');
   const [captionSentenceIndex, setCaptionSentenceIndex] = useState(0);
+  const [captionPhraseIndex, setCaptionPhraseIndex] = useState(0);
+  const [candidateSentenceIndex, setCandidateSentenceIndex] = useState(null);
+  const [candidatePhraseIndex, setCandidatePhraseIndex] = useState(null);
   const [currentSegCount, setCurrentSegCount] = useState({ idx: 0, total: 0 });
   // 播放/暂停按钮的"暂停"是纯音频暂停，不进对话视图（见handleInterrupt
   // 旁边togglePlayPause的注释）——每次真正有新的一段开始播放都要重置回
@@ -531,9 +546,9 @@ export default function ListenScreen({ route, navigation }) {
   // 弹回。只驱动NarrationParagraph这块的展示，不碰playFrom/播放队列/
   // 位置持久化——这里全是ref，状态变化不需要触发ListenScreen重渲染。
   const captionScrollRef = useRef(null);
-  // 每一句相对NarrationParagraph自身容器的{y, height}，句子布局在同一章
-  // 内文本不变就不会变，测过一次可以一直复用。
-  const captionSentenceLayoutsRef = useRef({});
+  // 语义句继续负责计数和跳转，视觉跟随改用更短的短语布局，避免一个跨多行
+  // 长句只量到整块高度、声音念到后半句时视觉位置逐渐沉到屏幕下方。
+  const captionPhraseLayoutsRef = useRef({});
   // NarrationParagraph容器相对captionScrollContent（滚动内容顶层）的y——
   // 前面还有captionReadingRail等兄弟节点占位，需要加上这段偏移才能换算
   // 成"该滚动到的绝对位置"。
@@ -545,14 +560,19 @@ export default function ListenScreen({ route, navigation }) {
   const captionUserScrollingRef = useRef(false);
   const captionIdleTimerRef = useRef(null);
   const captionMomentumWaitRef = useRef(null);
+  const captionMomentumSafetyRef = useRef(null);
   const captionMomentumActiveRef = useRef(false);
-  // 弹回计时器几秒后才触发，回调里不能用闭包里的captionSentenceIndex
-  // （会是计时器启动那一刻的旧值），要弹回的是"现在"正在念的那句。
-  const captionSentenceIndexRef = useRef(0);
-  useEffect(() => { captionSentenceIndexRef.current = captionSentenceIndex; }, [captionSentenceIndex]);
+  const captionChildTouchRef = useRef(false);
+  const captionSuppressPressUntilRef = useRef(0);
+  const candidateSentenceIndexRef = useRef(null);
+  const captionForceRealignRef = useRef(true);
+  // 弹回计时器几秒后才触发，回调里必须读ref里的最新短语位置，不能用启动
+  // 计时器那一刻的旧state。
+  const captionPhraseIndexRef = useRef(0);
+  useEffect(() => { captionPhraseIndexRef.current = captionPhraseIndex; }, [captionPhraseIndex]);
 
-  const scrollCaptionToSentence = useCallback((index, animated) => {
-    const layout = captionSentenceLayoutsRef.current[index];
+  const scrollCaptionToPhrase = useCallback((index, animated) => {
+    const layout = captionPhraseLayoutsRef.current[index];
     const scrollNode = captionScrollRef.current;
     if (!layout || !scrollNode) {
       captionPendingScrollRef.current = { index, animated };
@@ -578,8 +598,8 @@ export default function ListenScreen({ route, navigation }) {
   const retryPendingCaptionScroll = useCallback(() => {
     const pending = captionPendingScrollRef.current;
     if (!pending || captionUserScrollingRef.current) return;
-    requestAnimationFrame(() => scrollCaptionToSentence(pending.index, pending.animated));
-  }, [scrollCaptionToSentence]);
+    requestAnimationFrame(() => scrollCaptionToPhrase(pending.index, pending.animated));
+  }, [scrollCaptionToPhrase]);
 
   const clearCaptionIdleTimer = useCallback(() => {
     if (captionIdleTimerRef.current) {
@@ -593,29 +613,90 @@ export default function ListenScreen({ route, navigation }) {
       captionMomentumWaitRef.current = null;
     }
   }, []);
+  const clearCaptionMomentumSafety = useCallback(() => {
+    if (captionMomentumSafetyRef.current) {
+      clearTimeout(captionMomentumSafetyRef.current);
+      captionMomentumSafetyRef.current = null;
+    }
+  }, []);
   // 手指离开+惯性也停了之后才真正开始倒计时；倒计时到了就弹回当前正在
   // 念的那句、恢复自动跟随，跟"自动滚动让当前句居中"复用同一个函数。
   const startCaptionIdleTimer = useCallback(() => {
+    if (candidateSentenceIndexRef.current != null) return;
     clearCaptionIdleTimer();
     captionIdleTimerRef.current = setTimeout(() => {
       captionIdleTimerRef.current = null;
       captionUserScrollingRef.current = false;
-      scrollCaptionToSentence(captionSentenceIndexRef.current, true);
+      scrollCaptionToPhrase(captionPhraseIndexRef.current, true);
     }, CAPTION_IDLE_SNAPBACK_MS);
-  }, [clearCaptionIdleTimer, scrollCaptionToSentence]);
+  }, [clearCaptionIdleTimer, scrollCaptionToPhrase]);
+
+  const clearCaptionCandidate = useCallback((restartSnapback = true) => {
+    if (candidateSentenceIndexRef.current == null) return;
+    candidateSentenceIndexRef.current = null;
+    setCandidateSentenceIndex(null);
+    setCandidatePhraseIndex(null);
+    if (restartSnapback) {
+      captionUserScrollingRef.current = true;
+      startCaptionIdleTimer();
+    }
+  }, [startCaptionIdleTimer]);
+
+  const selectCaptionCandidate = useCallback((sentenceIndex, phraseIndex) => {
+    if (phase !== 'playing') return;
+    if (captionMomentumActiveRef.current || Date.now() < captionSuppressPressUntilRef.current) return;
+    candidateSentenceIndexRef.current = sentenceIndex;
+    setCandidateSentenceIndex(sentenceIndex);
+    setCandidatePhraseIndex(phraseIndex);
+    captionUserScrollingRef.current = true;
+    clearCaptionIdleTimer();
+    clearCaptionMomentumWait();
+    clearCaptionMomentumSafety();
+  }, [clearCaptionIdleTimer, clearCaptionMomentumSafety, clearCaptionMomentumWait, phase]);
+
+  const forceCaptionVisualAlignment = useCallback((index = captionPhraseIndexRef.current) => {
+    candidateSentenceIndexRef.current = null;
+    setCandidateSentenceIndex(null);
+    setCandidatePhraseIndex(null);
+    captionUserScrollingRef.current = false;
+    captionMomentumActiveRef.current = false;
+    clearCaptionIdleTimer();
+    clearCaptionMomentumWait();
+    clearCaptionMomentumSafety();
+    captionPendingScrollRef.current = { index, animated: false };
+    retryPendingCaptionScroll();
+  }, [clearCaptionIdleTimer, clearCaptionMomentumSafety, clearCaptionMomentumWait, retryPendingCaptionScroll]);
+
+  const armCaptionMomentumSafety = useCallback(() => {
+    clearCaptionMomentumSafety();
+    captionMomentumSafetyRef.current = setTimeout(() => {
+      captionMomentumSafetyRef.current = null;
+      if (!captionMomentumActiveRef.current) return;
+      captionMomentumActiveRef.current = false;
+      startCaptionIdleTimer();
+    }, CAPTION_MOMENTUM_SAFETY_MS);
+  }, [clearCaptionMomentumSafety, startCaptionIdleTimer]);
   // 倒计时期间用户又碰了一下屏幕（不一定构成拖动），按需求要重新计时；
   // 只有已经在倒计时的情况下"碰一下"才算数，还没开始倒计时（比如手指
   // 还按着、还在惯性滑）时碰屏幕是正常操作的一部分，不需要特殊处理。
   const handleCaptionTouchStart = useCallback(() => {
-    if (captionIdleTimerRef.current) startCaptionIdleTimer();
+    captionChildTouchRef.current = false;
+    if (captionIdleTimerRef.current && candidateSentenceIndexRef.current == null) startCaptionIdleTimer();
   }, [startCaptionIdleTimer]);
+  const handleCaptionTouchEnd = useCallback(() => {
+    if (!captionChildTouchRef.current && !captionMomentumActiveRef.current) clearCaptionCandidate(true);
+  }, [clearCaptionCandidate]);
   const handleCaptionScrollBeginDrag = useCallback(() => {
+    captionSuppressPressUntilRef.current = Date.now() + 500;
+    clearCaptionCandidate(false);
     captionUserScrollingRef.current = true;
     captionMomentumActiveRef.current = false;
     clearCaptionIdleTimer();
     clearCaptionMomentumWait();
-  }, [clearCaptionIdleTimer, clearCaptionMomentumWait]);
+    clearCaptionMomentumSafety();
+  }, [clearCaptionCandidate, clearCaptionIdleTimer, clearCaptionMomentumSafety, clearCaptionMomentumWait]);
   const handleCaptionScrollEndDrag = useCallback(() => {
+    captionSuppressPressUntilRef.current = Date.now() + 250;
     clearCaptionMomentumWait();
     captionMomentumWaitRef.current = setTimeout(() => {
       captionMomentumWaitRef.current = null;
@@ -628,27 +709,34 @@ export default function ListenScreen({ route, navigation }) {
     captionMomentumActiveRef.current = true;
     clearCaptionMomentumWait();
     clearCaptionIdleTimer();
-  }, [clearCaptionMomentumWait, clearCaptionIdleTimer]);
+    armCaptionMomentumSafety();
+  }, [armCaptionMomentumSafety, clearCaptionMomentumWait, clearCaptionIdleTimer]);
+  const handleCaptionScroll = useCallback(() => {
+    if (captionMomentumActiveRef.current) armCaptionMomentumSafety();
+  }, [armCaptionMomentumSafety]);
   const handleCaptionMomentumScrollEnd = useCallback(() => {
+    captionSuppressPressUntilRef.current = Date.now() + 120;
+    clearCaptionMomentumSafety();
     captionMomentumActiveRef.current = false;
     startCaptionIdleTimer();
-  }, [startCaptionIdleTimer]);
+  }, [clearCaptionMomentumSafety, startCaptionIdleTimer]);
   // 换章节（currentCaption整章文本变了）时，旧的逐句布局按下标复用会指向
   // 错误的句子，清空等新章节的onLayout重新测。
   useEffect(() => {
-    captionSentenceLayoutsRef.current = {};
+    captionPhraseLayoutsRef.current = {};
     captionContainerYRef.current = 0;
-    captionPendingScrollRef.current = { index: captionSentenceIndexRef.current, animated: false };
+    clearCaptionCandidate(false);
+    captionPendingScrollRef.current = { index: captionPhraseIndexRef.current, animated: false };
   }, [currentCaption]);
   // 朗读位置推进时，只要不是用户正在手动看别处，就跟着自动居中滚动；
   // 新章节/新句子首次渲染时如果布局还没测出来，先记成待滚动目标；对应
   // onLayout/onContentSizeChange一到就重试，不再只等固定60ms后永久放弃。
   useEffect(() => {
     if (captionUserScrollingRef.current) return undefined;
-    captionPendingScrollRef.current = { index: captionSentenceIndex, animated: true };
+    captionPendingScrollRef.current = { index: captionPhraseIndex, animated: true };
     const t = setTimeout(retryPendingCaptionScroll, 0);
     return () => clearTimeout(t);
-  }, [captionSentenceIndex, currentCaption, retryPendingCaptionScroll]);
+  }, [captionPhraseIndex, currentCaption, retryPendingCaptionScroll]);
 
   // playOneParagraph在playFrom的异步循环里调用，如果直接读voice/rate这两个
   // state会有闭包过期的问题（循环开始时闭包捕获的是当时的值，用户中途在
@@ -1075,11 +1163,13 @@ export default function ListenScreen({ route, navigation }) {
       if (audioStarted || epoch !== epochRef.current || soundRef.current !== sound) return;
       audioStarted = true;
       audioStartedAt = Date.now();
+      let silentGapMs = 0;
       if (lastNarrationFinishedAtRef.current > 0) {
-        console.log(`[听书诊断] 段间实际静默=${Date.now() - lastNarrationFinishedAtRef.current}ms`);
+        silentGapMs = Date.now() - lastNarrationFinishedAtRef.current;
+        console.log(`[听书诊断] 段间实际静默=${silentGapMs}ms`);
         lastNarrationFinishedAtRef.current = 0;
       }
-      onAudioStart?.();
+      onAudioStart?.({ silentGapMs });
       console.log(`[听书时间轴] 音频开始 位置=${progressMeta?.chapterIdx ?? '-'}/${progressMeta?.paragraphIdx ?? '-'} t=${audioStartedAt}`);
     };
     await new Promise((resolve, reject) => {
@@ -1238,8 +1328,13 @@ export default function ListenScreen({ route, navigation }) {
         const textToPlay = resumeSlice.text;
         const captionContext = buildCaptionContext(paragraphs, pi);
         const captionSentences = splitCaptionSentences(captionContext.text);
+        const captionPhrases = splitCaptionPhrases(captionContext.text);
         let lastCaptionSentenceIndex = sentenceIndexAtOffset(
           captionSentences,
+          captionContext.currentStart + resumeSlice.startOffset,
+        );
+        let lastCaptionPhraseIndex = rangeIndexAtOffset(
+          captionPhrases,
           captionContext.currentStart + resumeSlice.startOffset,
         );
         if (shouldResumeWithinParagraph) {
@@ -1259,7 +1354,7 @@ export default function ListenScreen({ route, navigation }) {
 
         console.log(`[听书诊断] 开始加载 章节="${chapter.title}" 第${pi + 1}/${paragraphs.length}段 段内恢复=${shouldResumeWithinParagraph} 预取命中=${!!presetPromise}`);
         try {
-          await playOneParagraph(textToPlay, epoch, () => {
+          await playOneParagraph(textToPlay, epoch, ({ silentGapMs = 0 } = {}) => {
             // 真机反馈过"打断时截取的是刚讲到那段的后面一段，不是刚讲到
             // 的那段"——根因是原来在"这段还没开始出声、还在等TTS合成"
             // 这个加载阶段，就把posRef改成了这一段，用户如果在这段真正
@@ -1274,7 +1369,13 @@ export default function ListenScreen({ route, navigation }) {
             setProgressLabel(`第${pi + 1}/${paragraphs.length}段`);
             setCurrentCaption(captionContext.text);
             setCaptionSentenceIndex(lastCaptionSentenceIndex);
+            setCaptionPhraseIndex(lastCaptionPhraseIndex);
             setCurrentSegCount({ idx: pi, total: paragraphs.length });
+            const mustRealign = captionForceRealignRef.current || silentGapMs >= CAPTION_STALL_REALIGN_MS;
+            captionForceRealignRef.current = false;
+            if (mustRealign) {
+              forceCaptionVisualAlignment(lastCaptionPhraseIndex);
+            }
             console.log(`[听书诊断] 开始出声 章节="${chapter.title}" 第${pi + 1}/${paragraphs.length}段`);
             if (hfResumePendingRef.current) {
               markHfTiming('正文恢复开始播放', 'resume_audio_start');
@@ -1287,13 +1388,19 @@ export default function ListenScreen({ route, navigation }) {
             baseOffset: resumeSlice.startOffset,
             playTextLength: textToPlay.length,
             onCharOffset: (charOffset) => {
+              const globalOffset = captionContext.currentStart + charOffset;
               const nextSentenceIndex = sentenceIndexAtOffset(
                 captionSentences,
-                captionContext.currentStart + charOffset,
+                globalOffset,
               );
               if (nextSentenceIndex !== lastCaptionSentenceIndex) {
                 lastCaptionSentenceIndex = nextSentenceIndex;
                 setCaptionSentenceIndex(nextSentenceIndex);
+              }
+              const nextPhraseIndex = rangeIndexAtOffset(captionPhrases, globalOffset);
+              if (nextPhraseIndex !== lastCaptionPhraseIndex) {
+                lastCaptionPhraseIndex = nextPhraseIndex;
+                setCaptionPhraseIndex(nextPhraseIndex);
               }
             },
           });
@@ -1309,6 +1416,7 @@ export default function ListenScreen({ route, navigation }) {
           if (epoch !== epochRef.current) return;
           if (paragraphRetryCount < 1) {
             paragraphRetryCount += 1;
+            captionForceRealignRef.current = true;
             await restorePlaybackAudioMode().catch(() => {});
             continue;
           }
@@ -1345,6 +1453,7 @@ export default function ListenScreen({ route, navigation }) {
 
   function restartNarrationFromCurrent(reason = '手动恢复正文播放') {
     const { chapterIdx, paragraphIdx } = posRef.current;
+    captionForceRealignRef.current = true;
     epochRef.current += 1;
     const epoch = epochRef.current;
     console.log(`[听书诊断] ${reason} chapter=${chapterIdx} paragraph=${paragraphIdx}`);
@@ -1382,6 +1491,7 @@ export default function ListenScreen({ route, navigation }) {
         try {
           await restorePlaybackAudioMode();
           await sound.playAsync();
+          forceCaptionVisualAlignment();
         } catch (error) {
           console.log(`[听书恢复] 原sound续播失败，改为重建：${error.message || error}`);
           await restartNarrationFromCurrent(`${reason}：原sound续播失败`);
@@ -1519,6 +1629,9 @@ export default function ListenScreen({ route, navigation }) {
       if (progressSaveTimerRef.current) clearTimeout(progressSaveTimerRef.current);
       if (maxDurationTimerRef.current) clearTimeout(maxDurationTimerRef.current);
       if (autoListenTimerRef.current) clearTimeout(autoListenTimerRef.current);
+      if (captionIdleTimerRef.current) clearTimeout(captionIdleTimerRef.current);
+      if (captionMomentumWaitRef.current) clearTimeout(captionMomentumWaitRef.current);
+      if (captionMomentumSafetyRef.current) clearTimeout(captionMomentumSafetyRef.current);
       if (autoListenRef.current && recordingRef.current) {
         recordingRef.current.stopAndUnloadAsync().catch(() => {});
       }
@@ -1712,7 +1825,8 @@ export default function ListenScreen({ route, navigation }) {
     }
   }
 
-  // 任务卡09/11第二阶段：用户手动滑到某一句、点它跳转朗读。整章字幕的
+  // 用户点小播放键确认后才跳转；轻触正文只由selectCaptionCandidate选择候选。
+  // 整章字幕的
   // sentenceIndex是"当前章节全文"语境下的全局句子下标（见buildCaptionContext
   // 把chunks拼成整章文本那次改动），要先换算回playFrom认识的
   // {chapterIdx, paragraphIdx, charOffset}——复用resolveJumpTarget这个纯
@@ -1735,6 +1849,10 @@ export default function ListenScreen({ route, navigation }) {
       charOffset: sentence.start,
     });
     if (!target) return;
+    candidateSentenceIndexRef.current = null;
+    setCandidateSentenceIndex(null);
+    setCandidatePhraseIndex(null);
+    captionForceRealignRef.current = true;
     const epoch = ++epochRef.current;
     // 跳转是"从当前正在播的地方直接切走"，不像上一段/下一段那样需要先转
     // loading-chapter态等资源——目标段落已经在缓存里，phase保持playing，
@@ -1749,6 +1867,7 @@ export default function ListenScreen({ route, navigation }) {
       captionUserScrollingRef.current = false;
       clearCaptionIdleTimer();
       clearCaptionMomentumWait();
+      clearCaptionMomentumSafety();
       playFrom(target.chapterIdx, target.paragraphIdx, epoch);
     });
   }
@@ -2900,6 +3019,9 @@ export default function ListenScreen({ route, navigation }) {
                             retryPendingCaptionScroll();
                           }}
                           onTouchStart={handleCaptionTouchStart}
+                          onTouchEnd={handleCaptionTouchEnd}
+                          onScroll={handleCaptionScroll}
+                          scrollEventThrottle={100}
                           onScrollBeginDrag={handleCaptionScrollBeginDrag}
                           onScrollEndDrag={handleCaptionScrollEndDrag}
                           onMomentumScrollBegin={handleCaptionMomentumScrollBegin}
@@ -2912,16 +3034,20 @@ export default function ListenScreen({ route, navigation }) {
                           <View style={{ height: Math.max(0, captionViewportHeight / 2 - 20) }} />
                           <NarrationParagraph
                             text={currentCaption}
-                            activeIndex={captionSentenceIndex}
+                            activePhraseIndex={captionPhraseIndex}
+                            candidateSentenceIndex={candidateSentenceIndex}
+                            candidatePhraseIndex={candidatePhraseIndex}
                             onContainerLayout={({ nativeEvent }) => {
                               captionContainerYRef.current = nativeEvent.layout.y;
                               retryPendingCaptionScroll();
                             }}
-                            onSentenceLayout={(index, layout) => {
-                              captionSentenceLayoutsRef.current[index] = layout;
+                            onPhraseLayout={(index, layout) => {
+                              captionPhraseLayoutsRef.current[index] = layout;
                               if (captionPendingScrollRef.current?.index === index) retryPendingCaptionScroll();
                             }}
-                            onSentencePress={handleJumpToSentence}
+                            onInteractivePressIn={() => { captionChildTouchRef.current = true; }}
+                            onSentenceCandidate={selectCaptionCandidate}
+                            onConfirmSentence={handleJumpToSentence}
                           />
                           {captionSentenceCount > 0 && (
                             <Text style={styles.captionCountText}>
@@ -3263,6 +3389,14 @@ const styles = StyleSheet.create({
   captionParagraphText: {
     fontSize: 17, lineHeight: 32.3, textAlign: 'left', color: EMBER.paper,
     fontFamily: FONTS.serifRegular,
+  },
+  captionJumpButtonSlot: {
+    width: 29, height: 32, alignItems: 'center', justifyContent: 'center',
+  },
+  captionJumpButton: {
+    width: 24, height: 24, borderRadius: 12, alignItems: 'center', justifyContent: 'center',
+    backgroundColor: EMBER.ember, borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(239,237,232,0.34)',
   },
   captionReadingRail: { position: 'absolute', left: -19, top: '17%', bottom: '17%', width: 10, alignItems: 'center' },
   captionReadingLine: { position: 'absolute', top: 0, bottom: 0, width: 0.5, backgroundColor: 'rgba(239,237,232,0.1)' },
