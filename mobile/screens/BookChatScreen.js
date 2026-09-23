@@ -16,6 +16,7 @@ import {
 } from '../lib/api';
 import { useTheme } from '../theme';
 import { FONTS } from '../fonts';
+const { truncateAtParagraphBoundary } = require('../lib/readingContext');
 
 // 按中文/英文句末标点切句——流式回答边生成边攒 buffer，攒够一整句就送去TTS，
 // 不用等全部回答生成完才开口。
@@ -64,7 +65,8 @@ function TypingBubble({ theme }) {
 }
 
 export default function BookChatScreen({
-  bookId, bookTitle, author, chapterTitle, selection = '', cfiRange = '', onClose,
+  bookId, bookTitle, author, chapterTitle, selection = '', cfiRange = '',
+  pageText = '', positionId = '', onClose,
 }) {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
@@ -401,7 +403,9 @@ export default function BookChatScreen({
       {
         context: {
           bookTitle, author, chapterTitle,
-          selection, pageText: '',
+          selection,
+          pageText: truncateAtParagraphBoundary(pageText),
+          positionId,
           userHighlights, popularHighlights: [],
         },
         question: q,

@@ -680,7 +680,7 @@ export function streamAsk({ context, question, style = 'simple', history = [] },
         continue;
       }
       if (payload.delta) onDelta(payload.delta);
-      else if (payload.done) onDone(payload.answer);
+      else if (payload.done) onDone(payload.answer, payload.evidenceType);
       else if (payload.error) onError(new Error(payload.error));
     }
   };

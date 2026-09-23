@@ -553,6 +553,7 @@ app.add_middleware(
 
 _env_ds_key = os.environ.get("DEEPSEEK_API_KEY", "")
 _env_sf_key = os.environ.get("SILICONFLOW_API_KEY", "")
+DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-flash").strip() or "deepseek-flash"
 client    = _make_ds(_env_ds_key) if _env_ds_key else None
 sf_client = _make_sf(_env_sf_key) if _env_sf_key else None
 
@@ -567,6 +568,7 @@ class BookContext(BaseModel):
     chapterTitle: str = ""
     pageText: str = ""
     selection: str = ""
+    positionId: str = ""
     userHighlights: list[str] = []
     popularHighlights: list[str] = []
 
@@ -578,6 +580,7 @@ class AskRequest(BaseModel):
 
 class AskResponse(BaseModel):
     answer: str
+    evidenceType: str
 
 class ClassifyIntentRequest(BaseModel):
     text: str
@@ -706,6 +709,13 @@ SYSTEM_PROMPT = """你是"伴读讲讲"，一位亲切的读书陪伴助手。
 - 回答简洁，控制在 150 字以内（除非用户要求详细）
 - 不要复读用户的问题，直接给出解释
 - 语气自然，像说话一样，不要教科书式的表达
+
+证据边界（必须遵守）：
+- 不得伪造书中原句、章节位置、作者观点、数据或外部来源；没有看到的内容不能假装看过
+- 明确区分三类信息：书中上下文明确表达的内容、根据上下文作出的推断、你掌握的一般背景知识
+- 上下文不足以回答时，要自然地说明依据不足，并建议用户划选相关原文或切换到相关章节；需要最新外部事实时，说明当前未联网查证
+- 医疗、法律、政治、金融等高风险问题，没有可靠来源时不得作确定性事实判断，应提醒用户进一步查证
+- 正常的文学理解和开放讨论可以提出解释，但要表明那是解读或推断，不要堆砌机械免责声明
 
 格式要求（必须严格遵守）：
 - 禁止使用任何 Markdown 符号：不用星号、井号、反引号、横线列表
@@ -2520,7 +2530,72 @@ def _build_ask_messages(
         system_prompt = SYSTEM_PROMPT + STYLE_SUFFIX.get(style, "")
         messages = [{"role": "system", "content": system_prompt}] + _history_messages(history)
         messages.append({"role": "user", "content": user_message})
-        return messages, 512, 1.0
+        return messages, 512, 0.5
+
+def _bounded_context_text(text: str, limit: int = 1200) -> str:
+    """按自然段收敛上下文；超长单段尽量在句末截断，避免从词语中间硬切。"""
+    paragraphs = [
+        re.sub(r"[\t \u00a0]+", " ", part.replace("\n", " ")).strip()
+        for part in re.split(r"\n\s*\n+", str(text or "").replace("\r\n", "\n").replace("\r", "\n"))
+    ]
+    paragraphs = [part for part in paragraphs if part]
+    if not paragraphs:
+        return ""
+    joined = "\n\n".join(paragraphs)
+    if len(joined) <= limit:
+        return joined
+
+    selected: list[str] = []
+    used = 0
+    for paragraph in paragraphs:
+        addition = len(paragraph) + (2 if selected else 0)
+        if selected and used + addition > limit:
+            break
+        if not selected and len(paragraph) > limit:
+            floor = int(limit * 0.72)
+            end = max(
+                (idx + 1 for idx, char in enumerate(paragraph[:limit])
+                 if idx + 1 >= floor and char in "。！？；：.!?;:"),
+                default=limit,
+            )
+            selected.append(paragraph[:end].strip())
+            break
+        selected.append(paragraph)
+        used += addition
+    return "\n\n".join(selected)
+
+def _build_book_context(ctx: BookContext) -> tuple[str, str]:
+    """返回发给模型的上下文和稳定的机器可读依据类型。"""
+    parts: list[str] = []
+    if ctx.bookTitle:
+        author_part = f"（{ctx.author}）" if ctx.author else ""
+        parts.append(f"【书名】{ctx.bookTitle}{author_part}")
+    if ctx.chapterTitle:
+        parts.append(f"【章节】{ctx.chapterTitle}")
+    if ctx.positionId:
+        parts.append(f"【稳定位置】{ctx.positionId}")
+
+    selection = _bounded_context_text(ctx.selection, 800)
+    page_text = _bounded_context_text(ctx.pageText, 1200)
+    if selection:
+        parts.append(f"【用户明确划选（主要依据）】{selection}")
+    if page_text:
+        label = "当前页面附近正文（补充依据）" if selection else "当前页面附近正文（主要依据）"
+        parts.append(f"【{label}】{page_text}")
+    if ctx.userHighlights:
+        parts.append(f"【用户在本书的历史划线】{'；'.join(ctx.userHighlights[:5])}")
+    if ctx.popularHighlights:
+        parts.append(f"【本书热门划线】{'；'.join(ctx.popularHighlights[:3])}")
+
+    if selection:
+        evidence_type = "user_selection"
+    elif page_text:
+        evidence_type = "current_context"
+    elif ctx.bookTitle or ctx.chapterTitle or ctx.positionId:
+        evidence_type = "insufficient_context"
+    else:
+        evidence_type = "general_knowledge"
+    return ("\n".join(parts) + "\n" if parts else ""), evidence_type
 
 async def _prepare_ask(req: AskRequest, request: Request, user_id: int | None = None):
     """/ask 和 /ask/stream 共用的准备逻辑：鉴权+限额检查、拼上下文、按苏格拉底/
@@ -2553,20 +2628,7 @@ async def _prepare_ask(req: AskRequest, request: Request, user_id: int | None = 
     sf  = _make_sf(_sf_key(request))
     ctx = req.context
 
-    context_block = ""
-    if ctx.bookTitle:
-        author_part = f"（{ctx.author}）" if ctx.author else ""
-        context_block += f"【书名】{ctx.bookTitle}{author_part}\n"
-    if ctx.chapterTitle:
-        context_block += f"【章节】{ctx.chapterTitle}\n"
-    if ctx.selection:
-        context_block += f"【划选段落】{ctx.selection}\n"
-    elif ctx.pageText:
-        context_block += f"【当前页面节选】{ctx.pageText[:800]}\n"
-    if ctx.userHighlights:
-        context_block += f"【用户在本书的历史划线】{'；'.join(ctx.userHighlights[:5])}\n"
-    if ctx.popularHighlights:
-        context_block += f"【本书热门划线】{'；'.join(ctx.popularHighlights[:3])}\n"
+    context_block, evidence_type = _build_book_context(ctx)
 
     memory = await _get_memory_context(req.question, user_id=user_id, sf=sf)
     if memory:
@@ -2579,7 +2641,7 @@ async def _prepare_ask(req: AskRequest, request: Request, user_id: int | None = 
     messages, max_tokens, temperature = _build_ask_messages(
         req.style, round_num, req.history, req.question, user_message, ctx.selection
     )
-    return ds, messages, max_tokens, temperature, round_num
+    return ds, messages, max_tokens, temperature, round_num, evidence_type
 
 def _finalize_socratic_text(raw: str, style: str, round_num: int) -> str:
     """苏格拉底模式的截断规则：round_num < SOCR_MAX_ROUNDS 且不是"你已经推导出来了"/
@@ -2600,11 +2662,11 @@ def _finalize_socratic_text(raw: str, style: str, round_num: int) -> str:
 
 @app.post("/ask", response_model=AskResponse)
 async def ask(req: AskRequest, request: Request, _=ExtAuth, user_id: int | None = OptionalUser):
-    ds, messages, max_tokens, temperature, round_num = await _prepare_ask(req, request, user_id)
+    ds, messages, max_tokens, temperature, round_num, evidence_type = await _prepare_ask(req, request, user_id)
     try:
         resp = await asyncio.to_thread(
             lambda: ds.chat.completions.create(
-                model="deepseek-v4-flash",
+                model=DEEPSEEK_MODEL,
                 max_tokens=max_tokens,
                 temperature=temperature,
                 messages=messages,
@@ -2613,7 +2675,10 @@ async def ask(req: AskRequest, request: Request, _=ExtAuth, user_id: int | None 
         )
         raw = resp.choices[0].message.content
         print(f"[Ask] round={round_num} style={req.style} raw={repr(raw[:80])}")
-        return AskResponse(answer=_finalize_socratic_text(raw, req.style, round_num))
+        return AskResponse(
+            answer=_finalize_socratic_text(raw, req.style, round_num),
+            evidenceType=evidence_type,
+        )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"DeepSeek API 错误: {e}")
 
@@ -2639,9 +2704,10 @@ async def ask_stream(req: AskRequest, request: Request, _=ExtAuth, user_id: int 
     直接提前终止生成（不用等 max_tokens 耗尽），比非流式版本还省 token。
 
     SSE 事件格式：`data: {"delta": "..."}` 增量文本；结束时
-    `data: {"done": true, "answer": "最终完整文本"}`；出错 `data: {"error": "..."}`。
+    `data: {"done": true, "answer": "最终完整文本", "evidenceType": "current_context"}`；
+    出错 `data: {"error": "..."}`。新增字段不改变现有 delta/answer 的消费方式。
     """
-    ds, messages, max_tokens, temperature, round_num = await _prepare_ask(req, request, user_id)
+    ds, messages, max_tokens, temperature, round_num, evidence_type = await _prepare_ask(req, request, user_id)
     is_socr_truncatable = req.style == "socratic" and round_num < SOCR_MAX_ROUNDS
 
     async def event_gen():
@@ -2653,7 +2719,7 @@ async def ask_stream(req: AskRequest, request: Request, _=ExtAuth, user_id: int 
             accumulated = ""
             try:
                 stream = ds.chat.completions.create(
-                    model="deepseek-v4-flash",
+                    model=DEEPSEEK_MODEL,
                     max_tokens=max_tokens,
                     temperature=temperature,
                     messages=messages,
@@ -2696,7 +2762,7 @@ async def ask_stream(req: AskRequest, request: Request, _=ExtAuth, user_id: int 
             elif kind == "raw_done":
                 final_text = _finalize_socratic_text(payload, req.style, round_num)
                 print(f"[AskStream] round={round_num} style={req.style} final={repr(final_text[:80])}")
-                yield f"data: {json.dumps({'done': True, 'answer': final_text}, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps({'done': True, 'answer': final_text, 'evidenceType': evidence_type}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(
         event_gen(),
@@ -2752,7 +2818,7 @@ async def classify_intent(req: ClassifyIntentRequest, request: Request, _=ExtAut
     try:
         resp = await asyncio.to_thread(
             lambda: ds.chat.completions.create(
-                model="deepseek-v4-flash",
+                model=DEEPSEEK_MODEL,
                 max_tokens=5,
                 temperature=0,
                 messages=[{"role": "user", "content": prompt}],
@@ -4529,7 +4595,7 @@ async def _extract_concepts(text: str, ds: OpenAI) -> list[dict]:
 \"\"\""""
     resp = await asyncio.to_thread(
         lambda: ds.chat.completions.create(
-            model="deepseek-v4-flash",
+            model=DEEPSEEK_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3,
             extra_body={"thinking": {"type": "disabled"}},
@@ -4551,7 +4617,7 @@ async def _explain_concept_relation(label_a: str, label_b: str, ds: OpenAI) -> d
 {{"common_point": "共同点一句话总结", "explanation_a": "概念A如何呼应共同点", "explanation_b": "概念B如何呼应共同点"}}"""
     resp = await asyncio.to_thread(
         lambda: ds.chat.completions.create(
-            model="deepseek-v4-flash",
+            model=DEEPSEEK_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3,
             extra_body={"thinking": {"type": "disabled"}},

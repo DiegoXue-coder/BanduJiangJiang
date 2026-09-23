@@ -29,6 +29,7 @@ const {
   normalizeReaderText,
   parseReaderLocation,
 } = require('../lib/readerLocation');
+const { standardBlocksToContext, truncateAtParagraphBoundary } = require('../lib/readingContext');
 
 // 阶段十一：epub正文（书本原文内容）换成思源宋体——这部分渲染在
 // react-native-webview内部，不是普通RN Text，普通expo-font的useFonts()
@@ -1111,8 +1112,17 @@ function ReaderInner({
   const [epubReadyGateOpen, setEpubReadyGateOpen] = useState(false);
   // 阶段十：问AI从"跳转到独立页面"改成"底部弹出面板"，原文全程可见（半遮挡）。
   // chatParams 存这次要问的划线原文+cfi，present() 弹出面板时用。
-  const [chatParams, setChatParams] = useState({ selection: '', cfiRange: '' });
+  const [chatParams, setChatParams] = useState({
+    selection: '', cfiRange: '', pageText: '', positionId: '',
+  });
   const chatSheetRef = useRef(null);
+  const epubContextRequestRef = useRef(null);
+  const epubContextSequenceRef = useRef(0);
+  useEffect(() => () => {
+    if (epubContextRequestRef.current?.timer) {
+      clearTimeout(epubContextRequestRef.current.timer);
+    }
+  }, []);
   // 诊断确认过：默认65%装不下完整内容，85%可以——回到验收标准要求的
   // 65%~78%区间，默认打开用较高的78%那档（78%比诊断用的85%略矮，但比
   // 原来不够用的65%高很多），两档保留，用户仍然可以手动拖拽到较矮的65%。
@@ -1644,8 +1654,74 @@ function ReaderInner({
       setEpubReadyGateOpen(true);
       return;
     }
+    if (message?.type === 'chatbookVisibleContext') {
+      const pending = epubContextRequestRef.current;
+      if (!pending || message.payload?.requestId !== pending.requestId) return;
+      clearTimeout(pending.timer);
+      epubContextRequestRef.current = null;
+      setChatParams({
+        selection: pending.selection,
+        cfiRange: pending.cfiRange,
+        pageText: truncateAtParagraphBoundary(message.payload?.text),
+        positionId: message.payload?.positionId || pending.positionId,
+      });
+      chatSheetRef.current?.present();
+      return;
+    }
     if (message?.type !== 'chatbookFontDiagnostics') return;
     Alert.alert('字体诊断', formatFontDiagnostics(message.payload, fontAssetReport));
+  }
+
+  function requestEpubVisibleContext(requestId, positionId) {
+    injectJavascript(`
+      (function() {
+        var requestId = ${jsStringLiteral(requestId)};
+        var positionId = ${jsStringLiteral(positionId)};
+        function post(payload) {
+          var message = JSON.stringify({ type: 'chatbookVisibleContext', payload: payload });
+          if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
+            window.ReactNativeWebView.postMessage(message);
+          } else if (typeof reactNativeWebview !== 'undefined' && reactNativeWebview.postMessage) {
+            reactNativeWebview.postMessage(message);
+          }
+        }
+        function visibleText(doc) {
+          if (!doc || !doc.body || !doc.createTreeWalker || !doc.createRange) return '';
+          var view = doc.defaultView || window;
+          var width = view.innerWidth || doc.documentElement.clientWidth || 0;
+          var height = view.innerHeight || doc.documentElement.clientHeight || 0;
+          var paragraphs = [];
+          var nodeFilter = view.NodeFilter || { SHOW_TEXT: 4 };
+          var walker = doc.createTreeWalker(doc.body, nodeFilter.SHOW_TEXT);
+          var node;
+          while ((node = walker.nextNode()) && paragraphs.length < 240) {
+            var parentTag = String(node.parentElement && node.parentElement.tagName || '').toLowerCase();
+            if (parentTag === 'script' || parentTag === 'style' || parentTag === 'noscript') continue;
+            var text = String(node.nodeValue || '').replace(/\\s+/g, ' ').trim();
+            if (!text) continue;
+            var range = doc.createRange();
+            range.selectNodeContents(node);
+            var rects = Array.prototype.slice.call(range.getClientRects());
+            var visible = rects.some(function(rect) {
+              return rect.bottom >= 0 && rect.top <= height && rect.right >= 0 && rect.left <= width;
+            });
+            if (visible && paragraphs.indexOf(text) < 0) paragraphs.push(text);
+          }
+          return paragraphs.join('\\n\\n');
+        }
+        try {
+          var readerRendition = typeof rendition !== 'undefined' ? rendition : window.rendition;
+          var contents = readerRendition && readerRendition.getContents ? readerRendition.getContents() : [];
+          var text = contents.map(function(content) {
+            return visibleText(content && content.document);
+          }).filter(Boolean).join('\\n\\n');
+          post({ requestId: requestId, positionId: positionId, text: text });
+        } catch (error) {
+          post({ requestId: requestId, positionId: positionId, text: '', error: error.message || String(error) });
+        }
+      })();
+      true;
+    `);
   }
 
   useEffect(() => {
@@ -2093,8 +2169,33 @@ function ReaderInner({
     // 续二十三访客模式："问AI"是三个约定的注册引导触发点之一——访客点
     // 这个按钮不弹聊天面板，先弹注册引导。
     if (!requireAuth('ai')) return;
-    setChatParams({ selection: selectionText, cfiRange });
-    chatSheetRef.current?.present();
+    if (readerMode === 'standard') {
+      setChatParams({
+        selection: selectionText,
+        cfiRange,
+        pageText: standardBlocksToContext(curPageBlocks),
+        positionId: `standard:${standardChapterId}:page:${safePageIndex}`,
+      });
+      chatSheetRef.current?.present();
+      return;
+    }
+
+    if (epubContextRequestRef.current?.timer) {
+      clearTimeout(epubContextRequestRef.current.timer);
+    }
+    const requestId = `chat-context-${Date.now()}-${epubContextSequenceRef.current += 1}`;
+    const positionId = cfiRange || currentLocation?.start?.cfi || '';
+    const pending = {
+      requestId, positionId, selection: selectionText, cfiRange, timer: null,
+    };
+    pending.timer = setTimeout(() => {
+      if (epubContextRequestRef.current?.requestId !== requestId) return;
+      epubContextRequestRef.current = null;
+      setChatParams({ selection: selectionText, cfiRange, pageText: '', positionId });
+      chatSheetRef.current?.present();
+    }, 1200);
+    epubContextRequestRef.current = pending;
+    requestEpubVisibleContext(requestId, positionId);
   }
 
   // 续二十七：正文背景色(THEMES，EPUB WebView内部)和全局chrome主题
@@ -3189,9 +3290,11 @@ function ReaderInner({
           bookId={bookId}
           bookTitle={bookTitle}
           author={author}
-          chapterTitle={currentSectionTitle}
+          chapterTitle={visibleChapterTitle}
           selection={chatParams.selection}
           cfiRange={chatParams.cfiRange}
+          pageText={chatParams.pageText}
+          positionId={chatParams.positionId}
           onClose={() => chatSheetRef.current?.dismiss()}
         />
       </BottomSheetModal>
