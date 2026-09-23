@@ -8,6 +8,7 @@ from api.main import (
     _bounded_context_text,
     _build_ask_messages,
     _build_book_context,
+    _finalize_socratic_text,
     _stream_done_payload,
 )
 
@@ -84,6 +85,31 @@ class AiEvidenceTests(unittest.TestCase):
         self.assertEqual(available_type, "insufficient_context")
         self.assertIn("当前依据不足", messages[0]["content"])
         self.assertNotIn("当前页面附近正文", messages[-1]["content"])
+
+    def test_socratic_high_risk_rule_requires_boundary_before_question(self):
+        messages, _, temperature = _build_ask_messages(
+            "socratic", 1, [], "我可以自行停药吗？", "用户问题：我可以自行停药吗？", ""
+        )
+        system = messages[0]["content"]
+        self.assertEqual(temperature, 0.3)
+        self.assertIn("优先级高于苏格拉底追问", system)
+        self.assertIn("不得让用户依据书中案例自行停药、改剂量", system)
+        self.assertIn("咨询合格医生", system)
+        self.assertIn("不得只用反问", system)
+
+    def test_socratic_high_risk_rule_exempts_open_discussion(self):
+        messages, _, _ = _build_ask_messages(
+            "socratic", 1, [], "鲲鹏意象可以怎样理解？",
+            "用户问题：鲲鹏意象可以怎样理解？", ""
+        )
+        self.assertIn("普通文学解读", messages[0]["content"])
+        self.assertIn("不要附加机械免责声明", messages[0]["content"])
+        self.assertEqual(messages[-1]["content"], "鲲鹏意象可以怎样理解？")
+
+    def test_socratic_without_question_mark_is_not_cut_mid_sentence(self):
+        raw = "现有内容只提到作者从小喜欢沿河散步，没有提供出生地或成长城市的信息，无法回答作者出生在哪座城市。"
+        self.assertGreater(len(raw), 40)
+        self.assertEqual(_finalize_socratic_text(raw, "socratic", 1), raw)
 
     def test_current_page_context_has_machine_readable_basis(self):
         block, available_evidence_type = _build_book_context(BookContext(

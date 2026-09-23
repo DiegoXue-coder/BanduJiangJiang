@@ -2469,6 +2469,16 @@ _SOCRATIC_EVIDENCE_RULE = (
     '当前依据不足，不能假装看到了原文，也不得编造作者原话、章节内容或出处。'
 )
 
+_SOCRATIC_HIGH_RISK_RULE = (
+    '现实行动安全底线（优先级高于苏格拉底追问）：当用户的问题可能直接影响医疗用药、'
+    '法律/税务处理、金融投资或其他高风险现实行动时，必须先直接给出必要的安全边界，'
+    '再决定是否继续引导。医疗问题不得让用户依据书中案例自行停药、改剂量或替代治疗，'
+    '应明确建议咨询合格医生；法律、税务、金融和投资问题不得把书中个案包装成保证，'
+    '应提示结合用户所在地与具体情况咨询相应合格专业人士。不得只用反问把行动决定推回'
+    '用户。该规则只适用于可能导致现实行动风险的问题；普通文学解读、商业概念讨论和'
+    '一般阅读交流不要附加机械免责声明。'
+)
+
 def _socratic_system_prompt(round_num: int) -> tuple[str, int]:
     """按 round_num 挑苏格拉底模式的 system_prompt + max_tokens。"""
     if round_num >= SOCR_MAX_ROUNDS:
@@ -2529,7 +2539,9 @@ def _build_ask_messages(
     漂移的问题。"""
     if style == "socratic":
         system_prompt, max_tokens = _socratic_system_prompt(round_num)
-        system_prompt = f"{system_prompt}\n\n{_SOCRATIC_EVIDENCE_RULE}"
+        system_prompt = (
+            f"{system_prompt}\n\n{_SOCRATIC_EVIDENCE_RULE}\n\n{_SOCRATIC_HIGH_RISK_RULE}"
+        )
         # 首轮把正文与问题放在同一条用户消息里，划选/页面上下文都只出现一次。
         # 后续轮次把阅读上下文作为独立的引用消息放在历史之前，既不把不可信原文
         # 提升成 system 指令，又能保持历史顺序和最新用户原话不变；否则会干扰
@@ -2692,7 +2704,10 @@ def _finalize_socratic_text(raw: str, style: str, round_num: int) -> str:
         idx = raw.find(qmark)
         if idx >= 0:
             return raw[:idx + 1].strip()
-    return raw[:40]
+    # 旧逻辑在模型没有输出问号时直接 raw[:40]，真实冒烟把“无法回答作者出生地”
+    # 切成了“无法回答作者”。无问号意味着没有可安全识别的语义边界，应保留模型
+    # 的完整短回答（生成长度已经受 max_tokens 限制），不能在字符中间硬截断。
+    return raw.strip()
 
 @app.post("/ask", response_model=AskResponse)
 async def ask(req: AskRequest, request: Request, _=ExtAuth, user_id: int | None = OptionalUser):
