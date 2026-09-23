@@ -37,6 +37,13 @@ const {
   resolveListenChapter,
   resolveListenParagraph,
 } = require('../lib/listenContinuity');
+const {
+  captionOpacityForIndex,
+  centeredScrollOffset,
+  playbackRecoveryAction,
+  preparedSoundMatches,
+  resolveNarrationStep,
+} = require('../lib/listenPlayback');
 
 // 听书页使用最终原型 listen-final-prototype 的中性炭黑暗色，不再沿用旧版
 // 暖棕背景。棕色只作为细节强调色，避免整屏偏棕。
@@ -239,6 +246,7 @@ const CAPTION_IDLE_SNAPBACK_MS = 4000;
 const CAPTION_MOMENTUM_WAIT_MS = 80;
 const LISTEN_PROGRESS_SAVE_INTERVAL_MS = 3000;
 const LISTEN_HISTORY_TURNS = 4;
+const NARRATION_STATUS_INTERVAL_MS = 100;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -387,16 +395,21 @@ function NarrationParagraph({ text, activeIndex, onContainerLayout, onSentenceLa
   if (animationRef.current.key !== text) {
     animationRef.current = {
       key: text,
-      opacity: sentences.map((_, index) => new Animated.Value(index === activeIndex ? 1 : index < activeIndex ? 0.36 : 0.62)),
+      opacity: sentences.map((_, index) => new Animated.Value(captionOpacityForIndex(index, activeIndex))),
     };
   }
 
   useEffect(() => {
-    const animations = sentences.map((_, index) => Animated.timing(animationRef.current.opacity[index], {
-      toValue: index === activeIndex ? 1 : index < activeIndex ? 0.36 : 0.62,
-      duration: 480,
-      useNativeDriver: false,
-    }));
+    // 当前句必须在React提交这一帧就直接亮起，不能从上一档灰色慢慢过渡。
+    // 只有已经念过/尚未念到的句子继续淡变，保留原有的柔和层次。
+    animationRef.current.opacity[activeIndex]?.setValue(1);
+    const animations = sentences
+      .map((_, index) => (index === activeIndex ? null : Animated.timing(animationRef.current.opacity[index], {
+        toValue: captionOpacityForIndex(index, activeIndex),
+        duration: 320,
+        useNativeDriver: false,
+      })))
+      .filter(Boolean);
     const parallel = Animated.parallel(animations);
     parallel.start();
     return () => parallel.stop();
@@ -412,7 +425,7 @@ function NarrationParagraph({ text, activeIndex, onContainerLayout, onSentenceLa
             styles.captionParagraphText,
             {
               color: index === activeIndex ? EMBER.paper : index < activeIndex ? EMBER.paperDim : EMBER.inkSoft,
-              opacity: animationRef.current.opacity[index],
+              opacity: index === activeIndex ? 1 : animationRef.current.opacity[index],
             },
           ]}
         >
@@ -499,6 +512,7 @@ export default function ListenScreen({ route, navigation }) {
   const [conversationExpanded, setConversationExpanded] = useState(false);
   const [conversationDrawerMounted, setConversationDrawerMounted] = useState(false);
   const [mainStageHeight, setMainStageHeight] = useState(0);
+  const [captionViewportHeight, setCaptionViewportHeight] = useState(0);
   const conversationDrawerProgress = useRef(new Animated.Value(0)).current;
   const micVisualProgress = useRef(new Animated.Value(0)).current;
   const micLevelProgress = useRef(new Animated.Value(0)).current;
@@ -519,6 +533,7 @@ export default function ListenScreen({ route, navigation }) {
   const captionContainerYRef = useRef(0);
   const captionViewportHeightRef = useRef(0);
   const captionContentHeightRef = useRef(0);
+  const captionPendingScrollRef = useRef(null);
   // true=用户手指正在拖/惯性滚动尚未停，此时不能被代码的自动滚动打断。
   const captionUserScrollingRef = useRef(false);
   const captionIdleTimerRef = useRef(null);
@@ -532,15 +547,32 @@ export default function ListenScreen({ route, navigation }) {
   const scrollCaptionToSentence = useCallback((index, animated) => {
     const layout = captionSentenceLayoutsRef.current[index];
     const scrollNode = captionScrollRef.current;
-    if (!layout || !scrollNode) return;
+    if (!layout || !scrollNode) {
+      captionPendingScrollRef.current = { index, animated };
+      return false;
+    }
     const viewportH = captionViewportHeightRef.current;
     const contentH = captionContentHeightRef.current;
-    if (!viewportH) return;
-    const targetCenter = captionContainerYRef.current + layout.y + layout.height / 2;
-    const maxY = Math.max(0, contentH - viewportH);
-    const targetY = Math.max(0, Math.min(maxY, targetCenter - viewportH / 2));
+    const targetY = centeredScrollOffset({
+      layout,
+      containerY: captionContainerYRef.current,
+      viewportHeight: viewportH,
+      contentHeight: contentH,
+    });
+    if (targetY == null) {
+      captionPendingScrollRef.current = { index, animated };
+      return false;
+    }
+    captionPendingScrollRef.current = null;
     scrollNode.scrollTo({ y: targetY, animated });
+    return true;
   }, []);
+
+  const retryPendingCaptionScroll = useCallback(() => {
+    const pending = captionPendingScrollRef.current;
+    if (!pending || captionUserScrollingRef.current) return;
+    requestAnimationFrame(() => scrollCaptionToSentence(pending.index, pending.animated));
+  }, [scrollCaptionToSentence]);
 
   const clearCaptionIdleTimer = useCallback(() => {
     if (captionIdleTimerRef.current) {
@@ -599,15 +631,17 @@ export default function ListenScreen({ route, navigation }) {
   useEffect(() => {
     captionSentenceLayoutsRef.current = {};
     captionContainerYRef.current = 0;
+    captionPendingScrollRef.current = { index: captionSentenceIndexRef.current, animated: false };
   }, [currentCaption]);
   // 朗读位置推进时，只要不是用户正在手动看别处，就跟着自动居中滚动；
-  // 新章节/新句子首次渲染那一刻句子布局可能还没测出来，稍等一帧再滚，
-  // 测不到就放弃这一次（不影响下一句触发时重试）。
+  // 新章节/新句子首次渲染时如果布局还没测出来，先记成待滚动目标；对应
+  // onLayout/onContentSizeChange一到就重试，不再只等固定60ms后永久放弃。
   useEffect(() => {
     if (captionUserScrollingRef.current) return undefined;
-    const t = setTimeout(() => scrollCaptionToSentence(captionSentenceIndex, true), 60);
+    captionPendingScrollRef.current = { index: captionSentenceIndex, animated: true };
+    const t = setTimeout(retryPendingCaptionScroll, 0);
     return () => clearTimeout(t);
-  }, [captionSentenceIndex, currentCaption, scrollCaptionToSentence]);
+  }, [captionSentenceIndex, currentCaption, retryPendingCaptionScroll]);
 
   // playOneParagraph在playFrom的异步循环里调用，如果直接读voice/rate这两个
   // state会有闭包过期的问题（循环开始时闭包捕获的是当时的值，用户中途在
@@ -646,6 +680,13 @@ export default function ListenScreen({ route, navigation }) {
   const paragraphCacheRef = useRef({}); // chapterId -> string[]
   const epochRef = useRef(0); // 每次打断/停止自增，让还没awaitresolve的加载能认出自己过期
   const soundRef = useRef(null);
+  const lastNarrationFinishedAtRef = useRef(0);
+  const playbackRecoveryBusyRef = useRef(false);
+  const appStateRef = useRef(AppState.currentState);
+  const phaseRef = useRef(phase);
+  const manuallyPausedRef = useRef(isManuallyPaused);
+  useEffect(() => { phaseRef.current = phase; }, [phase]);
+  useEffect(() => { manuallyPausedRef.current = isManuallyPaused; }, [isManuallyPaused]);
   // 真机反馈"段跟段之间停顿太长"——加预取：当前段刚开始出声，就在后台
   // 把下一段的TTS请求发出去，让加载时间跟当前段的播放时间重叠。跟
   // BookChatScreen"预取下一句"是同一个思路，但这边是ListenScreen自己的
@@ -894,6 +935,9 @@ export default function ListenScreen({ route, navigation }) {
   async function releaseNarrationSound(sound) {
     if (!sound) return;
     const localUri = sound.__banduTimedTtsFileUri;
+    // 每个Sound都有自己配套的WordBoundary。切段前先解除旧回调，避免旧音频
+    // 最后一帧状态在新Sound已经开始后污染新段的字位/高亮基准。
+    try { sound.setOnPlaybackStatusUpdate(null); } catch (_) {}
     await sound.unloadAsync().catch(() => {});
     if (localUri) {
       await FileSystem.deleteAsync(localUri, { idempotent: true }).catch(() => {});
@@ -910,7 +954,10 @@ export default function ListenScreen({ route, navigation }) {
       await FileSystem.writeAsStringAsync(fileUri, response.audioBase64, {
         encoding: FileSystem.EncodingType.Base64,
       });
-      const { sound } = await Audio.Sound.createAsync({ uri: fileUri }, { shouldPlay: false });
+      const { sound } = await Audio.Sound.createAsync(
+        { uri: fileUri },
+        { shouldPlay: false, progressUpdateIntervalMillis: NARRATION_STATUS_INTERVAL_MS },
+      );
       // Sound实例只在本页进程内存活；把配对时间线挂在同一个实例上，避免
       // 预取队列把A段音频和B段时间轴拆开。文件URI用于unload后立即清缓存。
       sound.__banduTimedTtsFileUri = fileUri;
@@ -932,10 +979,37 @@ export default function ListenScreen({ route, navigation }) {
       console.log(`[听书时间轴] 新接口失败，降级旧/tts/play：${e.message || e}`);
       const { sound } = await Audio.Sound.createAsync(
         { uri: getTtsPlayUrl(text, voiceName, playbackRate) },
-        { shouldPlay: false },
+        { shouldPlay: false, progressUpdateIntervalMillis: NARRATION_STATUS_INTERVAL_MS },
       );
       return sound;
     }
+  }
+
+  function prepareNarrationSound(chapterIdx, paragraphIdx, text) {
+    const voiceName = voiceRef.current;
+    const playbackRate = rateRef.current;
+    const existing = preparedRef.current;
+    if (preparedSoundMatches(existing, {
+      chapterIdx, paragraphIdx, voice: voiceName, rate: playbackRate,
+    })) return existing.promise;
+    if (existing) existing.promise.then((sound) => releaseNarrationSound(sound)).catch(() => {});
+    const startedAt = Date.now();
+    console.log(`[听书诊断] 预取开始 第${paragraphIdx + 1}段 字数=${text.length}`);
+    const promise = createNarrationSound(text, voiceName, playbackRate)
+      .then((sound) => {
+        console.log(`[听书诊断] 预取完成 第${paragraphIdx + 1}段 耗时${Date.now() - startedAt}ms`);
+        return sound;
+      })
+      .catch((error) => {
+        console.log(`[听书诊断] 预取失败 第${paragraphIdx + 1}段 耗时${Date.now() - startedAt}ms：${error.message || error}`);
+        // 预取是后台优化，不能制造未处理Promise rejection；返回null让真正
+        // 轮到该段时自然走现场加载兜底。
+        return null;
+      });
+    preparedRef.current = {
+      ci: chapterIdx, pi: paragraphIdx, voice: voiceName, rate: playbackRate, promise,
+    };
+    return promise;
   }
 
   async function stopSound() {
@@ -976,7 +1050,7 @@ export default function ListenScreen({ route, navigation }) {
         ? await createNarrationSound(text, voiceRef.current, rateRef.current)
         : (await Audio.Sound.createAsync(
           { uri: getTtsPlayUrl(text, voiceRef.current, rateRef.current) },
-          { shouldPlay: false },
+          { shouldPlay: false, progressUpdateIntervalMillis: NARRATION_STATUS_INTERVAL_MS },
         )).sound;
       console.log(`[听书诊断] 播放段落(现场加载，耗时${Date.now() - t1}ms) voice=${voiceRef.current} rate=${rateRef.current} 字数=${text.length}`);
     }
@@ -986,21 +1060,39 @@ export default function ListenScreen({ route, navigation }) {
     }
     soundRef.current = sound;
     let audioStarted = false;
+    let audioStartedAt = 0;
+    let firstHighlightAt = 0;
+    let lastProgressAt = Date.now();
+    let lastPositionMillis = -1;
     const notifyAudioStart = () => {
       if (audioStarted || epoch !== epochRef.current || soundRef.current !== sound) return;
       audioStarted = true;
+      audioStartedAt = Date.now();
+      if (lastNarrationFinishedAtRef.current > 0) {
+        console.log(`[听书诊断] 段间实际静默=${Date.now() - lastNarrationFinishedAtRef.current}ms`);
+        lastNarrationFinishedAtRef.current = 0;
+      }
       onAudioStart?.();
+      console.log(`[听书时间轴] 音频开始 位置=${progressMeta?.chapterIdx ?? '-'}/${progressMeta?.paragraphIdx ?? '-'} t=${audioStartedAt}`);
     };
-    await new Promise((resolve) => {
+    await new Promise((resolve, reject) => {
       let settled = false;
-      const finish = () => {
+      let watchdog = null;
+      const finish = (error = null) => {
         if (settled) return;
         settled = true;
-        resolve();
+        if (watchdog) clearInterval(watchdog);
+        if (error) reject(error);
+        else resolve();
       };
       sound.setOnPlaybackStatusUpdate((s) => {
+        if (s.isLoaded && s.isPlaying) notifyAudioStart();
         if (epoch === epochRef.current && soundRef.current === sound
             && s.isLoaded && progressMeta && s.durationMillis > 0 && s.positionMillis >= 0) {
+          if (s.positionMillis !== lastPositionMillis) {
+            lastPositionMillis = s.positionMillis;
+            lastProgressAt = Date.now();
+          }
           const baseOffset = progressMeta.baseOffset || 0;
           const playTextLength = progressMeta.playTextLength || progressMeta.sourceLength || 0;
           const timedOffset = charOffsetAtPlaybackPosition(
@@ -1020,13 +1112,34 @@ export default function ListenScreen({ route, navigation }) {
           };
           scheduleListenProgressSave('播放中');
           progressMeta.onCharOffset?.(charOffset);
+          if (!firstHighlightAt && audioStartedAt) {
+            firstHighlightAt = Date.now();
+            console.log(`[听书时间轴] 首个高亮 位置=${progressMeta.chapterIdx}/${progressMeta.paragraphIdx} t=${firstHighlightAt} 与出声差=${firstHighlightAt - audioStartedAt}ms position=${s.positionMillis}ms`);
+          }
         }
-        if (s.isLoaded && s.isPlaying) notifyAudioStart();
-        if (!s.isLoaded || s.didJustFinish) finish();
+        if (!s.isLoaded) finish(new Error(s.error || '音频已失效'));
+        else if (s.didJustFinish) finish();
       });
+      watchdog = setInterval(async () => {
+        if (settled || epoch !== epochRef.current || soundRef.current !== sound || manuallyPausedRef.current) return;
+        if (Date.now() - lastProgressAt < 5000) return;
+        try {
+          const status = await sound.getStatusAsync();
+          if (!status?.isLoaded) {
+            finish(new Error('播放过程中Sound失效'));
+          } else if (!status.isPlaying && !status.isBuffering && !status.didJustFinish) {
+            finish(new Error(`播放状态停滞 position=${status.positionMillis || 0}`));
+          } else {
+            // 仍在播放或缓冲时只刷新观察窗口，不把短暂网络/系统调度误判为失败。
+            lastProgressAt = Date.now();
+          }
+        } catch (error) {
+          finish(error);
+        }
+      }, 2500);
       sound.playAsync()
         .then(() => notifyAudioStart())
-        .catch(() => finish()); // 播放本身失败也别卡住整个循环，跳过这段
+        .catch((error) => finish(error));
     });
   }
 
@@ -1069,6 +1182,7 @@ export default function ListenScreen({ route, navigation }) {
         if (epoch !== epochRef.current) return;
         paragraphCacheRef.current[chapter.id] = paragraphs;
       }
+      let paragraphRetryCount = 0;
       while (pi < paragraphs.length) {
         if (epoch !== epochRef.current) {
           console.log(`[听书诊断] epoch过期(${epoch}→${epochRef.current})，播放循环退出，位置=${ci}/${pi}`);
@@ -1076,6 +1190,7 @@ export default function ListenScreen({ route, navigation }) {
         }
         setChapterTitle(chapter.title);
         setProgressLabel(`第${pi + 1}/${paragraphs.length}段（加载中…）`);
+        manuallyPausedRef.current = false;
         setIsManuallyPaused(false);
         setPhase('playing');
 
@@ -1092,8 +1207,12 @@ export default function ListenScreen({ route, navigation }) {
         // 都整个丢弃，退化成现场加载，不会把过期音频当成当前这段播出来。
         let presetPromise = null;
         const prepared = preparedRef.current;
-        if (prepared && prepared.ci === ci && prepared.pi === pi
-            && prepared.voice === voiceRef.current && prepared.rate === rateRef.current) {
+        if (preparedSoundMatches(prepared, {
+          chapterIdx: ci,
+          paragraphIdx: pi,
+          voice: voiceRef.current,
+          rate: rateRef.current,
+        })) {
           presetPromise = prepared.promise;
           preparedRef.current = null;
         } else if (prepared) {
@@ -1123,6 +1242,14 @@ export default function ListenScreen({ route, navigation }) {
           presetPromise = null;
         }
 
+        // 当前段真正开始出声之前就启动下一段预取。旧实现等到onAudioStart才
+        // 发请求，短段落的播放时长经常盖不住TTS网络+落盘时间；提前到这里后，
+        // 当前段的加载时间和播放时间都能与下一段合成重叠。
+        const nextPi = pi + 1;
+        if (nextPi < paragraphs.length) {
+          prepareNarrationSound(ci, nextPi, paragraphs[nextPi]);
+        }
+
         console.log(`[听书诊断] 开始加载 章节="${chapter.title}" 第${pi + 1}/${paragraphs.length}段 段内恢复=${shouldResumeWithinParagraph} 预取命中=${!!presetPromise}`);
         try {
           await playOneParagraph(textToPlay, epoch, () => {
@@ -1146,20 +1273,6 @@ export default function ListenScreen({ route, navigation }) {
               markHfTiming('正文恢复开始播放', 'resume_audio_start');
               finishHfTiming();
             }
-            // 这段刚出声，立刻在后台把下一段的TTS请求发出去（不等待），
-            // 让加载时间跟当前段的播放时间重叠，减少段与段之间的停顿。
-            const nextPi = pi + 1;
-            if (nextPi < paragraphs.length) {
-              const v = voiceRef.current;
-              const r = rateRef.current;
-              const tPrefetchStart = Date.now();
-              console.log(`[听书诊断] 预取开始 第${nextPi + 1}段 字数=${paragraphs[nextPi].length}`);
-              const promise = createNarrationSound(paragraphs[nextPi], v, r).then((s) => {
-                console.log(`[听书诊断] 预取完成 第${nextPi + 1}段 耗时${Date.now() - tPrefetchStart}ms`);
-                return s;
-              });
-              preparedRef.current = { ci, pi: nextPi, voice: v, rate: r, promise };
-            }
           }, presetPromise, {
             chapterIdx: ci,
             paragraphIdx: pi,
@@ -1178,9 +1291,26 @@ export default function ListenScreen({ route, navigation }) {
             },
           });
           console.log(`[听书诊断] 播放完成 章节="${chapter.title}" 第${pi + 1}/${paragraphs.length}段`);
+          lastNarrationFinishedAtRef.current = Date.now();
         } catch (e) {
-          console.log(`[听书诊断] 播放出错，跳过这段：${e.message}`);
+          console.log(`[听书诊断] 播放出错 位置=${ci}/${pi} 重试=${paragraphRetryCount}：${e.message || e}`);
+          const failedSound = soundRef.current;
+          if (failedSound) {
+            soundRef.current = null;
+            await releaseNarrationSound(failedSound);
+          }
+          if (epoch !== epochRef.current) return;
+          if (paragraphRetryCount < 1) {
+            paragraphRetryCount += 1;
+            await restorePlaybackAudioMode().catch(() => {});
+            continue;
+          }
+          setErrorMsg('朗读暂时中断，请点播放键从当前位置继续');
+          manuallyPausedRef.current = true;
+          setIsManuallyPaused(true);
+          return;
         }
+        paragraphRetryCount = 0;
         if (epoch !== epochRef.current) return;
         const finishedSound = soundRef.current;
         if (finishedSound) {
@@ -1211,12 +1341,48 @@ export default function ListenScreen({ route, navigation }) {
     epochRef.current += 1;
     const epoch = epochRef.current;
     console.log(`[听书诊断] ${reason} chapter=${chapterIdx} paragraph=${paragraphIdx}`);
+    manuallyPausedRef.current = false;
     setIsManuallyPaused(false);
-    (async () => {
+    return (async () => {
       await stopSound();
       await restorePlaybackAudioMode().catch(() => {});
-      playFrom(chapterIdx, paragraphIdx, epoch);
+      return playFrom(chapterIdx, paragraphIdx, epoch);
     })();
+  }
+
+  async function recoverNarrationPlayback(reason) {
+    if (playbackRecoveryBusyRef.current) return;
+    playbackRecoveryBusyRef.current = true;
+    try {
+      const sound = soundRef.current;
+      let status = null;
+      if (sound) {
+        try {
+          status = await sound.getStatusAsync();
+        } catch (error) {
+          console.log(`[听书恢复] 读取sound状态失败(${reason})：${error.message || error}`);
+        }
+      }
+      const action = playbackRecoveryAction({
+        status,
+        phase: phaseRef.current,
+        isManuallyPaused: manuallyPausedRef.current,
+      });
+      console.log(`[听书恢复] ${reason} action=${action} loaded=${!!status?.isLoaded} playing=${!!status?.isPlaying}`);
+      if (action === 'rebuild') {
+        await restartNarrationFromCurrent(`${reason}：原生sound失效，按最近字位重建`);
+      } else if (action === 'resume') {
+        try {
+          await restorePlaybackAudioMode();
+          await sound.playAsync();
+        } catch (error) {
+          console.log(`[听书恢复] 原sound续播失败，改为重建：${error.message || error}`);
+          await restartNarrationFromCurrent(`${reason}：原sound续播失败`);
+        }
+      }
+    } finally {
+      playbackRecoveryBusyRef.current = false;
+    }
   }
 
   // 真机反馈"切换声音要及时，不要等到下一部分"——已经在播的这一段音频
@@ -1356,8 +1522,14 @@ export default function ListenScreen({ route, navigation }) {
 
   useEffect(() => {
     const appStateSubscription = AppState.addEventListener('change', (nextState) => {
+      const previousState = appStateRef.current;
+      appStateRef.current = nextState;
       if (nextState === 'inactive' || nextState === 'background') {
         persistListenProgressRef.current?.('切换后台', true);
+      } else if (nextState === 'active' && previousState !== 'active') {
+        // Android回前台后给原生音频会话一个很短的恢复窗口，再核对Sound是否
+        // 仍loaded/playing。失效就从WordBoundary保存的最近字位重建。
+        setTimeout(() => recoverNarrationPlayback('App回到前台'), 120);
       }
     });
     const beforeRemove = navigation.addListener('beforeRemove', () => {
@@ -1398,16 +1570,45 @@ export default function ListenScreen({ route, navigation }) {
   // 不进提问模式；只有专门的"打断，我想问问"按钮才应该进对话视图。改成
   // 直接操作soundRef.current这个正在播放的Sound实例（pauseAsync/playAsync
   // 是expo-av对已加载音频的原生操作，不需要重新合成语音），不碰phase。
-  function togglePlayPause() {
-    if (!soundRef.current) {
-      if (phase === 'playing') restartNarrationFromCurrent('播放键兜底重建sound');
-      return;
-    }
+  async function togglePlayPause() {
+    const sound = soundRef.current;
     if (isManuallyPaused) {
-      soundRef.current.playAsync().catch(() => {});
-      setIsManuallyPaused(false);
+      let status = null;
+      try {
+        status = sound ? await sound.getStatusAsync() : null;
+      } catch (error) {
+        console.log(`[听书恢复] 播放键读取sound失败：${error.message || error}`);
+      }
+      if (!sound || !status?.isLoaded) {
+        manuallyPausedRef.current = false;
+        setIsManuallyPaused(false);
+        await restartNarrationFromCurrent('播放键检测到sound失效');
+        return;
+      }
+      try {
+        await restorePlaybackAudioMode();
+        await sound.playAsync();
+        manuallyPausedRef.current = false;
+        setIsManuallyPaused(false);
+      } catch (error) {
+        console.log(`[听书恢复] 播放键续播失败，按最近字位重建：${error.message || error}`);
+        manuallyPausedRef.current = false;
+        setIsManuallyPaused(false);
+        await restartNarrationFromCurrent('播放键续播失败');
+      }
     } else {
-      soundRef.current.pauseAsync().catch(() => {});
+      if (!sound) {
+        if (phase === 'playing') await restartNarrationFromCurrent('播放键兜底重建sound');
+        return;
+      }
+      try {
+        await sound.pauseAsync();
+      } catch (error) {
+        console.log(`[听书恢复] 暂停失败，释放失效sound等待下次重建：${error.message || error}`);
+        epochRef.current += 1;
+        await stopSound();
+      }
+      manuallyPausedRef.current = true;
       setIsManuallyPaused(true);
       flushListenProgress('暂停', true);
     }
@@ -1450,6 +1651,58 @@ export default function ListenScreen({ route, navigation }) {
       await stopSound();
       if (epoch === epochRef.current) playFrom(idx, 0, epoch);
     })();
+  }
+
+  async function handleStepNarration(direction) {
+    if (phase !== 'playing' && phase !== 'loading-chapter') return;
+    const chapters = chaptersRef.current;
+    const current = posRef.current;
+    const currentChapter = chapters[current.chapterIdx];
+    if (!currentChapter) return;
+    const epoch = ++epochRef.current;
+    setPhase('loading-chapter');
+    await stopSound();
+    try {
+      let currentParagraphs = paragraphCacheRef.current[currentChapter.id];
+      if (!currentParagraphs) {
+        currentParagraphs = await loadNarrationParagraphs(currentChapter);
+        paragraphCacheRef.current[currentChapter.id] = currentParagraphs;
+      }
+      let adjacentParagraphCount = 0;
+      if (direction < 0 && current.paragraphIdx === 0 && current.chapterIdx > 0) {
+        const previousChapter = chapters[current.chapterIdx - 1];
+        let previousParagraphs = paragraphCacheRef.current[previousChapter.id];
+        if (!previousParagraphs) {
+          previousParagraphs = await loadNarrationParagraphs(previousChapter);
+          paragraphCacheRef.current[previousChapter.id] = previousParagraphs;
+        }
+        adjacentParagraphCount = previousParagraphs.length;
+      }
+      if (epoch !== epochRef.current) return;
+      const target = resolveNarrationStep({
+        chapterIdx: current.chapterIdx,
+        paragraphIdx: current.paragraphIdx,
+        direction,
+        chapterCount: chapters.length,
+        currentParagraphCount: currentParagraphs.length,
+        adjacentParagraphCount,
+      });
+      if (!target) {
+        setPhase('playing');
+        playFrom(current.chapterIdx, current.paragraphIdx, epoch);
+        return;
+      }
+      posRef.current = target;
+      paragraphProgressRef.current = { ...target, charOffset: 0 };
+      flushListenProgress(direction > 0 ? '下一朗读段' : '上一朗读段', true);
+      setChapterTitle(chapters[target.chapterIdx]?.title || '');
+      playFrom(target.chapterIdx, target.paragraphIdx, epoch);
+    } catch (error) {
+      if (epoch !== epochRef.current) return;
+      console.log(`[听书诊断] 按段跳转失败：${error.message || error}`);
+      setErrorMsg(error.message || '朗读位置切换失败');
+      setPhase('error');
+    }
   }
 
   // 环境监听时metering回调判定"开始说话"之后调用的入口——停掉环境监听那路
@@ -2445,8 +2698,8 @@ export default function ListenScreen({ route, navigation }) {
       <View style={styles.transportSlot}>
         <TouchableOpacity
           style={styles.transportIconBtn}
-          onPress={() => handleJumpToChapter(posRef.current.chapterIdx - 1)}
-          accessibilityLabel="上一章"
+          onPress={() => handleStepNarration(-1)}
+          accessibilityLabel="上一朗读段"
         >
           <IconPlayerTrackPrevFilled color={EMBER.paperDim} size={18} />
         </TouchableOpacity>
@@ -2466,8 +2719,8 @@ export default function ListenScreen({ route, navigation }) {
       <View style={styles.transportSlot}>
         <TouchableOpacity
           style={styles.transportIconBtn}
-          onPress={() => handleJumpToChapter(posRef.current.chapterIdx + 1)}
-          accessibilityLabel="下一章"
+          onPress={() => handleStepNarration(1)}
+          accessibilityLabel="下一朗读段"
         >
           <IconPlayerTrackNextFilled color={EMBER.paperDim} size={18} />
         </TouchableOpacity>
@@ -2588,8 +2841,16 @@ export default function ListenScreen({ route, navigation }) {
                           ref={captionScrollRef}
                           style={styles.captionScroll}
                           contentContainerStyle={styles.captionScrollContent}
-                          onLayout={({ nativeEvent }) => { captionViewportHeightRef.current = nativeEvent.layout.height; }}
-                          onContentSizeChange={(_w, h) => { captionContentHeightRef.current = h; }}
+                          onLayout={({ nativeEvent }) => {
+                            const height = nativeEvent.layout.height;
+                            captionViewportHeightRef.current = height;
+                            setCaptionViewportHeight(height);
+                            retryPendingCaptionScroll();
+                          }}
+                          onContentSizeChange={(_w, h) => {
+                            captionContentHeightRef.current = h;
+                            retryPendingCaptionScroll();
+                          }}
                           onTouchStart={handleCaptionTouchStart}
                           onScrollBeginDrag={handleCaptionScrollBeginDrag}
                           onScrollEndDrag={handleCaptionScrollEndDrag}
@@ -2600,17 +2861,25 @@ export default function ListenScreen({ route, navigation }) {
                             <View style={styles.captionReadingLine} />
                             <View style={[styles.captionReadingMarker, { top: captionMarkerTop }]} />
                           </View>
+                          <View style={{ height: Math.max(0, captionViewportHeight / 2 - 20) }} />
                           <NarrationParagraph
                             text={currentCaption}
                             activeIndex={captionSentenceIndex}
-                            onContainerLayout={({ nativeEvent }) => { captionContainerYRef.current = nativeEvent.layout.y; }}
-                            onSentenceLayout={(index, layout) => { captionSentenceLayoutsRef.current[index] = layout; }}
+                            onContainerLayout={({ nativeEvent }) => {
+                              captionContainerYRef.current = nativeEvent.layout.y;
+                              retryPendingCaptionScroll();
+                            }}
+                            onSentenceLayout={(index, layout) => {
+                              captionSentenceLayoutsRef.current[index] = layout;
+                              if (captionPendingScrollRef.current?.index === index) retryPendingCaptionScroll();
+                            }}
                           />
                           {captionSentenceCount > 0 && (
                             <Text style={styles.captionCountText}>
                               本章 · 第 {Math.min(captionSentenceIndex + 1, captionSentenceCount)} / {captionSentenceCount} 句
                             </Text>
                           )}
+                          <View style={{ height: Math.max(0, captionViewportHeight / 2 - 20) }} />
                         </ScrollView>
                       )}
                       {phase !== 'loading-chapter' && (
@@ -2937,7 +3206,7 @@ const styles = StyleSheet.create({
   captionZoneVoiceMode: {},
   captionScroll: { flex: 1, alignSelf: 'stretch' },
   captionScrollContent: {
-    flexGrow: 1, alignItems: 'flex-start', justifyContent: 'center', position: 'relative',
+    flexGrow: 1, alignItems: 'flex-start', justifyContent: 'flex-start', position: 'relative',
   },
   // 整章连续字幕：每句是同级Text（不是嵌套inline span，见NarrationParagraph
   // 顶部注释），靠flexWrap让句子照常一行行流着排，同时每句都能measure。
