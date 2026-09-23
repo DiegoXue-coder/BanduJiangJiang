@@ -62,6 +62,25 @@ function getExtToken() {
 const TOKEN_KEY = 'bandu_auth_token';
 let cachedToken = null;
 
+function getCachedUserId() {
+  if (!cachedToken) return null;
+  try {
+    const raw = cachedToken.split('.')[1] || '';
+    const normalized = raw.replace(/-/g, '+').replace(/_/g, '/');
+    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=');
+    const payload = JSON.parse(CryptoJS.enc.Base64.parse(padded).toString(CryptoJS.enc.Utf8));
+    return Number.isFinite(Number(payload?.user_id)) ? String(payload.user_id) : null;
+  } catch (_e) {
+    return null;
+  }
+}
+
+function getListenProgressCachePath(bookId) {
+  const scope = `${getCurrentApiBase()}|${getCachedUserId() || 'guest'}|${bookId}`;
+  const key = CryptoJS.SHA256(scope).toString(CryptoJS.enc.Hex).slice(0, 24);
+  return `${API_CACHE_DIR}listen_progress_${key}.json`;
+}
+
 /** App 启动时调一次：把 SecureStore 里存的 token 读进内存缓存，返回它
  * （null 表示没登录过/已登出）。*/
 export async function loadStoredToken() {
@@ -579,6 +598,51 @@ export async function updateProgress(bookId, cfiLocation) {
   });
 }
 
+export async function getListenProgress(bookId) {
+  const path = getListenProgressCachePath(bookId);
+  const cached = await readJsonCache(path);
+  const localProgress = cached?.data || null;
+  if (!cachedToken) return { progress: localProgress, source: localProgress ? 'local' : 'none' };
+  try {
+    const server = await appFetch(`/app/books/${bookId}/listen-progress`);
+    const serverProgress = server?.progress || null;
+    const localTime = Date.parse(localProgress?.updated_at || '') || 0;
+    const serverTime = Date.parse(serverProgress?.updated_at || '') || 0;
+    if (localProgress && localTime > serverTime) {
+      appFetch(`/app/books/${bookId}/listen-progress`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(localProgress),
+      }).catch(() => {});
+      return { progress: localProgress, source: 'local-newer' };
+    }
+    if (serverProgress) await writeJsonCache(path, serverProgress);
+    return { progress: serverProgress || localProgress, source: serverProgress ? 'server' : localProgress ? 'local' : 'none' };
+  } catch (e) {
+    if (localProgress) return { progress: localProgress, source: 'local-fallback' };
+    throw e;
+  }
+}
+
+export async function saveListenProgress(bookId, progress) {
+  const path = getListenProgressCachePath(bookId);
+  const localProgress = { ...progress, updated_at: new Date().toISOString() };
+  await writeJsonCache(path, localProgress);
+  if (!cachedToken) return { progress: localProgress, localOnly: true };
+  const server = await appFetch(`/app/books/${bookId}/listen-progress`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(localProgress),
+  });
+  if (server?.progress) await writeJsonCache(path, server.progress);
+  return server;
+}
+
+export async function getListenHistory(bookId, limit = 30) {
+  if (!cachedToken) return [];
+  return appFetch(`/app/books/${bookId}/listen-history?limit=${encodeURIComponent(limit)}`);
+}
+
 // ── 阶段四：AI 对话 + 语音 ──────────────────────────────────────────
 // 这几个接口（/ask、/tts/play、/transcribe、/history）在阶段一就确认过是
 // 格式无关的"独立能力"，浏览器插件和手机端共用同一套，不用另起一套后端逻辑。
@@ -592,6 +656,7 @@ export function streamAsk({ context, question, style = 'simple', history = [] },
   xhr.open('POST', `${getCurrentApiBase()}/ask/stream`);
   xhr.setRequestHeader('Content-Type', 'application/json');
   xhr.setRequestHeader('x-extension-token', getExtToken());
+  if (cachedToken) xhr.setRequestHeader('Authorization', `Bearer ${cachedToken}`);
   xhr.timeout = 60_000;
 
   let readIndex = 0;
@@ -713,7 +778,10 @@ export async function transcribeAudio(fileUri, uploadAsync, FileSystemUploadType
   return parsed.text;
 }
 
-export async function saveQaHistory({ bookId, bookTitle, chapterTitle, question, answer, selection = '', cfiRange = '', style = 'simple' }) {
+export async function saveQaHistory({
+  bookId, bookTitle, chapterTitle, question, answer, selection = '', cfiRange = '',
+  style = 'simple', sessionId = '', modality = '',
+}) {
   return appFetch('/history', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -726,6 +794,8 @@ export async function saveQaHistory({ bookId, bookTitle, chapterTitle, question,
       selection,
       cfi_location: cfiRange,
       style,
+      session_id: sessionId,
+      modality,
     }),
   });
 }

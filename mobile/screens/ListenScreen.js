@@ -10,7 +10,7 @@ import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import {
   View, Text, StyleSheet, TouchableOpacity, TextInput,
   ActivityIndicator, ScrollView, Platform, KeyboardAvoidingView, Switch,
-  Modal, Animated,
+  Modal, Animated, AppState,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Audio, InterruptionModeIOS, InterruptionModeAndroid } from 'expo-av';
@@ -26,9 +26,17 @@ import {
 import {
   getBookContext, getChapterText, getStandardChapterText, getTtsPlayUrl, getTtsWithTiming, transcribeAudio,
   streamAsk, saveHighlight, saveQaHistory, classifyIntent, submitVoiceLatencyMetric,
+  getListenProgress, saveListenProgress, getListenHistory,
 } from '../lib/api';
 import { useAuthGate } from '../lib/authGate';
 import { FONTS } from '../fonts';
+const {
+  appendPromptTurn,
+  historyRowsToMessages,
+  normalizeListenSettings,
+  resolveListenChapter,
+  resolveListenParagraph,
+} = require('../lib/listenContinuity');
 
 // 听书页使用最终原型 listen-final-prototype 的中性炭黑暗色，不再沿用旧版
 // 暖棕背景。棕色只作为细节强调色，避免整屏偏棕。
@@ -219,6 +227,8 @@ function isTocChapter(title) {
 
 const LIST_MARKER_PAUSE_MS = 350; // 念到编号开头的段落前，额外停顿这么久
 const RESUME_CHAR_BACKTRACK = 12; // 段内恢复时回退少量字，避免从半个词中间接上
+const LISTEN_PROGRESS_SAVE_INTERVAL_MS = 3000;
+const LISTEN_HISTORY_TURNS = 4;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -537,6 +547,14 @@ export default function ListenScreen({ route, navigation }) {
   const preparedRef = useRef(null); // { ci, pi, voice, rate, promise }
   const posRef = useRef({ chapterIdx: 0, paragraphIdx: 0 }); // 当前/暂停时的位置
   const paragraphProgressRef = useRef({ chapterIdx: 0, paragraphIdx: 0, charOffset: 0 });
+  const listenSessionIdRef = useRef(`listen-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`);
+  const promptHistoryRef = useRef([]);
+  const continuityReadyRef = useRef(false);
+  const progressSaveTimerRef = useRef(null);
+  const lastProgressSaveAtRef = useRef(0);
+  const lastProgressSignatureRef = useRef('');
+  const progressWriteChainRef = useRef(Promise.resolve());
+  const persistListenProgressRef = useRef(null);
   const abortAskRef = useRef(null);
   // 决策层这轮派发：连续追问的交互改成"对话式"，不是每次都跳回一个空白
   // 提问页——之前用ref存这一轮的问答历史只是为了喂给streamAsk当上下文，
@@ -583,6 +601,69 @@ export default function ListenScreen({ route, navigation }) {
   const hfReplyInterruptingRef = useRef(false);
   const hfTimingRef = useRef(null);
   const hfResumePendingRef = useRef(false);
+
+  function buildListenProgressSnapshot() {
+    const progress = paragraphProgressRef.current;
+    const chapter = chaptersRef.current[progress.chapterIdx] || chaptersRef.current[posRef.current.chapterIdx];
+    if (!chapter) return null;
+    const chapterId = Number(chapter.id);
+    return {
+      chapter_kind: standardChaptersRef.current ? 'standard' : 'chapter',
+      chapter_id: Number.isFinite(chapterId) ? chapterId : null,
+      chapter_title: chapter.title || '',
+      paragraph_index: Math.max(0, Number(progress.paragraphIdx) || 0),
+      char_offset: Math.max(0, Number(progress.charOffset) || 0),
+      voice: voiceRef.current,
+      rate: rateRef.current,
+    };
+  }
+
+  async function flushListenProgress(reason = 'manual', force = false) {
+    if (progressSaveTimerRef.current) {
+      clearTimeout(progressSaveTimerRef.current);
+      progressSaveTimerRef.current = null;
+    }
+    if (!continuityReadyRef.current) return;
+    const snapshot = buildListenProgressSnapshot();
+    if (!snapshot) return;
+    const signature = JSON.stringify(snapshot);
+    if (!force && signature === lastProgressSignatureRef.current) return;
+    lastProgressSignatureRef.current = signature;
+    lastProgressSaveAtRef.current = Date.now();
+    progressWriteChainRef.current = progressWriteChainRef.current
+      .catch(() => {})
+      .then(async () => {
+        try {
+          await saveListenProgress(bookId, snapshot);
+          console.log(`[听书连续性] 已保存(${reason}) ${snapshot.chapter_id}/${snapshot.paragraph_index}/${snapshot.char_offset}`);
+        } catch (e) {
+          // saveListenProgress 会先写用户隔离的本地副本；远端失败不应打断播放。
+          console.log(`[听书连续性] 远端保存失败，本地副本已保留(${reason})：${e.message || e}`);
+        }
+      });
+    await progressWriteChainRef.current;
+  }
+
+  function scheduleListenProgressSave(reason = 'playback') {
+    if (!continuityReadyRef.current || progressSaveTimerRef.current) return;
+    const elapsed = Date.now() - lastProgressSaveAtRef.current;
+    const delay = Math.max(200, LISTEN_PROGRESS_SAVE_INTERVAL_MS - elapsed);
+    progressSaveTimerRef.current = setTimeout(() => {
+      progressSaveTimerRef.current = null;
+      flushListenProgress(reason);
+    }, delay);
+  }
+
+  function rememberPromptTurn(questionText, answerText) {
+    promptHistoryRef.current = appendPromptTurn(
+      promptHistoryRef.current,
+      questionText,
+      answerText,
+      LISTEN_HISTORY_TURNS * 2,
+    );
+  }
+
+  persistListenProgressRef.current = flushListenProgress;
 
   function formatHfMs(ms) {
     if (!Number.isFinite(ms) || ms < 0) return '—';
@@ -829,6 +910,7 @@ export default function ListenScreen({ route, navigation }) {
             paragraphIdx: progressMeta.paragraphIdx,
             charOffset,
           };
+          scheduleListenProgressSave('播放中');
           progressMeta.onCharOffset?.(charOffset);
         }
         if (s.isLoaded && s.isPlaying) notifyAudioStart();
@@ -946,6 +1028,7 @@ export default function ListenScreen({ route, navigation }) {
             if (!shouldResumeWithinParagraph) {
               paragraphProgressRef.current = { chapterIdx: ci, paragraphIdx: pi, charOffset: 0 };
             }
+            scheduleListenProgressSave('段落开始');
             setProgressLabel(`第${pi + 1}/${paragraphs.length}段`);
             setCurrentCaption(captionContext.text);
             setCaptionSentenceIndex(lastCaptionSentenceIndex);
@@ -1004,6 +1087,7 @@ export default function ListenScreen({ route, navigation }) {
           posRef.current = { chapterIdx: ci + 1, paragraphIdx: 0 };
           paragraphProgressRef.current = { chapterIdx: ci + 1, paragraphIdx: 0, charOffset: 0 };
         }
+        flushListenProgress('段落切换', true);
         pi += 1;
       }
       console.log(`[听书诊断] 章节"${chapter.title}"全部段落播完，切下一章`);
@@ -1039,7 +1123,9 @@ export default function ListenScreen({ route, navigation }) {
     const changed = prevVoiceRateRef.current.voice !== voice || prevVoiceRateRef.current.rate !== rate;
     prevVoiceRateRef.current = { voice, rate };
     console.log(`[听书诊断] 设置变化effect触发 changed=${changed} phase=${phase} voice=${voice} rate=${rate}`);
-    if (!changed || phase !== 'playing') return;
+    if (!changed) return;
+    scheduleListenProgressSave('声音或语速变化');
+    if (phase !== 'playing') return;
     const { chapterIdx, paragraphIdx } = posRef.current;
     epochRef.current += 1;
     // 真机反馈"切换没有立即生效"，排查代码发现一个真实的时序bug：这里
@@ -1050,7 +1136,7 @@ export default function ListenScreen({ route, navigation }) {
     // 老老实实await完stopSound再启动新的playFrom，消除这个竞态。
     (async () => {
       await stopSound();
-      console.log(`[听书诊断] 设置切换：停止旧音频完成，从${chapterIdx}/${paragraphIdx}用新设置重新播放`);
+      console.log(`[听书诊断] 设置切换：停止旧音频完成，从${chapterIdx}/${paragraphIdx}的已播字符附近续播`);
       playFrom(chapterIdx, paragraphIdx, epochRef.current);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1064,57 +1150,92 @@ export default function ListenScreen({ route, navigation }) {
     // 不生效（官方文档原文："不适用于Expo Go的iOS，仅在独立应用中有效"），
     // 需要走eas build出真机包才能验证，这点已经如实记入开发进度记录。
     restorePlaybackAudioMode().catch(() => {});
-    getBookContext(bookId).then((ctx) => {
+    (async () => {
+      Promise.allSettled([getListenHistory(bookId, 12)]).then(([historyResult]) => {
+        if (cancelled || historyResult.status !== 'fulfilled') return;
+        const restoredHistory = historyRowsToMessages(historyResult.value, LISTEN_HISTORY_TURNS);
+        const restoredPrompt = restoredHistory.map(({ role, content }) => ({ role, content }));
+        promptHistoryRef.current = [...restoredPrompt, ...promptHistoryRef.current]
+          .slice(-(LISTEN_HISTORY_TURNS * 2));
+        setVoiceMessages((current) => [
+          ...restoredHistory.map((message, index) => ({ ...message, id: `history-${index}` })),
+          ...current.filter((message) => !message.historical),
+        ]);
+      });
+      const [contextResult, progressResult] = await Promise.allSettled([
+        getBookContext(bookId),
+        getListenProgress(bookId),
+      ]);
       if (cancelled) return;
+      if (contextResult.status !== 'fulfilled') throw contextResult.reason;
+      const ctx = contextResult.value;
+      const savedProgress = progressResult.status === 'fulfilled' ? progressResult.value?.progress : null;
+
+      const settings = normalizeListenSettings(savedProgress, VOICE_OPTIONS.map((item) => item.value));
+      voiceRef.current = settings.voice;
+      rateRef.current = settings.rate;
+      setVoice(settings.voice);
+      setRate(settings.rate);
+      setRateDisplay(rateStrToMultiplier(settings.rate));
+
       standardChaptersRef.current = ctx.source === 'imported' && (ctx.standard_chapters || []).length > 0;
       const sourceChapters = standardChaptersRef.current ? ctx.standard_chapters : ctx.chapters;
-      const filtered = (sourceChapters || []).filter((c) => !isTocChapter(c.title));
+      const filtered = (sourceChapters || []).filter((chapter) => !isTocChapter(chapter.title));
       chaptersRef.current = filtered;
       if (filtered.length === 0) {
         setErrorMsg('这本书没有可朗读的章节');
         setPhase('error');
         return;
       }
-      // 用户反馈"一点听书就只能从前言开始，不会从当前页开始"——从阅读器
-      // 传来的initialChapterTitle（epub.js当前location的章节标题）按标题
-      // 文本匹配定位起始章节，找不到（标题不完全一致、或没传）就退回从头。
-      const wanted = (initialChapterTitle || '').trim();
-      const startIdx = wanted ? filtered.findIndex((c) => c.title.trim() === wanted) : -1;
-      const targetChapterIdx = startIdx >= 0 ? startIdx : 0;
 
-      // 继续处理段落级起点：阅读器那边传来的startFraction是"当前在这一章
-      // 翻到大概百分之多少"（epub.js分页信息换算出来的，不是精确到字，
-      // 查证过epubjs-react-native没有对外暴露自定义WebView消息通道，做不到
-      // 更精确的DOM级定位）。这里预先把目标章节的正文拉下来存进缓存，算出
-      // 对应的起始段落下标，playFrom内部发现缓存已经有这一章就不会重复拉。
-      const startFractionValue = typeof startFraction === 'number' && startFraction > 0 ? startFraction : 0;
-      if (startFractionValue > 0) {
-        const targetChapter = filtered[targetChapterIdx];
-        const initialEpoch = epochRef.current;
-        loadNarrationParagraphs(targetChapter).then((paragraphs) => {
-          if (cancelled || initialEpoch !== epochRef.current) return;
-          paragraphCacheRef.current[targetChapter.id] = paragraphs;
-          const startParagraphIdx = paragraphs.length > 0
-            ? Math.max(0, Math.min(paragraphs.length - 1, Math.floor(startFractionValue * paragraphs.length)))
-            : 0;
-          playFrom(targetChapterIdx, startParagraphIdx, initialEpoch);
-        }).catch(() => {
-          if (cancelled || initialEpoch !== epochRef.current) return;
-          playFrom(targetChapterIdx, 0, initialEpoch); // 算起点失败就退化成从头，不阻塞播放
-        });
-      } else {
-        playFrom(targetChapterIdx, 0, epochRef.current);
+      const chapterChoice = resolveListenChapter({
+        progress: savedProgress,
+        chapters: filtered,
+        chapterKind: standardChaptersRef.current ? 'standard' : 'chapter',
+        initialChapterTitle,
+      });
+      const targetChapter = filtered[chapterChoice.chapterIdx];
+      const initialEpoch = epochRef.current;
+      try {
+        const paragraphs = await loadNarrationParagraphs(targetChapter);
+        if (cancelled || initialEpoch !== epochRef.current) return;
+        paragraphCacheRef.current[targetChapter.id] = paragraphs;
+        const paragraphChoice = resolveListenParagraph(
+          savedProgress,
+          paragraphs,
+          chapterChoice.useSavedPosition,
+          startFraction,
+        );
+        posRef.current = { chapterIdx: chapterChoice.chapterIdx, paragraphIdx: paragraphChoice.paragraphIdx };
+        paragraphProgressRef.current = {
+          chapterIdx: chapterChoice.chapterIdx,
+          paragraphIdx: paragraphChoice.paragraphIdx,
+          charOffset: paragraphChoice.charOffset,
+        };
+        continuityReadyRef.current = true;
+        console.log(`[听书连续性] 恢复来源=${chapterChoice.source}/${paragraphChoice.source}`);
+        playFrom(chapterChoice.chapterIdx, paragraphChoice.paragraphIdx, initialEpoch);
+      } catch (e) {
+        if (cancelled || initialEpoch !== epochRef.current) return;
+        posRef.current = { chapterIdx: chapterChoice.chapterIdx, paragraphIdx: 0 };
+        paragraphProgressRef.current = { chapterIdx: chapterChoice.chapterIdx, paragraphIdx: 0, charOffset: 0 };
+        continuityReadyRef.current = true;
+        console.log(`[听书连续性] 精确恢复失败，回退章节开头：${e.message || e}`);
+        playFrom(chapterChoice.chapterIdx, 0, initialEpoch);
       }
-    }).catch((e) => {
+    })().catch((e) => {
       if (cancelled) return;
       setErrorMsg(e.message || '书本信息加载失败');
       setPhase('error');
     });
     return () => {
+      persistListenProgressRef.current?.('离开页面', true);
       cancelled = true;
+      continuityReadyRef.current = false;
       epochRef.current += 1;
       stopSound();
       abortAskRef.current?.();
+      if (progressSaveTimerRef.current) clearTimeout(progressSaveTimerRef.current);
       if (maxDurationTimerRef.current) clearTimeout(maxDurationTimerRef.current);
       if (autoListenTimerRef.current) clearTimeout(autoListenTimerRef.current);
       if (autoListenRef.current && recordingRef.current) {
@@ -1125,12 +1246,28 @@ export default function ListenScreen({ route, navigation }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bookId]);
 
+  useEffect(() => {
+    const appStateSubscription = AppState.addEventListener('change', (nextState) => {
+      if (nextState === 'inactive' || nextState === 'background') {
+        persistListenProgressRef.current?.('切换后台', true);
+      }
+    });
+    const beforeRemove = navigation.addListener('beforeRemove', () => {
+      persistListenProgressRef.current?.('导航离开', true);
+    });
+    return () => {
+      appStateSubscription.remove();
+      beforeRemove();
+    };
+  }, [navigation]);
+
   function handleInterrupt() {
     if (phase !== 'playing' && phase !== 'loading-chapter') return;
     // 续二十三访客模式：打断听书是为了问AI，属于三个约定触发点里的
     // "AI相关入口"——访客点这个按钮不进对话视图，先弹注册引导。朗读本身
     // （包括听书这个功能的入口）对访客照常开放，只挡这一步。
     if (!requireAuth('ai')) return;
+    flushListenProgress('提问打断', true);
     epochRef.current += 1;
     stopSound();
     // 免提总开关开着的话，环境监听那路expo-av录音一直在跑——用户改用手动
@@ -1143,7 +1280,7 @@ export default function ListenScreen({ route, navigation }) {
     const paragraphs = paragraphCacheRef.current[chapter?.id] || [];
     setCapturedText(paragraphs[paragraphIdx] || '');
     setQuestion('');
-    setConversation([]); // 新一次打断，对话线清空重新开始
+    setConversation(promptHistoryRef.current.map((message) => ({ ...message, historical: true })));
     setPhase('paused');
   }
 
@@ -1164,6 +1301,7 @@ export default function ListenScreen({ route, navigation }) {
     } else {
       soundRef.current.pauseAsync().catch(() => {});
       setIsManuallyPaused(true);
+      flushListenProgress('暂停', true);
     }
   }
 
@@ -1182,6 +1320,7 @@ export default function ListenScreen({ route, navigation }) {
     const epoch = ++epochRef.current;
     posRef.current = { chapterIdx, paragraphIdx: targetPi };
     paragraphProgressRef.current = { chapterIdx, paragraphIdx: targetPi, charOffset: 0 };
+    flushListenProgress('拖动进度', true);
     (async () => {
       await stopSound();
       if (epoch === epochRef.current) playFrom(chapterIdx, targetPi, epoch);
@@ -1195,6 +1334,7 @@ export default function ListenScreen({ route, navigation }) {
     const epoch = ++epochRef.current;
     posRef.current = { chapterIdx: idx, paragraphIdx: 0 };
     paragraphProgressRef.current = { chapterIdx: idx, paragraphIdx: 0, charOffset: 0 };
+    flushListenProgress('切换章节', true);
     setChapterTitle(chaptersRef.current[idx].title);
     setPhase('loading-chapter');
     setShowChapterPicker(false);
@@ -1213,6 +1353,7 @@ export default function ListenScreen({ route, navigation }) {
     if (phase !== 'playing' && !interruptingReply) return;
     if (handsFreeMuted && !forceMic) return;
     if (hfActiveRef.current && !interruptingReply) return;
+    if (!interruptingReply) flushListenProgress('免提打断', true);
     if (interruptingReply) {
       finishHfTiming('AI回复被用户长按打断');
       hfAbortRef.current?.();
@@ -1608,7 +1749,7 @@ export default function ListenScreen({ route, navigation }) {
           },
           question,
           style: 'voice',
-          history: [],
+          history: [...promptHistoryRef.current],
         },
         {
           onDelta: (delta) => {
@@ -1644,10 +1785,12 @@ export default function ListenScreen({ route, navigation }) {
             }
             markHfTiming(`AI回复完成 answerChars=${finalAnswer.length}`, 'llm_done');
             setHfTimingMeta({ answerChars: finalAnswer.length });
+            rememberPromptTurn(question, finalAnswer);
             const fakeCfi = `listen:${chapter?.id}:${posRef.current.paragraphIdx}`;
             saveQaHistory({
               bookId, bookTitle, chapterTitle: chapter?.title || '',
               question, answer: finalAnswer, selection: currentCaption, cfiRange: fakeCfi, style: 'simple',
+              sessionId: listenSessionIdRef.current, modality: 'listen',
             }).catch(() => {});
             if (finalAnswer && finalAnswer !== streamedAnswer) {
               if (finalAnswer.startsWith(streamedAnswer)) {
@@ -1831,13 +1974,14 @@ export default function ListenScreen({ route, navigation }) {
         },
         question: q,
         style: 'simple',
-        history: conversation,
+        history: [...promptHistoryRef.current],
       },
       {
         onDelta: (delta) => { fullAnswer += delta; },
         onDone: async (answer) => {
           abortAskRef.current = null;
           setConversation((prev) => [...prev, { role: 'assistant', content: answer }]);
+          rememberPromptTurn(q, answer);
           // 打断瞬间截取的段落，本来无条件当成一次"自动划线"存下来——
           // 用户验收时明确提出想自己决定要不要存，改成只有勾选了"保存为
           // 划线"才写。cfi_location用不了真实CFI（这里没有驱动epub.js，
@@ -1852,6 +1996,7 @@ export default function ListenScreen({ route, navigation }) {
           saveQaHistory({
             bookId, bookTitle, chapterTitle: chapter?.title || '',
             question: q, answer, selection: capturedText, cfiRange: fakeCfi, style: 'simple',
+            sessionId: listenSessionIdRef.current, modality: 'listen',
           }).catch(() => {});
           setPhase('answering');
           const epoch = epochRef.current;
@@ -1922,9 +2067,10 @@ export default function ListenScreen({ route, navigation }) {
     }
   }
 
-  function handleStopListening() {
+  async function handleStopListening() {
+    await flushListenProgress('退出听书', true);
     epochRef.current += 1;
-    stopSound();
+    await stopSound();
     navigation.goBack();
   }
 
@@ -2382,13 +2528,15 @@ export default function ListenScreen({ route, navigation }) {
                               voiceAutoScrollRef.current = contentOffset.y + layoutMeasurement.height >= contentSize.height - 40;
                             }}
                           >
-                            <Text style={styles.conversationDrawerTitle}>本轮围绕原文的提问</Text>
+                            <Text style={styles.conversationDrawerTitle}>本次对话与最近历史</Text>
                             {voiceMessages.map((msg) => (
                               <View
                                 key={msg.id}
                                 style={[styles.conversationMessage, msg.role === 'user' ? styles.conversationMessageUser : styles.conversationMessageAi]}
                               >
-                                <Text style={styles.conversationSpeaker}>{msg.role === 'user' ? '我' : 'AI'}</Text>
+                                <Text style={styles.conversationSpeaker}>
+                                  {msg.role === 'user' ? '我' : 'AI'}{msg.historical ? ' · 历史' : ''}
+                                </Text>
                                 <View style={[styles.bubble, msg.role === 'user' ? styles.bubbleUser : styles.bubbleAi]}>
                                   <Text style={msg.role === 'user' ? styles.bubbleUserText : styles.bubbleAiText}>{msg.content}</Text>
                                 </View>
@@ -2419,6 +2567,9 @@ export default function ListenScreen({ route, navigation }) {
                       <Text style={styles.contextChipText}>{capturedText}</Text>
                     </View>
 
+                    {conversation.some((message) => message.historical) && (
+                      <Text style={styles.conversationDrawerTitle}>最近听书问答</Text>
+                    )}
                     {conversation.map((msg, idx) => (
                       <View
                         key={idx}
