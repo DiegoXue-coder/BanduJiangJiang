@@ -1161,6 +1161,26 @@ function ReaderInner({
   const importedStandard = IS_STANDARD_ONLY && bookSource === 'imported' && !!standardChapters?.length;
   const readingChapters = importedStandard ? standardChapters : chapters;
   const hasStandardChapters = Array.isArray(readingChapters) && readingChapters.length > 0;
+  // 2026-09-23：标准阅读目录改成最多两级——后端 v2 的 group_path 只在
+  // "目录节点子树跨多个物理文件"时才非空（册/部级别），单文件章节
+  // group_path 是空数组。这里只是给目录弹层的展示加分组表头，翻页用的
+  // readingChapters 本身还是原来那个扁平数组，index 不变，selectStandardChapter
+  // 照旧用 index 跳转——分组纯粹是目录弹层的展示层，不动底层数据流。
+  const standardTocDisplayItems = useMemo(() => {
+    if (!Array.isArray(readingChapters) || readingChapters.length === 0) return [];
+    const out = [];
+    let lastGroupKey = '';
+    readingChapters.forEach((item, index) => {
+      const groupPath = Array.isArray(item?.group_path) ? item.group_path : [];
+      const groupKey = groupPath.join(' / ');
+      if (groupKey && groupKey !== lastGroupKey) {
+        out.push({ type: 'group', key: `group-${index}`, label: groupPath[groupPath.length - 1] });
+      }
+      lastGroupKey = groupKey;
+      out.push({ type: 'chapter', key: String(item?.id ?? index), item, index, grouped: !!groupKey });
+    });
+    return out;
+  }, [readingChapters]);
   const defaultReaderMode = bookSource === 'imported'
     ? (importedStandard ? READER_DEFAULT_MODE : 'epub')
     : READER_DEFAULT_MODE;
@@ -2884,24 +2904,35 @@ function ReaderInner({
               展开/收起，不是只写死渲染一层subitems。 */}
           {readerMode === 'standard' ? (
             <FlatList
-              data={readingChapters || []}
-              keyExtractor={(item, idx) => String(item.id || idx)}
+              data={standardTocDisplayItems}
+              keyExtractor={(row) => row.key}
               contentContainerStyle={styles.tocListContent}
-              renderItem={({ item, index }) => (
-                <TouchableOpacity
-                  style={[
-                    styles.tocCard,
-                    styles.standardTocItem,
-                    { backgroundColor: uiTheme.cardBg, borderColor: uiTheme.cardBorder, borderRadius: uiTheme.radius },
-                    standardChapterIndex === index && { borderColor: uiTheme.accent },
-                  ]}
-                  onPress={() => selectStandardChapter(index)}
-                >
-                  <Text style={[styles.tocItemText, { color: standardChapterIndex === index ? uiTheme.accent : uiTheme.text }]} numberOfLines={2}>
-                    {item.title || `第${index + 1}章`}
-                  </Text>
-                </TouchableOpacity>
-              )}
+              renderItem={({ item: row }) => {
+                if (row.type === 'group') {
+                  return (
+                    <Text style={[styles.tocGroupHeaderText, { color: uiTheme.textSecondary }]} numberOfLines={1}>
+                      {row.label}
+                    </Text>
+                  );
+                }
+                const { item, index, grouped } = row;
+                return (
+                  <TouchableOpacity
+                    style={[
+                      styles.tocCard,
+                      styles.standardTocItem,
+                      { backgroundColor: uiTheme.cardBg, borderColor: uiTheme.cardBorder, borderRadius: uiTheme.radius },
+                      standardChapterIndex === index && { borderColor: uiTheme.accent },
+                      grouped && styles.standardTocItemGrouped,
+                    ]}
+                    onPress={() => selectStandardChapter(index)}
+                  >
+                    <Text style={[styles.tocItemText, { color: standardChapterIndex === index ? uiTheme.accent : uiTheme.text }]} numberOfLines={2}>
+                      {item.title || `第${index + 1}章`}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              }}
             />
           ) : (
             <FlatList
@@ -3498,6 +3529,8 @@ const styles = StyleSheet.create({
   tocListContent: { padding: 12, gap: 10 },
   tocCard: { borderWidth: 1, overflow: 'hidden' },
   standardTocItem: { paddingHorizontal: 16, paddingVertical: 14 },
+  standardTocItemGrouped: { marginLeft: 14 },
+  tocGroupHeaderText: { fontSize: 13, fontWeight: '600', paddingHorizontal: 4, paddingTop: 2 },
   tocRow: { flexDirection: 'row', alignItems: 'center' },
   tocRowMain: { flex: 1, paddingRight: 8, paddingVertical: 14 },
   tocItemText: { fontSize: 15 },

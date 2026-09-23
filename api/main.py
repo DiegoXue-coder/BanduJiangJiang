@@ -18,6 +18,7 @@ import unicodedata
 import urllib.parse
 from collections import defaultdict, Counter
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 
 import asyncpg
 import bcrypt
@@ -183,6 +184,9 @@ async def init_db():
                 UNIQUE (book_id, order_index)
             )
         """)
+        await conn.execute(
+            "ALTER TABLE standard_chapters ADD COLUMN IF NOT EXISTS group_path JSONB NOT NULL DEFAULT '[]'::jsonb"
+        )
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS highlights (
                 id               BIGSERIAL PRIMARY KEY,
@@ -620,6 +624,7 @@ class ChapterOut(BaseModel):
     id: int
     order_index: int
     title: str
+    group_path: list[str] = []  # 老数据没有这个字段，默认空列表，客户端按空列表当"无分组"处理
 
 class BookOut(BaseModel):
     id: int
@@ -3002,6 +3007,337 @@ def _build_standard_reading_chapters(file_path: str) -> list[dict]:
     return chapters
 
 
+# ── 标准阅读目录 v2：TOC 语义 + spine 保完整 + 最多两级分组 ──────────────────
+#
+# 2026-09-23：`_build_standard_reading_chapters`（上面这个，v1）只按 spine
+# "一文件一章"，完全不看 EPUB 自带的目录（函数自己的英文注释就写着
+# "TOC labels are not positional chapter content"）。真机反馈过（用户上传的
+# 多册合集《富爸爸》《毛泽东大传》）：v1 会把每一册/每一大部分都从"第1章"
+# 重新编号，目录里一堆看不出归属的重复"第1章/第2章"；没有标题标签的文件
+# （比如《巨婴国》全书都没有 h1~h3）会生成一串毫无意义的"第N章"占位。
+#
+# v2 不推翻 v1 的抽取逻辑（同一套 `_decode_epub_html`/`_is_toc_like_document`/
+# `_epub_doc_to_marker_paragraphs`/`_markers_to_standard_content`，字数/图片/
+# 表格的抽取结果两版一致，能直接比较），只是换了"这一页该叫什么标题、该
+# 挂在哪个分组下面"的判断依据：优先用 EPUB 自己的目录（TOC）决定语义，
+# spine 顺序遍历保证内容不丢，TOC 里"子树跨多个物理文件"的节点才算一个
+# 分组（册/部），单文件节点即使是 Section 也只是普通章节，不强行分组——
+# 这样不会重蹈"整册合并成一个巨章"的旧坑（`_epub_book_to_chapters_via_toc`
+# 那次教训，见该函数注释）。
+#
+# 离线在 17 本真实样书上验证过（`tools/epub_toc_audit/`，报告见
+# `docs/学习笔记/11-EPUB目录测试报告-首批12本.md`）：0 处内容/图片/表格
+# 无解释丢失，均分 4.15/5，能把《富爸爸》的 13 组重复章号、《毛泽东大传》的
+# 381 处重复章号、《巨婴国》112 个编造标题这几种情况都解决掉。
+#
+# 只用于**新**导入的书：调用方只在"这本书还没有 standard_chapters 记录"时
+# 才会跑生成逻辑（`_ensure_standard_reading_chapters`/`_insert_book_and_chapters`
+# 均如此），已经导入过的书早就写好 v1 生成的记录，不会被这次改动动到——
+# 这是决策层2026-09-23明确要求的："先只对新导入的书生效，老书先不动"，
+# 不做迁移，避免老书的阅读进度/划线（用旧的 chapter id、段落序号定位）失效。
+
+_MERGED_CHAPTER_MAX_CHARS = int(FALLBACK_CHAPTER_CHARS * 2.5)  # 连续同标签文件合并后太大就再切一刀，跟PDF那边用同一个上限
+
+
+@dataclass
+class _TocNodeV2:
+    title: str
+    href: str
+    anchor: str
+    depth: int
+    parent: "_TocNodeV2 | None" = None
+    children: list["_TocNodeV2"] = field(default_factory=list)
+    is_leaf: bool = True
+    subtree_hrefs: set = field(default_factory=set)
+
+    @property
+    def is_group(self) -> bool:
+        # 只有"自己带子节点、子树横跨不止一个物理文件"才算分组（册/部）；
+        # 子树只覆盖自己这一个文件的节点，哪怕它是 Section，也只是普通叶子章节。
+        return (not self.is_leaf) and len(self.subtree_hrefs) > 1
+
+    def group_ancestors(self) -> list["_TocNodeV2"]:
+        chain = []
+        node = self.parent
+        while node is not None:
+            if node.is_group:
+                chain.append(node)
+            node = node.parent
+        chain.reverse()
+        return chain
+
+
+def _v2_norm_href(raw: str) -> tuple[str, str]:
+    # TOC（NCX/nav）里的 href 常按规范做了 URL 百分号编码（比如文件名带空格
+    # 时写成"Huo%20Yu%20Bing..."），但 item.get_name() 拿到的是解码后的真实
+    # 文件名——测试阶段用真实书（《火与冰》）复现过：不解码会让整本书的 TOC
+    # 全部对不上任何 spine 文件，安静地退化成"TOC 形同虚设"，不会报错，很难
+    # 靠肉眼发现。这里统一解码后再比较。
+    raw = raw or ""
+    if "#" in raw:
+        href, anchor = raw.split("#", 1)
+    else:
+        href, anchor = raw, ""
+    return urllib.parse.unquote(href), urllib.parse.unquote(anchor)
+
+
+def _v2_toc_node_href_title(raw_node):
+    n = raw_node[0] if isinstance(raw_node, tuple) else raw_node
+    href_full = getattr(n, "href", None) or getattr(n, "file_name", None) or ""
+    title = getattr(n, "title", "") or ""
+    href, anchor = _v2_norm_href(href_full)
+    return href, anchor, title
+
+
+def _v2_build_toc_tree(book) -> list["_TocNodeV2"]:
+    def walk(raw_nodes, parent, depth):
+        out = []
+        for raw in raw_nodes:
+            href, anchor, title = _v2_toc_node_href_title(raw)
+            is_tuple = isinstance(raw, tuple)
+            node = _TocNodeV2(title=title, href=href, anchor=anchor, depth=depth, parent=parent, is_leaf=not is_tuple)
+            if is_tuple:
+                node.children = walk(raw[1], node, depth + 1)
+            out.append(node)
+        return out
+
+    roots = walk(list(book.toc or []), None, 0)
+
+    def fill_subtree(node: "_TocNodeV2"):
+        hrefs = {node.href} if node.href else set()
+        for child in node.children:
+            fill_subtree(child)
+            hrefs |= child.subtree_hrefs
+        node.subtree_hrefs = hrefs
+
+    for r in roots:
+        fill_subtree(r)
+    return roots
+
+
+def _v2_flatten(nodes: list["_TocNodeV2"]) -> list["_TocNodeV2"]:
+    out = []
+    for n in nodes:
+        out.append(n)
+        out.extend(_v2_flatten(n.children))
+    return out
+
+
+def _v2_resolve_file_assignment(all_nodes: list["_TocNodeV2"]) -> dict:
+    """每个被 TOC 引用过的 href，决定它的标题来自哪个 TOC 节点、分组路径是什么。"""
+    by_href: dict[str, list["_TocNodeV2"]] = {}
+    for n in all_nodes:
+        if n.href:
+            by_href.setdefault(n.href, []).append(n)
+
+    assignment = {}
+    for href, nodes in by_href.items():
+        leaves = [n for n in nodes if n.is_leaf]
+        if leaves:
+            # 最具体：同一批叶子节点里选深度最大的（多个锚点指向同一文件时，
+            # 通常最深的那个才是真正的章节入口，浅的那个可能是分组顺手挂过来的）
+            chosen = max(leaves, key=lambda n: n.depth)
+        else:
+            # 全都是"分组自己的 href"（没有叶子单独指向它）：用最浅的一个，
+            # 它自己就是这一分组下的一条内容（比如"第一部分"说明页）
+            chosen = min(nodes, key=lambda n: n.depth)
+        group_path = [g.title for g in chosen.group_ancestors() if g.title]
+        assignment[href] = {"title": chosen.title, "group_path": group_path}
+    return assignment
+
+
+def _v2_extract_doc(book, item):
+    soup = BeautifulSoup(_decode_epub_html(item.get_content()), "html.parser")
+    for tag in soup(["script", "style"]):
+        tag.decompose()
+    if _is_toc_like_document(soup):
+        return None
+    heading = soup.find(["h1", "h2", "h3"])
+    own_title = heading.get_text(" ", strip=True) if heading else ""
+    markers = _epub_doc_to_marker_paragraphs(book, item, soup)
+    paragraphs, blocks = _markers_to_standard_content(markers)
+    body = soup.body or soup
+    full_text = body.get_text(" ", strip=True)
+    extracted_chars = sum(len(p) for p in paragraphs)
+    if full_text and extracted_chars < len(full_text) * 0.6:
+        paragraphs = [full_text]
+        blocks = [{"type": "text", "text": full_text}] + [b for b in blocks if b["type"] in ("image", "table")]
+    has_media = any(b["type"] in ("image", "table") for b in blocks)
+    has_text = any(b["type"] == "text" and b["text"].strip() for b in blocks)
+    if not has_text and not has_media:
+        return None
+    return {"own_title": own_title, "paragraphs": paragraphs, "blocks": blocks}
+
+
+def _v2_merge_into(target: dict, extra: dict, *, same_label: bool = False) -> None:
+    """把 extra 这一份内容（孤立小文件/连续同标签文件）的段落和 blocks 接到
+    target 后面，就地修改 target，不新建章节条目。
+
+    `_same_label_merges` 只在"规则二：连续同标签合并"时才累加——不能用一个
+    通用计数器，早期版本这么写过，真实测试时踩了坑：《反三国演义》开头有个
+    很小的封面页（规则一，孤立文件并入相邻章节）被接到第一章前面，如果这也
+    算"合并次数+1"，会让这一章（本来就是这本书天然很大的一整卷，7万多字，
+    v1 从来不切它）被下面 `_v2_split_oversized` 误判成"多文件硬凑出来的
+    超大章节"，平白无故切成 20 多个编号碎片。规则一的孤立文件并入不算数，
+    只有规则二真的把好几个物理文件拼成一章才需要之后检查是不是切得太大。"""
+    target["paragraphs"] = list(target.get("paragraphs") or []) + list(extra.get("paragraphs") or [])
+    target["blocks"] = list(target.get("blocks") or []) + list(extra.get("blocks") or [])
+    if same_label:
+        target["_same_label_merges"] = target.get("_same_label_merges", 0) + max(1, extra.get("_same_label_merges", 0))
+
+
+def _v2_split_oversized(chapter: dict) -> list[dict]:
+    """连续同标签文件合并后可能变得很大（比如某本书 89 个文件都标同一个
+    "PART ONE"），太大就按段落再切几刀，标题加编号后缀——跟 PDF 那边
+    `_subdivide_oversized_chapters` 是同一个思路，不新发明一套。
+
+    只对"真的由多个物理文件合并出来的"章节做这一刀——单个物理文件本来就
+    可能很长（比如小说的一整卷/一整章），v1 从不切它，v2 也不应该因为新加了
+    这条安全网就顺手把这类正常的大章节切碎。实现时先后踩过两版这个坑：
+    ① 不分青红皂白地给所有章节都套用这条安全网，《续资治通鉴长编》523章
+    被误切成2208章；② 换成"只要发生过任何合并（含规则一的孤立文件并入）
+    就允许切"，《反三国演义》一本书开头的小封面页被并入第一卷，让这个天然
+    就有7万多字的一整卷被误切成27个"(1)～(27)"编号碎片，原本的章节标题
+    全部丢失。现在只认"规则二：连续同标签合并"（`_same_label_merges`），
+    孤立文件并入（规则一）不计入触发条件。"""
+    if chapter.get("_same_label_merges", 0) <= 1:
+        return [chapter]
+    # 注意：段落文字不止 type=="text" 的 block，_markers_to_standard_content
+    # 里 h1~h3 标题也会写进 paragraphs（type=="heading"）。这里如果只认
+    # "text" 会漏掉小节标题的字数——真实踩过这个坑：《真需求》合并出的
+    # PART 系列大章节内部本来就有大量二级标题，切分后 paragraphs 统计
+    # 出来比切分前少了2100多字，原因就是标题文字只进了 blocks 没进 paras。
+    _TEXT_LIKE = ("text", "heading")
+    total_chars = sum(len(b.get("text", "")) for b in chapter["blocks"] if b["type"] in _TEXT_LIKE)
+    if total_chars <= _MERGED_CHAPTER_MAX_CHARS:
+        return [chapter]
+    # 按 blocks 里的文本块累计字数分组，图片/表格跟着最近的一组走
+    groups: list[list[dict]] = [[]]
+    running = 0
+    for b in chapter["blocks"]:
+        groups[-1].append(b)
+        if b["type"] in _TEXT_LIKE:
+            running += len(b.get("text", ""))
+            if running >= FALLBACK_CHAPTER_CHARS:
+                groups.append([])
+                running = 0
+    groups = [g for g in groups if g]
+    if len(groups) <= 1:
+        return [chapter]
+    out = []
+    for idx, blocks in enumerate(groups):
+        paras = [b["text"] for b in blocks if b["type"] in _TEXT_LIKE]
+        out.append({
+            "title": f"{chapter['title']} ({idx + 1})",
+            "group_path": chapter["group_path"],
+            "paragraphs": paras,
+            "blocks": blocks,
+        })
+    return out
+
+
+def _build_standard_reading_chapters_v2(file_path: str) -> list[dict]:
+    """v1 的替代品，只用于新导入的书（见上面这一段的说明）。返回格式在 v1 的
+    {title, paragraphs, blocks} 基础上多一个 group_path（list[str]，可能是
+    空列表——单层书/没有目录的书就是空，客户端据此决定要不要显示分组）。"""
+    book = epub.read_epub(file_path)
+    doc_items = [
+        item for item in (book.get_item_with_id(idref) for idref, _ in book.spine)
+        if item is not None and item.get_type() == ebooklib.ITEM_DOCUMENT
+        and not isinstance(item, epub.EpubNav)
+    ]
+    toc_roots = _v2_build_toc_tree(book)
+    all_nodes = _v2_flatten(toc_roots)
+    assignment = _v2_resolve_file_assignment(all_nodes)
+
+    raw_chapters: list[dict] = []  # 每条：{title, group_path, paragraphs, blocks, _merge_key}
+    last_group_path: list[str] = []
+    pending_prefix: dict | None = None  # 全书还没出现第一个"确定章节"之前的孤立小文件，先攒着
+
+    for idx, item in enumerate(doc_items):
+        extracted = _v2_extract_doc(book, item)
+        if extracted is None:
+            continue  # 目录页/纯空白页，跳过（跟 v1 一致）
+
+        href = item.get_name()
+        meta = assignment.get(href)
+
+        if meta:
+            title = meta["title"] or extracted["own_title"]
+            group_path = meta["group_path"]
+            merge_key = (tuple(group_path), title)  # 有 TOC 依据：用它做"连续同标签合并"的判定
+            toc_referenced = True
+            last_group_path = group_path
+        else:
+            title = extracted["own_title"]
+            group_path = list(last_group_path)
+            toc_referenced = False
+            merge_key = None  # 孤立文件不参与"连续同标签合并"，只走"并入相邻章节"
+
+        entry = {"title": title, "group_path": group_path, "paragraphs": extracted["paragraphs"],
+                  "blocks": extracted["blocks"], "_merge_key": merge_key, "_toc_referenced": toc_referenced,
+                  "_same_label_merges": 1}
+
+        # 规则一：孤立文件（没被目录提到、也没有自己的标题标签）并入相邻章节
+        # 的正文——不独立占一条无意义的目录项（封面、分隔页、插图说明页是
+        # 这样；但真实测试样本《真需求》发现这条规则不能只看"字数少不少"：
+        # 这本书的目录只给"PART ONE/TWO/THREE/FOUR"这四种标签打了标记，
+        # 分别打在89/54/35/10个不同文件上，中间夹杂的正文文件（可能有好几百
+        # 字，不算"小"文件）完全没被目录提到——如果只合并"字数很少"的孤立
+        # 文件，这些夹在中间、有实际字数的正文会被单独留成一条条没有标题的
+        # 目录项，还会打断后面"规则二：连续同标签合并"的连续性判定（因为
+        # `raw_chapters[-1]` 变成了这条孤立文件，不再是上一个"PART ONE"）。
+        # 所以判断依据改成"有没有自己的标题标签"，不看字数：没有目录出处、
+        # 又没有自己的 h1~h3 标题，就认定它是"接着上一段读下去的正文"，
+        # 直接并入上一章；只有真的带着自己的标题标签，才有资格独立成章
+        # （对应文件下面 else 分支：title=own_title）。不会丢内容——合并只是
+        # 把这段文字续到上一章里，不是删除。
+        if not toc_referenced and not extracted["own_title"]:
+            if raw_chapters:
+                _v2_merge_into(raw_chapters[-1], entry)
+            elif pending_prefix is not None:
+                _v2_merge_into(pending_prefix, entry)
+            else:
+                pending_prefix = entry
+            continue
+
+        # 规则二：连续多个文件被 TOC 标注成完全相同的标题+分组（常见于"目录只
+        # 标到 PART/卷这一级，物理文件却按页码切得很碎"的书，比如实测样本
+        # 《真需求》——191条目录里只有4种文字，分别重复标注了89/54/35/10次，
+        # 指向89+54+35+10个不同文件）——按 spine 顺序把这些连续文件合并成
+        # 一章，而不是让用户在目录里看到几十条长得一模一样的标题。
+        if merge_key is not None and raw_chapters and raw_chapters[-1].get("_merge_key") == merge_key:
+            _v2_merge_into(raw_chapters[-1], entry, same_label=True)
+            continue
+
+        if pending_prefix is not None:
+            # 全书开头攒的孤立小文件（还没遇到第一个确定章节）：塞进这一章前面，
+            # 这也是规则一（孤立文件并入），不算同标签合并
+            merged = dict(entry)
+            merged["paragraphs"] = list(pending_prefix["paragraphs"]) + list(entry["paragraphs"])
+            merged["blocks"] = list(pending_prefix["blocks"]) + list(entry["blocks"])
+            entry = merged
+            pending_prefix = None
+
+        raw_chapters.append(entry)
+
+    # 全书从头到尾都没有一个"确定章节"（极端情况，比如整本书都被判定成孤立小
+    # 文件）：把攒的内容当唯一一章，不能整本书导入后一个字都没有。
+    if not raw_chapters and pending_prefix is not None:
+        raw_chapters.append(pending_prefix)
+
+    chapters: list[dict] = []
+    for c in raw_chapters:
+        c.pop("_merge_key", None)
+        c.pop("_toc_referenced", None)
+        if not c["title"]:
+            c["title"] = f"（无标题，第{len(chapters) + 1}篇）"  # 低置信度占位，不编造"第N章"
+        for out in _v2_split_oversized(c):
+            out.pop("_same_label_merges", None)
+            chapters.append(out)
+    return chapters
+
+
 def _jsonb_to_object(value):
     """asyncpg 默认把 JSONB 列读成 str（本项目连接池没配 JSON 解码器）。直接
     return 会被 FastAPI 再编码一次，手机端拿到的是一整段字符串而不是对象，
@@ -3020,16 +3356,17 @@ async def _ensure_standard_reading_chapters(book_id: int, file_path: str) -> Non
             if await conn.fetchval("SELECT EXISTS(SELECT 1 FROM standard_chapters WHERE book_id = $1)", book_id):
                 return
             try:
-                chapters = await asyncio.to_thread(_build_standard_reading_chapters, file_path)
+                chapters = await asyncio.to_thread(_build_standard_reading_chapters_v2, file_path)
             except Exception as exc:
                 raise HTTPException(status_code=422, detail="EPUB 正文解析失败，请检查文件是否加密或损坏") from exc
             if not chapters:
                 raise HTTPException(status_code=422, detail="这本 EPUB 未提取到可阅读正文，请检查文件是否加密或损坏")
             for index, content in enumerate(chapters):
                 await conn.execute("""
-                    INSERT INTO standard_chapters (book_id, order_index, title, content)
-                    VALUES ($1, $2, $3, $4::jsonb)
-                """, book_id, index, content["title"], json.dumps(content, ensure_ascii=False))
+                    INSERT INTO standard_chapters (book_id, order_index, title, content, group_path)
+                    VALUES ($1, $2, $3, $4::jsonb, $5::jsonb)
+                """, book_id, index, content["title"], json.dumps(content, ensure_ascii=False),
+                    json.dumps(content.get("group_path") or [], ensure_ascii=False))
 
 
 async def _insert_book_and_chapters(
@@ -3061,9 +3398,10 @@ async def _insert_book_and_chapters(
                 """, book_id, idx, chapter_title)
             for idx, content in enumerate(standard_content or []):
                 await conn.execute("""
-                    INSERT INTO standard_chapters (book_id, order_index, title, content)
-                    VALUES ($1, $2, $3, $4::jsonb)
-                """, book_id, idx, content["title"], json.dumps(content, ensure_ascii=False))
+                    INSERT INTO standard_chapters (book_id, order_index, title, content, group_path)
+                    VALUES ($1, $2, $3, $4::jsonb, $5::jsonb)
+                """, book_id, idx, content["title"], json.dumps(content, ensure_ascii=False),
+                    json.dumps(content.get("group_path") or [], ensure_ascii=False))
 
     return BookOut(id=book_id, title=title, author=author, added_at=book_row["added_at"], source=source)
 
@@ -3136,7 +3474,7 @@ async def app_import_book(
             )
             chapter_titles = [f"第{idx + 1}章" for idx in range(max(1, doc_count))]
         try:
-            standard_content = await asyncio.to_thread(_build_standard_reading_chapters, file_path)
+            standard_content = await asyncio.to_thread(_build_standard_reading_chapters_v2, file_path)
         except Exception as exc:
             os.remove(file_path)
             raise HTTPException(status_code=422, detail="EPUB 正文解析失败，请检查文件是否加密或损坏") from exc
@@ -3427,7 +3765,7 @@ async def app_get_book_context(book_id: int, user_id: int | None = OptionalUser)
             WHERE book_id = $1 ORDER BY order_index
         """, book_id)
         standard_chapters = await conn.fetch("""
-            SELECT id, order_index, title FROM standard_chapters
+            SELECT id, order_index, title, group_path FROM standard_chapters
             WHERE book_id = $1 ORDER BY order_index
         """, book_id) if book["source"] == "imported" else []
 
@@ -3441,7 +3779,11 @@ async def app_get_book_context(book_id: int, user_id: int | None = OptionalUser)
     return BookContextOut(
         id=book["id"], title=book["title"], author=book["author"],
         chapters=[ChapterOut(**dict(c)) for c in chapters],
-        standard_chapters=[ChapterOut(**dict(c)) for c in standard_chapters],
+        standard_chapters=[
+            ChapterOut(id=c["id"], order_index=c["order_index"], title=c["title"],
+                       group_path=_jsonb_to_object(c["group_path"]) or [])
+            for c in standard_chapters
+        ],
         current_cfi_location=progress["current_cfi_location"] if progress else "",
         source=book["source"],
     )
