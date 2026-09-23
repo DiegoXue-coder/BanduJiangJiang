@@ -219,6 +219,16 @@ function isTocChapter(title) {
 
 const LIST_MARKER_PAUSE_MS = 350; // 念到编号开头的段落前，额外停顿这么久
 const RESUME_CHAR_BACKTRACK = 12; // 段内恢复时回退少量字，避免从半个词中间接上
+// 任务卡09/11第一阶段：用户手指离开屏幕、惯性滚动也停下来之后，停顿这么久
+// 还没有新动作，就自动弹回正在朗读的那句、恢复自动跟随。4秒是用户口述的
+// 起始估计值，先按这个实现，真机试过手感觉得太快/太慢再调。
+const CAPTION_IDLE_SNAPBACK_MS = 4000;
+// 手指抬起(onScrollEndDrag)后，等这么久看有没有紧接着的惯性滚动
+// (onMomentumScrollBegin)——安卓/iOS都存在"松手时已经没有速度，不会触发
+// 惯性滚动事件"的情况，纯靠onScrollEndDrag会导致这类场景永远等不到
+// 惯性结束事件、弹回计时器永远不会启动。这个等待窗口只是用来分辨
+// "松手即静止"和"松手后还在惯性滑"两种情况，不是弹回倒计时本身。
+const CAPTION_MOMENTUM_WAIT_MS = 80;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -333,78 +343,73 @@ function charOffsetAtPlaybackPosition(boundaries, positionMillis, sourceLength) 
   return Math.min(sourceLength, Math.floor(start + (end - start) * wordProgress));
 }
 
-// TTS 为减少网络停顿按约 60 字切块，但字幕需要一个稳定的“段落视窗”。
-// 把当前块前后相邻块一起展示，确保即使当前 TTS 块只有一句，用户仍能看到
-// 已读句淡出和后文预告；朗读位置仍只对应当前音频块，不改变播放队列。
+// TTS 为减少网络停顿按约 60 字切块；字幕这边任务卡09/11第一阶段要求改成
+// 整章连续展示（不再只截取当前块前后约180字的小窗口），所以这里直接把
+// 整章的块按原有顺序拼起来返回整章文本，currentStart是当前块开头在整章
+// 文本里的字符位置——因为chunks本来就是同一段原文按顺序重新分块得到的
+// （mergeParagraphsForNarration只重新分块、不改变字符顺序、不丢内容），
+// 拼接顺序等价于原文顺序，currentStart在整章语境下依然准确。朗读位置仍
+// 只对应当前音频块（调用方playFrom没有改动），这里只是把展示范围从“一个
+// 小窗口”换成“整章”，不改变播放判断依据。
 function buildCaptionContext(chunks, currentIndex) {
   const safeChunks = Array.isArray(chunks) ? chunks : [];
   if (!safeChunks.length) return { text: '', currentStart: 0 };
   const index = Math.max(0, Math.min(currentIndex, safeChunks.length - 1));
-  let start = 0;
-  let end = 0;
-  while (start < safeChunks.length) {
-    end = start;
-    let length = 0;
-    while (end < safeChunks.length
-      && ((end - start) < 2 || length < 180)
-      && (end - start) < 3) {
-      length += safeChunks[end].length;
-      end += 1;
-    }
-    if (index < end) break;
-    start = end;
-  }
-  const before = safeChunks.slice(start, index).join('');
+  const before = safeChunks.slice(0, index).join('');
   return {
-    text: safeChunks.slice(start, end).join(''),
+    text: safeChunks.join(''),
     currentStart: before.length,
   };
 }
 
-function NarrationParagraph({ text, activeIndex }) {
+// 任务卡09/11第一阶段：去掉原来"当前句字号从16.5插值到19.5"那组动画
+// （真机反馈换句时字号跳动导致"眼睛失焦"），只保留念过/正在念/未念三档
+// 透明度区分，字号统一用styles.captionParagraphText里定义的固定值。
+// 另外，句子从原来嵌套在同一个<Text>里的inline span，改成一行
+// flexDirection+flexWrap的同级<Text>（每句独立一个盒子）——不是纯视觉
+// 调整，是为了让"整章连续滚动+自动居中"能拿到每一句自己的屏幕位置：
+// 嵌套在同一个<Text>内部的inline span在RN里普遍不支持onLayout，只有
+// 顶层Text/View才能测量；拆成同级盒子后每句都能报告自己的y坐标，父级
+// ListenScreen才能算出"把这句滚到屏幕中间"要滚动到哪个位置。
+function NarrationParagraph({ text, activeIndex, onContainerLayout, onSentenceLayout }) {
   const sentences = useMemo(() => splitCaptionSentences(text), [text]);
-  const animationRef = useRef({ key: '', opacity: [], emphasis: [] });
+  const animationRef = useRef({ key: '', opacity: [] });
   if (animationRef.current.key !== text) {
     animationRef.current = {
       key: text,
       opacity: sentences.map((_, index) => new Animated.Value(index === activeIndex ? 1 : index < activeIndex ? 0.36 : 0.62)),
-      emphasis: sentences.map((_, index) => new Animated.Value(index === activeIndex ? 1 : 0)),
     };
   }
 
   useEffect(() => {
-    const animations = sentences.flatMap((_, index) => [
-      Animated.timing(animationRef.current.opacity[index], {
-        toValue: index === activeIndex ? 1 : index < activeIndex ? 0.36 : 0.62,
-        duration: 480,
-        useNativeDriver: false,
-      }),
-      Animated.timing(animationRef.current.emphasis[index], {
-        toValue: index === activeIndex ? 1 : 0,
-        duration: 420,
-        useNativeDriver: false,
-      }),
-    ]);
+    const animations = sentences.map((_, index) => Animated.timing(animationRef.current.opacity[index], {
+      toValue: index === activeIndex ? 1 : index < activeIndex ? 0.36 : 0.62,
+      duration: 480,
+      useNativeDriver: false,
+    }));
     const parallel = Animated.parallel(animations);
     parallel.start();
     return () => parallel.stop();
   }, [activeIndex, sentences, text]);
 
   return (
-    <Text style={styles.captionParagraphText}>
+    <View style={styles.captionFlow} onLayout={onContainerLayout}>
       {sentences.map((sentence, index) => (
         <Animated.Text
           key={`${sentence.start}-${sentence.end}`}
-          style={{
-            color: index === activeIndex ? EMBER.paper : index < activeIndex ? EMBER.paperDim : EMBER.inkSoft,
-            opacity: animationRef.current.opacity[index],
-            fontSize: animationRef.current.emphasis[index].interpolate({ inputRange: [0, 1], outputRange: [16.5, 19.5] }),
-          }}
+          onLayout={onSentenceLayout ? (e) => onSentenceLayout(index, e.nativeEvent.layout) : undefined}
+          style={[
+            styles.captionParagraphText,
+            {
+              color: index === activeIndex ? EMBER.paper : index < activeIndex ? EMBER.paperDim : EMBER.inkSoft,
+              opacity: animationRef.current.opacity[index],
+            },
+          ]}
         >
           {sentence.text}
         </Animated.Text>
       ))}
-    </Text>
+    </View>
   );
 }
 
@@ -490,6 +495,109 @@ export default function ListenScreen({ route, navigation }) {
   const voiceMessageIdRef = useRef(0);
   const voiceConversationRef = useRef(null);
   const voiceAutoScrollRef = useRef(true);
+
+  // 任务卡09/11第一阶段：整章连续字幕的自动居中滚动 + 用户划走后的自动
+  // 弹回。只驱动NarrationParagraph这块的展示，不碰playFrom/播放队列/
+  // 位置持久化——这里全是ref，状态变化不需要触发ListenScreen重渲染。
+  const captionScrollRef = useRef(null);
+  // 每一句相对NarrationParagraph自身容器的{y, height}，句子布局在同一章
+  // 内文本不变就不会变，测过一次可以一直复用。
+  const captionSentenceLayoutsRef = useRef({});
+  // NarrationParagraph容器相对captionScrollContent（滚动内容顶层）的y——
+  // 前面还有captionReadingRail等兄弟节点占位，需要加上这段偏移才能换算
+  // 成"该滚动到的绝对位置"。
+  const captionContainerYRef = useRef(0);
+  const captionViewportHeightRef = useRef(0);
+  const captionContentHeightRef = useRef(0);
+  // true=用户手指正在拖/惯性滚动尚未停，此时不能被代码的自动滚动打断。
+  const captionUserScrollingRef = useRef(false);
+  const captionIdleTimerRef = useRef(null);
+  const captionMomentumWaitRef = useRef(null);
+  const captionMomentumActiveRef = useRef(false);
+  // 弹回计时器几秒后才触发，回调里不能用闭包里的captionSentenceIndex
+  // （会是计时器启动那一刻的旧值），要弹回的是"现在"正在念的那句。
+  const captionSentenceIndexRef = useRef(0);
+  useEffect(() => { captionSentenceIndexRef.current = captionSentenceIndex; }, [captionSentenceIndex]);
+
+  const scrollCaptionToSentence = useCallback((index, animated) => {
+    const layout = captionSentenceLayoutsRef.current[index];
+    const scrollNode = captionScrollRef.current;
+    if (!layout || !scrollNode) return;
+    const viewportH = captionViewportHeightRef.current;
+    const contentH = captionContentHeightRef.current;
+    if (!viewportH) return;
+    const targetCenter = captionContainerYRef.current + layout.y + layout.height / 2;
+    const maxY = Math.max(0, contentH - viewportH);
+    const targetY = Math.max(0, Math.min(maxY, targetCenter - viewportH / 2));
+    scrollNode.scrollTo({ y: targetY, animated });
+  }, []);
+
+  const clearCaptionIdleTimer = useCallback(() => {
+    if (captionIdleTimerRef.current) {
+      clearTimeout(captionIdleTimerRef.current);
+      captionIdleTimerRef.current = null;
+    }
+  }, []);
+  const clearCaptionMomentumWait = useCallback(() => {
+    if (captionMomentumWaitRef.current) {
+      clearTimeout(captionMomentumWaitRef.current);
+      captionMomentumWaitRef.current = null;
+    }
+  }, []);
+  // 手指离开+惯性也停了之后才真正开始倒计时；倒计时到了就弹回当前正在
+  // 念的那句、恢复自动跟随，跟"自动滚动让当前句居中"复用同一个函数。
+  const startCaptionIdleTimer = useCallback(() => {
+    clearCaptionIdleTimer();
+    captionIdleTimerRef.current = setTimeout(() => {
+      captionIdleTimerRef.current = null;
+      captionUserScrollingRef.current = false;
+      scrollCaptionToSentence(captionSentenceIndexRef.current, true);
+    }, CAPTION_IDLE_SNAPBACK_MS);
+  }, [clearCaptionIdleTimer, scrollCaptionToSentence]);
+  // 倒计时期间用户又碰了一下屏幕（不一定构成拖动），按需求要重新计时；
+  // 只有已经在倒计时的情况下"碰一下"才算数，还没开始倒计时（比如手指
+  // 还按着、还在惯性滑）时碰屏幕是正常操作的一部分，不需要特殊处理。
+  const handleCaptionTouchStart = useCallback(() => {
+    if (captionIdleTimerRef.current) startCaptionIdleTimer();
+  }, [startCaptionIdleTimer]);
+  const handleCaptionScrollBeginDrag = useCallback(() => {
+    captionUserScrollingRef.current = true;
+    captionMomentumActiveRef.current = false;
+    clearCaptionIdleTimer();
+    clearCaptionMomentumWait();
+  }, [clearCaptionIdleTimer, clearCaptionMomentumWait]);
+  const handleCaptionScrollEndDrag = useCallback(() => {
+    clearCaptionMomentumWait();
+    captionMomentumWaitRef.current = setTimeout(() => {
+      captionMomentumWaitRef.current = null;
+      // 等待窗口内如果惯性滚动没有开始，说明松手那一刻已经静止，从这里
+      // 开始计时；如果惯性已经在跑，交给onMomentumScrollEnd去启动计时。
+      if (!captionMomentumActiveRef.current) startCaptionIdleTimer();
+    }, CAPTION_MOMENTUM_WAIT_MS);
+  }, [clearCaptionMomentumWait, startCaptionIdleTimer]);
+  const handleCaptionMomentumScrollBegin = useCallback(() => {
+    captionMomentumActiveRef.current = true;
+    clearCaptionMomentumWait();
+    clearCaptionIdleTimer();
+  }, [clearCaptionMomentumWait, clearCaptionIdleTimer]);
+  const handleCaptionMomentumScrollEnd = useCallback(() => {
+    captionMomentumActiveRef.current = false;
+    startCaptionIdleTimer();
+  }, [startCaptionIdleTimer]);
+  // 换章节（currentCaption整章文本变了）时，旧的逐句布局按下标复用会指向
+  // 错误的句子，清空等新章节的onLayout重新测。
+  useEffect(() => {
+    captionSentenceLayoutsRef.current = {};
+    captionContainerYRef.current = 0;
+  }, [currentCaption]);
+  // 朗读位置推进时，只要不是用户正在手动看别处，就跟着自动居中滚动；
+  // 新章节/新句子首次渲染那一刻句子布局可能还没测出来，稍等一帧再滚，
+  // 测不到就放弃这一次（不影响下一句触发时重试）。
+  useEffect(() => {
+    if (captionUserScrollingRef.current) return undefined;
+    const t = setTimeout(() => scrollCaptionToSentence(captionSentenceIndex, true), 60);
+    return () => clearTimeout(t);
+  }, [captionSentenceIndex, currentCaption, scrollCaptionToSentence]);
 
   // playOneParagraph在playFrom的异步循环里调用，如果直接读voice/rate这两个
   // state会有闭包过期的问题（循环开始时闭包捕获的是当时的值，用户中途在
@@ -2330,15 +2438,31 @@ export default function ListenScreen({ route, navigation }) {
                       {phase === 'loading-chapter' ? (
                         <ActivityIndicator color={EMBER.emberBright} />
                       ) : (
-                        <ScrollView style={styles.captionScroll} contentContainerStyle={styles.captionScrollContent}>
+                        <ScrollView
+                          ref={captionScrollRef}
+                          style={styles.captionScroll}
+                          contentContainerStyle={styles.captionScrollContent}
+                          onLayout={({ nativeEvent }) => { captionViewportHeightRef.current = nativeEvent.layout.height; }}
+                          onContentSizeChange={(_w, h) => { captionContentHeightRef.current = h; }}
+                          onTouchStart={handleCaptionTouchStart}
+                          onScrollBeginDrag={handleCaptionScrollBeginDrag}
+                          onScrollEndDrag={handleCaptionScrollEndDrag}
+                          onMomentumScrollBegin={handleCaptionMomentumScrollBegin}
+                          onMomentumScrollEnd={handleCaptionMomentumScrollEnd}
+                        >
                           <View style={styles.captionReadingRail}>
                             <View style={styles.captionReadingLine} />
                             <View style={[styles.captionReadingMarker, { top: captionMarkerTop }]} />
                           </View>
-                          <NarrationParagraph text={currentCaption} activeIndex={captionSentenceIndex} />
+                          <NarrationParagraph
+                            text={currentCaption}
+                            activeIndex={captionSentenceIndex}
+                            onContainerLayout={({ nativeEvent }) => { captionContainerYRef.current = nativeEvent.layout.y; }}
+                            onSentenceLayout={(index, layout) => { captionSentenceLayoutsRef.current[index] = layout; }}
+                          />
                           {captionSentenceCount > 0 && (
                             <Text style={styles.captionCountText}>
-                              当前段落 · 第 {Math.min(captionSentenceIndex + 1, captionSentenceCount)} / {captionSentenceCount} 句
+                              本章 · 第 {Math.min(captionSentenceIndex + 1, captionSentenceCount)} / {captionSentenceCount} 句
                             </Text>
                           )}
                         </ScrollView>
@@ -2664,6 +2788,9 @@ const styles = StyleSheet.create({
   captionScrollContent: {
     flexGrow: 1, alignItems: 'flex-start', justifyContent: 'center', position: 'relative',
   },
+  // 整章连续字幕：每句是同级Text（不是嵌套inline span，见NarrationParagraph
+  // 顶部注释），靠flexWrap让句子照常一行行流着排，同时每句都能measure。
+  captionFlow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'flex-start' },
   captionParagraphText: {
     fontSize: 17, lineHeight: 32.3, textAlign: 'left', color: EMBER.paper,
     fontFamily: FONTS.serifRegular,
