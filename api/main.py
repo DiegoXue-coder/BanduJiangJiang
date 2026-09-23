@@ -580,7 +580,8 @@ class AskRequest(BaseModel):
 
 class AskResponse(BaseModel):
     answer: str
-    evidenceType: str
+    # 只表示请求中可用/优先的上下文，不表示模型回答已被该来源核验。
+    availableEvidenceType: str
 
 class ClassifyIntentRequest(BaseModel):
     text: str
@@ -2565,7 +2566,7 @@ def _bounded_context_text(text: str, limit: int = 1200) -> str:
     return "\n\n".join(selected)
 
 def _build_book_context(ctx: BookContext) -> tuple[str, str]:
-    """返回发给模型的上下文和稳定的机器可读依据类型。"""
+    """返回发给模型的上下文和可用依据类型；后者不代表答案已被来源核验。"""
     parts: list[str] = []
     if ctx.bookTitle:
         author_part = f"（{ctx.author}）" if ctx.author else ""
@@ -2588,14 +2589,22 @@ def _build_book_context(ctx: BookContext) -> tuple[str, str]:
         parts.append(f"【本书热门划线】{'；'.join(ctx.popularHighlights[:3])}")
 
     if selection:
-        evidence_type = "user_selection"
+        available_evidence_type = "user_selection"
     elif page_text:
-        evidence_type = "current_context"
+        available_evidence_type = "current_context"
     elif ctx.bookTitle or ctx.chapterTitle or ctx.positionId:
-        evidence_type = "insufficient_context"
+        available_evidence_type = "insufficient_context"
     else:
-        evidence_type = "general_knowledge"
-    return ("\n".join(parts) + "\n" if parts else ""), evidence_type
+        available_evidence_type = "general_knowledge"
+    return ("\n".join(parts) + "\n" if parts else ""), available_evidence_type
+
+def _stream_done_payload(answer: str, available_evidence_type: str) -> dict:
+    """构造向后兼容的流式完成事件：旧客户端只读 answer，新客户端读上下文类型。"""
+    return {
+        "done": True,
+        "answer": answer,
+        "availableEvidenceType": available_evidence_type,
+    }
 
 async def _prepare_ask(req: AskRequest, request: Request, user_id: int | None = None):
     """/ask 和 /ask/stream 共用的准备逻辑：鉴权+限额检查、拼上下文、按苏格拉底/
@@ -2628,7 +2637,7 @@ async def _prepare_ask(req: AskRequest, request: Request, user_id: int | None = 
     sf  = _make_sf(_sf_key(request))
     ctx = req.context
 
-    context_block, evidence_type = _build_book_context(ctx)
+    context_block, available_evidence_type = _build_book_context(ctx)
 
     memory = await _get_memory_context(req.question, user_id=user_id, sf=sf)
     if memory:
@@ -2641,7 +2650,7 @@ async def _prepare_ask(req: AskRequest, request: Request, user_id: int | None = 
     messages, max_tokens, temperature = _build_ask_messages(
         req.style, round_num, req.history, req.question, user_message, ctx.selection
     )
-    return ds, messages, max_tokens, temperature, round_num, evidence_type
+    return ds, messages, max_tokens, temperature, round_num, available_evidence_type
 
 def _finalize_socratic_text(raw: str, style: str, round_num: int) -> str:
     """苏格拉底模式的截断规则：round_num < SOCR_MAX_ROUNDS 且不是"你已经推导出来了"/
@@ -2662,7 +2671,7 @@ def _finalize_socratic_text(raw: str, style: str, round_num: int) -> str:
 
 @app.post("/ask", response_model=AskResponse)
 async def ask(req: AskRequest, request: Request, _=ExtAuth, user_id: int | None = OptionalUser):
-    ds, messages, max_tokens, temperature, round_num, evidence_type = await _prepare_ask(req, request, user_id)
+    ds, messages, max_tokens, temperature, round_num, available_evidence_type = await _prepare_ask(req, request, user_id)
     try:
         resp = await asyncio.to_thread(
             lambda: ds.chat.completions.create(
@@ -2677,7 +2686,7 @@ async def ask(req: AskRequest, request: Request, _=ExtAuth, user_id: int | None 
         print(f"[Ask] round={round_num} style={req.style} raw={repr(raw[:80])}")
         return AskResponse(
             answer=_finalize_socratic_text(raw, req.style, round_num),
-            evidenceType=evidence_type,
+            availableEvidenceType=available_evidence_type,
         )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"DeepSeek API 错误: {e}")
@@ -2704,10 +2713,11 @@ async def ask_stream(req: AskRequest, request: Request, _=ExtAuth, user_id: int 
     直接提前终止生成（不用等 max_tokens 耗尽），比非流式版本还省 token。
 
     SSE 事件格式：`data: {"delta": "..."}` 增量文本；结束时
-    `data: {"done": true, "answer": "最终完整文本", "evidenceType": "current_context"}`；
-    出错 `data: {"error": "..."}`。新增字段不改变现有 delta/answer 的消费方式。
+    `data: {"done": true, "answer": "最终完整文本", "availableEvidenceType": "current_context"}`；
+    出错 `data: {"error": "..."}`。`availableEvidenceType` 只描述请求时可用的上下文，
+    不代表答案已经由该来源核验；新增字段不改变现有 delta/answer 的消费方式。
     """
-    ds, messages, max_tokens, temperature, round_num, evidence_type = await _prepare_ask(req, request, user_id)
+    ds, messages, max_tokens, temperature, round_num, available_evidence_type = await _prepare_ask(req, request, user_id)
     is_socr_truncatable = req.style == "socratic" and round_num < SOCR_MAX_ROUNDS
 
     async def event_gen():
@@ -2762,7 +2772,8 @@ async def ask_stream(req: AskRequest, request: Request, _=ExtAuth, user_id: int 
             elif kind == "raw_done":
                 final_text = _finalize_socratic_text(payload, req.style, round_num)
                 print(f"[AskStream] round={round_num} style={req.style} final={repr(final_text[:80])}")
-                yield f"data: {json.dumps({'done': True, 'answer': final_text, 'evidenceType': evidence_type}, ensure_ascii=False)}\n\n"
+                done_payload = _stream_done_payload(final_text, available_evidence_type)
+                yield f"data: {json.dumps(done_payload, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(
         event_gen(),
