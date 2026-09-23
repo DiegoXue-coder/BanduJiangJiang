@@ -37,7 +37,7 @@ import ebooklib
 from ebooklib import epub
 from pypdf import PdfReader
 import pdfplumber
-from bs4 import BeautifulSoup, UnicodeDammit
+from bs4 import BeautifulSoup, Tag, UnicodeDammit
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -3048,13 +3048,17 @@ class _TocNodeV2:
     parent: "_TocNodeV2 | None" = None
     children: list["_TocNodeV2"] = field(default_factory=list)
     is_leaf: bool = True
-    subtree_hrefs: set = field(default_factory=set)
+    subtree_units: set = field(default_factory=set)
 
     @property
     def is_group(self) -> bool:
-        # 只有"自己带子节点、子树横跨不止一个物理文件"才算分组（册/部）；
-        # 子树只覆盖自己这一个文件的节点，哪怕它是 Section，也只是普通叶子章节。
-        return (not self.is_leaf) and len(self.subtree_hrefs) > 1
+        # 只有"自己带子节点、子树横跨不止一个物理内容单元"才算分组（册/部）。
+        # "内容单元"是 (href, anchor) 二元组，不是单纯的 href——真实案例
+        # 《后资本主义时代》：全书正文塞在一个 index.html 里，103个目录节点
+        # 全靠锚点(#id_Toc...)互相区分，子树"只覆盖1个文件"但覆盖了几十个
+        # 不同锚点，这种也该算分组，否则会跟"真的只有一段内容、没有子结构"
+        # 的单文件章节混为一谈，导致整本书的目录层级塌陷成一条。
+        return (not self.is_leaf) and len(self.subtree_units) > 1
 
     def group_ancestors(self) -> list["_TocNodeV2"]:
         chain = []
@@ -3104,11 +3108,11 @@ def _v2_build_toc_tree(book) -> list["_TocNodeV2"]:
     roots = walk(list(book.toc or []), None, 0)
 
     def fill_subtree(node: "_TocNodeV2"):
-        hrefs = {node.href} if node.href else set()
+        units = {(node.href, node.anchor)} if node.href else set()
         for child in node.children:
             fill_subtree(child)
-            hrefs |= child.subtree_hrefs
-        node.subtree_hrefs = hrefs
+            units |= child.subtree_units
+        node.subtree_units = units
 
     for r in roots:
         fill_subtree(r)
@@ -3124,34 +3128,61 @@ def _v2_flatten(nodes: list["_TocNodeV2"]) -> list["_TocNodeV2"]:
 
 
 def _v2_resolve_file_assignment(all_nodes: list["_TocNodeV2"]) -> dict:
-    """每个被 TOC 引用过的 href，决定它的标题来自哪个 TOC 节点、分组路径是什么。"""
-    by_href: dict[str, list["_TocNodeV2"]] = {}
+    """每个被 TOC 引用过的 (href, anchor) 组合，决定它的标题来自哪个 TOC 节点、
+    分组路径是什么。返回 {href: {anchor: {"title":..., "group_path":...}}}。
+
+    按 (href, anchor) 而不是单纯按 href 分桶——这是修复《后资本主义时代》真实
+    案例的关键：103个目录节点全部指向同一个 index.html 的不同锚点，之前只按
+    href 分桶会让这103个节点全部竞争同一个"标题归属"，选出一个胜者，其余102
+    个目录层级全部消失，整本书塌陷成1章。改成按(href, anchor)分桶后，同一个
+    文件里不同锚点各自独立决定标题/分组，配合下面 `_v2_split_soup_by_anchors`
+    在正文里真正按锚点位置切开，才能还原多层目录结构。"""
+    by_unit: dict[tuple[str, str], list["_TocNodeV2"]] = {}
     for n in all_nodes:
         if n.href:
-            by_href.setdefault(n.href, []).append(n)
+            by_unit.setdefault((n.href, n.anchor), []).append(n)
 
-    assignment = {}
-    for href, nodes in by_href.items():
+    assignment: dict[str, dict[str, dict]] = {}
+    for (href, anchor), nodes in by_unit.items():
         leaves = [n for n in nodes if n.is_leaf]
         if leaves:
-            # 最具体：同一批叶子节点里选深度最大的（多个锚点指向同一文件时，
-            # 通常最深的那个才是真正的章节入口，浅的那个可能是分组顺手挂过来的）
+            # 最具体：同一批叶子节点里选深度最大的（多个节点指向同一
+            # (href,anchor) 时，通常最深的那个才是真正的章节入口，浅的那个
+            # 可能是分组顺手挂过来的）
             chosen = max(leaves, key=lambda n: n.depth)
         else:
-            # 全都是"分组自己的 href"（没有叶子单独指向它）：用最浅的一个，
-            # 它自己就是这一分组下的一条内容（比如"第一部分"说明页）
+            # 全都是"分组自己的 (href,anchor)"（没有叶子单独指向它）：用最浅
+            # 的一个，它自己就是这一分组下的一条内容（比如"第一部分"说明页）
             chosen = min(nodes, key=lambda n: n.depth)
         group_path = [g.title for g in chosen.group_ancestors() if g.title]
-        assignment[href] = {"title": chosen.title, "group_path": group_path}
+        assignment.setdefault(href, {})[anchor] = {"title": chosen.title, "group_path": group_path}
     return assignment
 
 
-def _v2_extract_doc(book, item):
-    soup = BeautifulSoup(_decode_epub_html(item.get_content()), "html.parser")
+def _v2_extract_from_soup(book, item, soup):
+    """从一份已经解析好的 soup 里抽取标准阅读内容——跟 v1 完全同一套抽取
+    逻辑（_epub_doc_to_marker_paragraphs/_markers_to_standard_content），
+    只是不在这里负责"从 item 原始字节解码出 soup"这一步，好让锚点切分出的
+    小文档（`_v2_split_soup_by_anchors` 产出的每一段都是独立的 soup，不是
+    直接从 item.get_content() 解出来的）能复用同一套质量把关（目录页识别、
+    div兜底、图片/表格提取），不用另外写一遍。"""
     for tag in soup(["script", "style"]):
         tag.decompose()
     if _is_toc_like_document(soup):
-        return None
+        # 目录页文字本身不当正文导入（2026-08-09决策层拍板："印刷版目录
+        # 彻底不当正文导入"），但目录页里偶尔夹带的真实图片/表格不该被目录
+        # 文字连累一起丢掉——真实案例《反三国演义》：按锚点切分后，末尾
+        # "爱看豆出品"制作组credits页混着一份嵌入式重复目录列表和2张真实
+        # 装饰图，整段直接return None会让这2张图片凭空消失（在v1按整个物理
+        # 文件处理时不会触发这条判断，因为6章正文把目录文字的占比稀释掉了，
+        # 只有拆开锚点后这一小段单独判断才会命中）。这里只丢目录文字，
+        # 图片/表格该有的还是有。
+        markers = _epub_doc_to_marker_paragraphs(book, item, soup)
+        _, media_blocks = _markers_to_standard_content(markers)
+        media_blocks = [b for b in media_blocks if b["type"] in ("image", "table")]
+        if not media_blocks:
+            return None
+        return {"own_title": "", "paragraphs": [], "blocks": media_blocks}
     heading = soup.find(["h1", "h2", "h3"])
     own_title = heading.get_text(" ", strip=True) if heading else ""
     markers = _epub_doc_to_marker_paragraphs(book, item, soup)
@@ -3163,10 +3194,95 @@ def _v2_extract_doc(book, item):
         paragraphs = [full_text]
         blocks = [{"type": "text", "text": full_text}] + [b for b in blocks if b["type"] in ("image", "table")]
     has_media = any(b["type"] in ("image", "table") for b in blocks)
-    has_text = any(b["type"] == "text" and b["text"].strip() for b in blocks)
+    # 注意：算"有没有正文"不能只认 type=="text"，标题(type=="heading")本身
+    # 也是段落文字的一部分（_markers_to_standard_content 里 h1~h6 同样会写
+    # 进 paragraphs）。真实踩过的坑：锚点切分后有些小节的锚点直接打在小节
+    # 标题这一行上、标题下面紧跟着的正文属于下一刀之后的内容，切出来的这一
+    # 小段就只有一个标题、没有独立的 type=="text" block——只认"text"会把
+    # 这种"纯标题段"整段判定成"没有正文"直接丢弃，标题本身也没了（真实
+    # 案例《宋史》"第一节　宋王朝的建立"这类小节标题就是这样凭空消失的）。
+    has_text = any(b["type"] in ("text", "heading") and b["text"].strip() for b in blocks)
     if not has_text and not has_media:
         return None
     return {"own_title": own_title, "paragraphs": paragraphs, "blocks": blocks}
+
+
+def _v2_extract_doc(book, item):
+    soup = BeautifulSoup(_decode_epub_html(item.get_content()), "html.parser")
+    return _v2_extract_from_soup(book, item, soup)
+
+
+def _v2_find_anchor_element(soup, anchor: str):
+    if not anchor:
+        return None
+    el = soup.find(id=anchor)
+    if el is None:
+        el = soup.find(attrs={"name": anchor})
+    return el
+
+
+def _v2_split_soup_by_anchors(soup, anchors: list[str]) -> list[tuple[str, "BeautifulSoup"]]:
+    """把一份文档按目录锚点在正文里的真实先后顺序切成多份独立小文档（每份
+    都是完整的 <html><body>...</body></html>，可以原样喂给 `_v2_extract_from_soup`，
+    复用同一套抽取质量把关）。
+
+    真实案例（《后资本主义时代》）：全书正文塞在一个 index.html 里，103个
+    目录节点全靠不同锚点(#id_Toc...)区分章节，之前完全没有按锚点切分的
+    逻辑，整本书被当成一个物理文件处理，103层目录结构全部塌陷成1章、标题
+    还是随手挑的目录里某一条，跟正文实际显示的开头对不上。
+
+    按锚点在 body 里的真实位置切（不是按目录里写的顺序）——目录顺序理论上
+    该跟正文顺序一致，但不能假设一定如此，锚点在正文里出现的真实位置才是
+    唯一可信的依据。找不到的锚点（目录写错、或锚点打在被清洗掉的标签上）
+    直接跳过，不报错——跳过等价于"这一刀不切"，内容归到前一段，不会因此
+    丢失，只是少切出一条目录项，比完全不切已经是净改善。"""
+    body = soup.body
+    if body is None:
+        return [("", soup)]
+    children = [c for c in body.children if isinstance(c, Tag)]
+    if not children:
+        return [("", soup)]
+
+    seen_idx = set()
+    boundaries: list[tuple[int, str]] = []
+    for anchor in anchors:
+        if not anchor:
+            continue
+        el = _v2_find_anchor_element(soup, anchor)
+        if el is None:
+            continue
+        block = el
+        while block is not None and block.parent is not body:
+            block = block.parent
+        if block is None:
+            continue
+        try:
+            idx = children.index(block)
+        except ValueError:
+            continue
+        if idx in seen_idx:
+            continue
+        seen_idx.add(idx)
+        boundaries.append((idx, anchor))
+    boundaries.sort(key=lambda x: x[0])
+
+    if not boundaries:
+        return [("", soup)]
+
+    segments: list[tuple[str, list]] = []
+    prev_idx, prev_anchor = 0, ""
+    for idx, anchor in boundaries:
+        segments.append((prev_anchor, children[prev_idx:idx]))
+        prev_idx, prev_anchor = idx, anchor
+    segments.append((prev_anchor, children[prev_idx:]))
+
+    out = []
+    for anchor, els in segments:
+        if not els:
+            continue
+        html = "<html><body>" + "".join(str(e) for e in els) + "</body></html>"
+        out.append((anchor, BeautifulSoup(html, "html.parser")))
+    return out or [("", soup)]
 
 
 def _v2_merge_into(target: dict, extra: dict, *, same_label: bool = False) -> None:
@@ -3250,18 +3366,36 @@ def _build_standard_reading_chapters_v2(file_path: str) -> list[dict]:
     all_nodes = _v2_flatten(toc_roots)
     assignment = _v2_resolve_file_assignment(all_nodes)
 
+    # 展开成"逻辑内容单元"列表：绝大多数情况下一个物理文件就是一个单元，
+    # 跟以前完全一样；只有当某个物理文件被目录里的多个不同锚点引用时（真实
+    # 案例《后资本主义时代》：103个目录节点全部指向同一个 index.html），才
+    # 按锚点在正文里的真实位置切成多个单元，每个单元的标题/分组路径来自
+    # assignment 里对应锚点那一条。后面的合并规则完全不用感知这一层区别，
+    # 统一按 units 列表跑，不给已经验证过的合并逻辑增加分支。
+    units: list[tuple[dict, dict | None]] = []  # [(extracted, meta_or_None), ...]
+    for item in doc_items:
+        href = item.get_name()
+        anchor_map = assignment.get(href) or {}
+        if len(anchor_map) <= 1:
+            extracted = _v2_extract_doc(book, item)
+            if extracted is None:
+                continue  # 目录页/纯空白页，跳过（跟 v1 一致）
+            meta = next(iter(anchor_map.values()), None)
+            units.append((extracted, meta))
+            continue
+
+        soup = BeautifulSoup(_decode_epub_html(item.get_content()), "html.parser")
+        for anchor, sub_soup in _v2_split_soup_by_anchors(soup, list(anchor_map.keys())):
+            extracted = _v2_extract_from_soup(book, item, sub_soup)
+            if extracted is None:
+                continue
+            units.append((extracted, anchor_map.get(anchor)))
+
     raw_chapters: list[dict] = []  # 每条：{title, group_path, paragraphs, blocks, _merge_key}
     last_group_path: list[str] = []
     pending_prefix: dict | None = None  # 全书还没出现第一个"确定章节"之前的孤立小文件，先攒着
 
-    for idx, item in enumerate(doc_items):
-        extracted = _v2_extract_doc(book, item)
-        if extracted is None:
-            continue  # 目录页/纯空白页，跳过（跟 v1 一致）
-
-        href = item.get_name()
-        meta = assignment.get(href)
-
+    for extracted, meta in units:
         if meta:
             title = meta["title"] or extracted["own_title"]
             group_path = meta["group_path"]
