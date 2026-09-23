@@ -41,6 +41,7 @@ import Animated, {
   Easing, makeMutable, runOnJS, useAnimatedStyle, useSharedValue, withTiming,
 } from 'react-native-reanimated';
 import { WebView } from 'react-native-webview';
+const { buildThemeInjection, normalizeTheme } = require('../lib/readerTheme');
 
 const TURN_MS = 260; // 点边缘翻页的动画时长
 const LOAD_WAIT_MAX_MS = 700; // 目标页还没加载完时，点边缘翻页最多等多久
@@ -52,7 +53,7 @@ const SLIVER = 2; // 上一页平时露在屏幕最左边的宽度（dp）
 
 const PagerPage = React.memo(function PagerPage({
   page, role, width, tx, isCurrentRef, onMessageRef, registerWeb, onLoaded,
-  baseUrl, allowFileAccess, background,
+  onLoading, onThemeAck, baseUrl, allowFileAccess, background,
 }) {
   // 层级固定（见文件头）：按页序号；没有序号（不该发生）时退回按角色
   const zIndex = page.order != null ? Z_BASE - page.order : ({ prev: 3, cur: 2, next: 1 }[role]);
@@ -74,10 +75,18 @@ const PagerPage = React.memo(function PagerPage({
     [html, baseUrl],
   );
   const handleMessage = useCallback((event) => {
+    // 主题 ACK 必须接收邻页消息；否则只能知道当前页换色了，翻页后仍可能露出旧主题。
+    try {
+      const data = JSON.parse(event.nativeEvent.data);
+      if (data?.type === 'standardThemeAck') {
+        onThemeAck(page.key, data);
+        return;
+      }
+    } catch (_e) {}
     // 只有"当前页"的消息算数：邻页（比如它们自己的字体自检消息）一律忽略
     if (!isCurrentRef.current || isCurrentRef.current !== page.key) return;
     onMessageRef.current && onMessageRef.current(event);
-  }, [isCurrentRef, onMessageRef, page.key]);
+  }, [isCurrentRef, onMessageRef, onThemeAck, page.key]);
   return (
     <Animated.View
       // 只有当前页接收触摸；邻页不能被误点
@@ -93,6 +102,7 @@ const PagerPage = React.memo(function PagerPage({
         style={[styles.web, { backgroundColor: background }]}
         containerStyle={[styles.web, { backgroundColor: background }]}
         onMessage={handleMessage}
+        onLoadStart={() => onLoading(page.key)}
         onLoadEnd={() => onLoaded(page.key)}
         showsVerticalScrollIndicator={false}
         showsHorizontalScrollIndicator={false}
@@ -112,7 +122,7 @@ const PagerPage = React.memo(function PagerPage({
 // dragEnabled：false 时不响应拖动（比如工具栏展开着），触摸原样交给页面里的脚本。
 // holdMs：按住不动超过这个时间就当作长按选字、拖页手势让位（要小于页面脚本的长按触发时间）。
 const StandardPager = forwardRef(function StandardPager({
-  pages, baseUrl, allowFileAccess, background, onMessage, onCommit, onDragStart, dragEnabled = true, holdMs = HOLD_MS,
+  pages, baseUrl, allowFileAccess, background, theme, onMessage, onCommit, onDragStart, dragEnabled = true, holdMs = HOLD_MS,
 }, ref) {
   const [width, setWidth] = useState(0);
   const [, setLoadTick] = useState(0); // 有页面加载完就 +1，让"能不能挂邻页/能不能拖"重新计算
@@ -137,7 +147,9 @@ const StandardPager = forwardRef(function StandardPager({
   const mountedKeysRef = useRef(new Set());
   const webMapRef = useRef(new Map());
   const txMapRef = useRef(new Map());
-  const themeRef = useRef(null);
+  const themeRef = useRef(normalizeTheme(theme, theme?.version));
+  const themeAckRef = useRef(new Map());
+  const themeRetryTimersRef = useRef(new Map());
   const releaseTimerRef = useRef(null);
 
   // 上一页平时停的位置：屏幕左侧之外，只露出 SLIVER 宽的窄边；其他页平时在 0
@@ -154,8 +166,73 @@ const StandardPager = forwardRef(function StandardPager({
       sv.value = (p.prev && p.prev.key === k) ? -width + SLIVER : 0;
     });
   };
+  const clearThemeRetry = useCallback((key) => {
+    const timer = themeRetryTimersRef.current.get(key);
+    if (timer) clearTimeout(timer);
+    themeRetryTimersRef.current.delete(key);
+  }, []);
+  const injectLatestTheme = useCallback((key, attempt = 0) => {
+    const latest = themeRef.current;
+    if (!latest || themeAckRef.current.get(key) >= latest.version) {
+      clearThemeRetry(key);
+      return;
+    }
+    const web = webMapRef.current.get(key);
+    if (!web?.injectJavaScript) return;
+    web.injectJavaScript(buildThemeInjection(latest, key));
+    clearThemeRetry(key);
+    if (attempt >= 4) {
+      console.warn(`[标准阅读主题] 页面${key}未确认主题版本${latest.version}`);
+      return;
+    }
+    const delays = [100, 180, 320, 560, 800];
+    const timer = setTimeout(() => {
+      themeRetryTimersRef.current.delete(key);
+      if (themeRef.current?.version === latest.version && themeAckRef.current.get(key) < latest.version) {
+        injectLatestTheme(key, attempt + 1);
+      }
+    }, delays[attempt]);
+    themeRetryTimersRef.current.set(key, timer);
+  }, [clearThemeRetry]);
+  const applyLatestTheme = useCallback((nextTheme, requestedVersion) => {
+    const currentVersion = themeRef.current?.version || 0;
+    const version = Number.isFinite(requestedVersion) ? requestedVersion : currentVersion + 1;
+    const normalized = normalizeTheme(nextTheme, version);
+    if (normalized.version < currentVersion) return;
+    themeRef.current = normalized;
+    themeRetryTimersRef.current.forEach((timer) => clearTimeout(timer));
+    themeRetryTimersRef.current.clear();
+    webMapRef.current.forEach((_web, key) => injectLatestTheme(key, 0));
+  }, [injectLatestTheme]);
   const registerWeb = useCallback((key, instance) => {
-    if (instance) webMapRef.current.set(key, instance); else webMapRef.current.delete(key);
+    if (instance) {
+      webMapRef.current.set(key, instance);
+      if (loadedRef.current.has(key)) injectLatestTheme(key, 0);
+    } else {
+      webMapRef.current.delete(key);
+      themeAckRef.current.delete(key);
+      clearThemeRetry(key);
+    }
+  }, [clearThemeRetry, injectLatestTheme]);
+  const handleThemeAck = useCallback((key, data) => {
+    if (!data?.applied) return;
+    const version = Number(data.version) || 0;
+    themeAckRef.current.set(key, Math.max(themeAckRef.current.get(key) || 0, version));
+    if (version >= (themeRef.current?.version || 0)) clearThemeRetry(key);
+  }, [clearThemeRetry]);
+  const handleLoading = useCallback((key) => {
+    loadedRef.current.delete(key);
+    themeAckRef.current.delete(key);
+    clearThemeRetry(key);
+  }, [clearThemeRetry]);
+
+  useEffect(() => {
+    applyLatestTheme(theme, theme?.version);
+  }, [theme, applyLatestTheme]);
+
+  useEffect(() => () => {
+    themeRetryTimersRef.current.forEach((timer) => clearTimeout(timer));
+    themeRetryTimersRef.current.clear();
   }, []);
 
   useEffect(() => {
@@ -170,19 +247,15 @@ const StandardPager = forwardRef(function StandardPager({
 
   const handleLoaded = useCallback((key) => {
     loadedRef.current.add(key);
-    // 页面刚加载好：如果用户在它加载期间换过主题，补注入一次
-    if (themeRef.current) {
-      const w = webMapRef.current.get(key);
-      const t = themeRef.current;
-      w && w.injectJavaScript && w.injectJavaScript(`(function(){var d=document,b=d.body;if(!b)return;d.documentElement.style.background='${t.background}';b.style.background='${t.background}';b.style.color='${t.color}';})();true;`);
-    }
+    // 页面可能比主题切换晚挂载；始终补发最新版本，并等页面 ACK。
+    injectLatestTheme(key, 0);
     const waiters = loadWaitersRef.current.get(key);
     if (waiters) {
       loadWaitersRef.current.delete(key);
       waiters.forEach((fn) => fn());
     }
     setLoadTick((n) => n + 1);
-  }, []);
+  }, [injectLatestTheme]);
 
   // ── 哪些页挂载 ──
   // 先当前页；当前页加载完才挂下一页；下一页加载完（或等了 1.2s）才挂上一页。已经挂着的不会被卸掉。
@@ -388,12 +461,8 @@ const StandardPager = forwardRef(function StandardPager({
       const w = webMapRef.current.get(pagesRef.current.cur ? pagesRef.current.cur.key : null);
       return w && w.injectJavaScript && w.injectJavaScript(js);
     },
-    // 换主题：不重建页面，直接把新的底色/字色注入所有已挂载的页面
-    applyTheme: (t) => {
-      themeRef.current = t;
-      const js = `(function(){var d=document,b=d.body;if(!b)return;d.documentElement.style.background='${t.background}';b.style.background='${t.background}';b.style.color='${t.color}';})();true;`;
-      webMapRef.current.forEach((w) => w && w.injectJavaScript && w.injectJavaScript(js));
-    },
+    // 兼容旧调用；正常路径由 theme prop 驱动，保证 Pager 晚挂载也不会丢主题。
+    applyTheme: (nextTheme, version) => applyLatestTheme(nextTheme, version),
     // 点边缘翻一页（一段固定动画）：dir = +1（下一页）/ -1（上一页）。
     // 对面页面还没挂上/没加载好会先等一小会儿；对面根本没有页面返回 false，外面退回"直接跳转"。
     turn: (dir) => {
@@ -458,6 +527,8 @@ const StandardPager = forwardRef(function StandardPager({
             onMessageRef={onMessageRef}
             registerWeb={registerWeb}
             onLoaded={handleLoaded}
+            onLoading={handleLoading}
+            onThemeAck={handleThemeAck}
             baseUrl={baseUrl}
             allowFileAccess={allowFileAccess}
             background={background}

@@ -22,6 +22,13 @@ import BookChatScreen from './BookChatScreen';
 import ReaderChrome, { READER_INFO_STRIP_HEIGHT } from '../components/ReaderChrome';
 import StandardPager from '../components/StandardPager';
 import SelectionPopup from '../components/SelectionPopup';
+const {
+  findPageIndexForTarget,
+  findTextMatchesInPayload,
+  mergeParagraphsForReaderLocation,
+  normalizeReaderText,
+  parseReaderLocation,
+} = require('../lib/readerLocation');
 
 // 阶段十一：epub正文（书本原文内容）换成思源宋体——这部分渲染在
 // react-native-webview内部，不是普通RN Text，普通expo-font的useFonts()
@@ -1045,7 +1052,8 @@ function TocNode({ item, depth, pathKey, expandedToc, toggleTocExpanded, onSelec
 
 function ReaderInner({
   bookId, bookTitle, author, initialLocation, initialAnnotations, navigation,
-  jumpToCfi, jumpNonce, epubSrc, epubError, chapters, standardChapters, bookSource,
+  jumpToCfi, jumpNonce, jumpTargetText, jumpChapterTitle,
+  epubSrc, epubError, chapters, standardChapters, bookSource,
 }) {
   const windowSize = useWindowDimensions();
   // 1号任务诊断打点：这里挂载即代表epubUri（Base64字符串）已经通过RN桥
@@ -1096,6 +1104,8 @@ function ReaderInner({
   const uiTheme = useTheme();
   const insets = useSafeAreaInsets();
   const [themeName, setThemeName] = useState('light');
+  const [themeVersion, setThemeVersion] = useState(0);
+  const themeVersionRef = useRef(0);
   const [currentSectionTitle, setCurrentSectionTitle] = useState('');
   const [isReady, setIsReady] = useState(false);
   const [epubReadyGateOpen, setEpubReadyGateOpen] = useState(false);
@@ -1161,6 +1171,7 @@ function ReaderInner({
   const pagerEnabled = STANDARD_PAGER_PLATFORMS.includes(Platform.OS);
   const [chromeOpen, setChromeOpen] = useState(false);
   const pendingSeekRef = useRef(null); // 进度条跳到别的章节时，等那一章加载完再定位到页
+  const pendingOriginalJumpRef = useRef(null);
   const [standardChapterIndex, setStandardChapterIndex] = useState(0);
   const [standardPageIndex, setStandardPageIndex] = useState(0);
   // 阅读容器（WebView 所在区域）的真实尺寸：分页要按它排，不能按"窗口尺寸减估计值"
@@ -1206,6 +1217,15 @@ function ReaderInner({
   const initialStandardLocationApplied = useRef(false);
   const pendingStandardPageIndex = useRef(null);
 
+  function applyReaderTheme(next) {
+    const version = themeVersionRef.current + 1;
+    themeVersionRef.current = version;
+    setThemeVersion(version);
+    setThemeName(next);
+    // 立即通知已挂载页面；theme prop 还会兜住 Pager 晚挂载/页面晚加载的情况。
+    standardPagerRef.current?.applyTheme?.(THEMES[next].body, version);
+  }
+
   useEffect(() => () => {
     if (standardSelectionTimerRef.current) clearTimeout(standardSelectionTimerRef.current);
     if (progressTimer.current) clearTimeout(progressTimer.current);
@@ -1236,7 +1256,7 @@ function ReaderInner({
           setBodyFontKey(saved.bodyFontKey);
         }
         if (THEMES[saved.themeName]) {
-          setThemeName(saved.themeName);
+          applyReaderTheme(saved.themeName);
           setThemeMode(THEME_MODE_BY_FAMILY[THEME_FAMILY[saved.themeName]]);
         }
         if (!IS_STANDARD_ONLY && bookSource !== 'imported' && READER_MODE_ORDER.includes(saved.readerMode)) {
@@ -2065,7 +2085,7 @@ function ReaderInner({
   // eyecare是续二十七才加的，两边改名对不上收益不大，就地做一次映射）。
   function selectTheme(next) {
     if (!readerInteractionReady) return;
-    setThemeName(next);
+    applyReaderTheme(next);
     changeTheme(THEMES[next]);
     setThemeMode(THEME_MODE_BY_FAMILY[THEME_FAMILY[next]]);
   }
@@ -2131,6 +2151,10 @@ function ReaderInner({
   // 不会出现"页码已经变了、正文还是旧章"的一帧。上一章/下一章只从内存缓存取，取不到就是 null，
   // 翻页容器那一侧暂时没有页面（预读一完成会自动补上）。
   const standardCacheMode = importedStandard ? 'standard' : 'original';
+  const pagerTheme = useMemo(
+    () => ({ ...THEMES[themeName].body, version: themeVersion }),
+    [themeName, themeVersion],
+  );
   const getMemoryChapterPayload = (chapterIndex) => {
     const chapter = readingChapters?.[chapterIndex];
     if (!chapter) return null;
@@ -2154,6 +2178,142 @@ function ReaderInner({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [currentChapterPayload, fontSizePt, windowSize.width, windowSize.height, paginationReserved, standardBox.w, standardBox.h],
   );
+
+  // 复盘页的原文位置有两种自定义格式：standard 直接指向正文 block；listen 指向
+  // 听书合并后的段落。先按 id/序号精确还原；旧 id 或段序失效时，只接受原文的
+  // 唯一匹配。不能唯一确认就只落到可信章节附近，并明确告诉用户发生了降级。
+  useEffect(() => {
+    if (readerMode !== 'standard' || !jumpToCfi || !readingChapters?.length) return undefined;
+    let cancelled = false;
+    const parsed = parseReaderLocation(jumpToCfi);
+    const requestedText = String(jumpTargetText || '').trim();
+    const requestedChapterTitle = normalizeReaderText(jumpChapterTitle);
+    async function loadPayload(chapterIndex) {
+      const chapter = readingChapters[chapterIndex];
+      if (!chapter) return null;
+      const memory = getMemoryChapterPayload(chapterIndex);
+      if (memory) return { ...memory, blocks: normalizeStandardBlocks(memory), chapterId: chapter.id };
+      const data = await getCachedStandardChapterText(bookId, chapter.id, {
+        includeBlocks: true,
+        standard: standardCacheMode === 'standard',
+      });
+      return { ...data, blocks: normalizeStandardBlocks(data), chapterId: chapter.id };
+    }
+    async function resolve() {
+      let chapterIndex = parsed?.chapterId
+        ? readingChapters.findIndex((chapter) => String(chapter.id) === String(parsed.chapterId))
+        : -1;
+      let paragraphIndex = null;
+      let targetText = requestedText;
+      let status = 'exact';
+      if (chapterIndex >= 0 && (parsed?.kind === 'standard' || parsed?.kind === 'listen')) {
+        const payload = await loadPayload(chapterIndex);
+        if (cancelled || !payload) return;
+        if (parsed.kind === 'standard') {
+          const exactBlock = payload.blocks.find((block, index) => (
+            Number(Number.isFinite(block?.sourceIndex) ? block.sourceIndex : index) === parsed.paragraphIndex
+          ));
+          if (exactBlock) {
+            paragraphIndex = parsed.paragraphIndex;
+            targetText = targetText || exactBlock.text || '';
+          }
+        } else {
+          const listenText = mergeParagraphsForReaderLocation(payload.paragraphs)[parsed.paragraphIndex] || '';
+          const matches = findTextMatchesInPayload(payload, targetText || listenText);
+          if (matches.length === 1) {
+            paragraphIndex = matches[0].paragraphIndex;
+            targetText = targetText || listenText;
+          }
+        }
+      }
+
+      if (paragraphIndex === null && requestedText) {
+        const candidates = [];
+        const order = readingChapters.map((_chapter, index) => index);
+        if (chapterIndex >= 0) {
+          order.splice(order.indexOf(chapterIndex), 1);
+          order.unshift(chapterIndex);
+        }
+        for (const index of order) {
+          if (cancelled) return;
+          try {
+            const payload = await loadPayload(index);
+            const matches = findTextMatchesInPayload(payload, requestedText);
+            matches.forEach((match) => candidates.push({ ...match, chapterIndex: index }));
+          } catch (_e) {}
+        }
+        let accepted = candidates.length === 1 ? candidates[0] : null;
+        if (!accepted && candidates.length > 1 && requestedChapterTitle) {
+          const titled = candidates.filter((candidate) => (
+            normalizeReaderText(readingChapters[candidate.chapterIndex]?.title) === requestedChapterTitle
+          ));
+          if (titled.length === 1) accepted = titled[0];
+        }
+        if (!accepted && candidates.length > 1 && chapterIndex >= 0) {
+          const inExpectedChapter = candidates.filter((candidate) => candidate.chapterIndex === chapterIndex);
+          if (inExpectedChapter.length === 1) accepted = inExpectedChapter[0];
+        }
+        if (accepted) {
+          chapterIndex = accepted.chapterIndex;
+          paragraphIndex = accepted.paragraphIndex;
+          status = 'text';
+        }
+      }
+
+      let chapterResolvedByTitle = false;
+      if (chapterIndex < 0 && requestedChapterTitle) {
+        chapterIndex = readingChapters.findIndex((chapter) => (
+          normalizeReaderText(chapter.title) === requestedChapterTitle
+        ));
+        chapterResolvedByTitle = chapterIndex >= 0;
+      }
+      if (chapterIndex < 0) chapterIndex = 0;
+      if (paragraphIndex === null) {
+        const chapterWasResolved = !!parsed?.chapterId && readingChapters.some(
+          (chapter) => String(chapter.id) === String(parsed.chapterId),
+        );
+        status = chapterWasResolved || chapterResolvedByTitle ? 'nearby' : 'book-start';
+      }
+      if (cancelled) return;
+      pendingOriginalJumpRef.current = {
+        chapterIndex, paragraphIndex, targetText, status, nonce: jumpNonce,
+      };
+      setStandardChapterIndex(chapterIndex);
+      setStandardPageIndex(0);
+      setCurrentSectionTitle(readingChapters[chapterIndex]?.title || '');
+    }
+    resolve().catch((error) => {
+      if (cancelled) return;
+      console.warn('[原文定位] 解析失败', error?.message || error);
+      pendingOriginalJumpRef.current = {
+        chapterIndex: 0, paragraphIndex: null, targetText: requestedText, status: 'book-start', nonce: jumpNonce,
+      };
+      setStandardChapterIndex(0);
+      setStandardPageIndex(0);
+    });
+    return () => { cancelled = true; };
+    // jumpNonce 代表一次明确的新跳转；其余值在该次解析期间保持稳定。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [readerMode, jumpToCfi, jumpNonce, readingChapters, bookId, standardCacheMode]);
+
+  useEffect(() => {
+    const pending = pendingOriginalJumpRef.current;
+    if (!pending || pending.chapterIndex !== standardChapterIndex || !standardPages.length) return;
+    if (!standardChapterText || standardChapterText.chapterId !== readingChapters?.[standardChapterIndex]?.id) return;
+    const found = findPageIndexForTarget(standardPages, {
+      paragraphIndex: pending.paragraphIndex,
+      text: pending.targetText,
+    });
+    setStandardPageIndex(found?.pageIndex ?? 0);
+    pendingOriginalJumpRef.current = null;
+    if (pending.status === 'text') {
+      Alert.alert('已按原文重新定位', '原来的位置编号已变化，已根据保存的原文找到唯一位置。');
+    } else if (pending.status === 'nearby') {
+      Alert.alert('已定位到附近章节', '没有找到唯一的原文位置，已打开原记录所在章节，请从这里继续查找。');
+    } else if (pending.status === 'book-start') {
+      Alert.alert('未找到原文位置', '旧记录缺少可确认的位置，已打开本书开头，没有替你跳到不确定的段落。');
+    }
+  }, [standardChapterIndex, standardChapterText, standardPages, readingChapters]);
   // 只在"每一页内容 = 前一章末页 / 后一章首页"需要时才用到：不参与当前章的任何逻辑
   const prevChapterPages = useMemo(
     () => paginatePayload(prevChapterPayload),
@@ -2247,11 +2407,6 @@ function ReaderInner({
     immersive,
     insets.top,
   ]);
-  // 换主题：把新颜色注入现有页面（新建的页面 html 里本来就是当前主题）
-  useEffect(() => {
-    if (!pagerEnabled) return;
-    standardPagerRef.current?.applyTheme?.(THEMES[themeName].body);
-  }, [themeName]);
   const prevChapterId = readingChapters?.[standardChapterIndex - 1]?.id || '';
   const nextChapterId = readingChapters?.[standardChapterIndex + 1]?.id || '';
   const safePageIndex = Math.min(standardPageIndex, Math.max(0, standardPages.length - 1));
@@ -2800,6 +2955,7 @@ function ReaderInner({
                     baseUrl={standardFontUrl ? FileSystem.cacheDirectory : null}
                     allowFileAccess={!!standardFontUrl}
                     background={THEMES[themeName].body.background}
+                    theme={pagerTheme}
                     onMessage={handleStandardWebViewMessage}
                     onCommit={commitStandardTurn}
                     // 手指开始拖页面：清掉选区。工具栏展开时不响应拖动（横滑交给页面脚本，
@@ -3018,7 +3174,7 @@ export default function ReaderScreen({ route, navigation }) {
   // 不会覆盖保存的阅读进度）；书已经开着的情况下靠 ReaderInner 里的 goToLocation
   // 主动跳转（initialLocation 那套只在首次挂载时生效）。jumpNonce 每次点击"跳转
   // 到原文位置"都会变，保证哪怕连续两次跳同一个位置也真的会触发。
-  const { bookId, initialCfi, jumpNonce } = route.params;
+  const { bookId, initialCfi, jumpNonce, initialText, initialChapterTitle } = route.params;
   const theme = useTheme();
   const [ctx, setCtx] = useState(null);
   const [highlights, setHighlights] = useState(null);
@@ -3172,6 +3328,8 @@ export default function ReaderScreen({ route, navigation }) {
       initialLocation={initialCfi || ctx.current_cfi_location}
       jumpToCfi={initialCfi}
       jumpNonce={jumpNonce}
+      jumpTargetText={initialText}
+      jumpChapterTitle={initialChapterTitle}
       initialAnnotations={highlights}
       navigation={navigation}
       epubSrc={epubUri}

@@ -49,6 +49,8 @@ export default function ReviewDetailScreen({ route, navigation }) {
       params: {
         bookId: item.book_id,
         initialCfi: item.cfi_location || undefined,
+        initialText: item.text || undefined,
+        initialChapterTitle: item.chapter_title || undefined,
         jumpNonce: Date.now(),
       },
     });
