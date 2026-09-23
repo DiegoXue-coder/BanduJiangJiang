@@ -53,10 +53,33 @@ function resolveNarrationStep({
   return null;
 }
 
+// 任务卡09/11第二阶段：用户手动滑到某一句、点它跳转朗读——给定"这句在整章
+// 文本里的字符偏移"和"当前章节各TTS分块的长度"，算出应该从哪个分块
+// （paragraphIdx）、分块内第几个字（charOffset）开始播放。跟resumeSlice/
+// shouldResumeWithinParagraph复用同一套"段内恢复"机制：调用方只要把这里
+// 算出的{chapterIdx, paragraphIdx, charOffset}原样写进paragraphProgressRef
+// 再调playFrom(chapterIdx, paragraphIdx, epoch)，不需要改playFrom本身。
+function resolveJumpTarget({ chunkLengths, chapterIdx, charOffset }) {
+  const lengths = Array.isArray(chunkLengths) ? chunkLengths : [];
+  if (!lengths.length) return null;
+  const safeOffset = Math.max(0, Number(charOffset) || 0);
+  let cursor = 0;
+  for (let i = 0; i < lengths.length; i += 1) {
+    const len = Math.max(0, Number(lengths[i]) || 0);
+    const isLast = i === lengths.length - 1;
+    if (safeOffset < cursor + len || isLast) {
+      return { chapterIdx, paragraphIdx: i, charOffset: Math.max(0, Math.min(len, safeOffset - cursor)) };
+    }
+    cursor += len;
+  }
+  return null; // 不可达：lengths非空时循环一定会在isLast命中返回
+}
+
 module.exports = {
   captionOpacityForIndex,
   centeredScrollOffset,
   playbackRecoveryAction,
   preparedSoundMatches,
   resolveNarrationStep,
+  resolveJumpTarget,
 };

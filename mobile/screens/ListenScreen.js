@@ -43,6 +43,7 @@ const {
   playbackRecoveryAction,
   preparedSoundMatches,
   resolveNarrationStep,
+  resolveJumpTarget,
 } = require('../lib/listenPlayback');
 
 // 听书页使用最终原型 listen-final-prototype 的中性炭黑暗色，不再沿用旧版
@@ -389,7 +390,11 @@ function buildCaptionContext(chunks, currentIndex) {
 // 嵌套在同一个<Text>内部的inline span在RN里普遍不支持onLayout，只有
 // 顶层Text/View才能测量；拆成同级盒子后每句都能报告自己的y坐标，父级
 // ListenScreen才能算出"把这句滚到屏幕中间"要滚动到哪个位置。
-function NarrationParagraph({ text, activeIndex, onContainerLayout, onSentenceLayout }) {
+// 第二阶段追加：每句是独立Text，天然自带onPress，不需要额外套
+// Pressable/TouchableOpacity——点按跳转朗读复用的是这同一批盒子。
+function NarrationParagraph({
+  text, activeIndex, onContainerLayout, onSentenceLayout, onSentencePress,
+}) {
   const sentences = useMemo(() => splitCaptionSentences(text), [text]);
   const animationRef = useRef({ key: '', opacity: [] });
   if (animationRef.current.key !== text) {
@@ -421,6 +426,8 @@ function NarrationParagraph({ text, activeIndex, onContainerLayout, onSentenceLa
         <Animated.Text
           key={`${sentence.start}-${sentence.end}`}
           onLayout={onSentenceLayout ? (e) => onSentenceLayout(index, e.nativeEvent.layout) : undefined}
+          onPress={onSentencePress ? () => onSentencePress(index) : undefined}
+          suppressHighlighting
           style={[
             styles.captionParagraphText,
             {
@@ -1705,6 +1712,47 @@ export default function ListenScreen({ route, navigation }) {
     }
   }
 
+  // 任务卡09/11第二阶段：用户手动滑到某一句、点它跳转朗读。整章字幕的
+  // sentenceIndex是"当前章节全文"语境下的全局句子下标（见buildCaptionContext
+  // 把chunks拼成整章文本那次改动），要先换算回playFrom认识的
+  // {chapterIdx, paragraphIdx, charOffset}——复用resolveJumpTarget这个纯
+  // 函数，再原样照抄handleStepNarration"停止当前播放→改posRef/
+  // paragraphProgressRef→保存进度→playFrom"这一套已经验证过的流程，不
+  // 自己另写一套；playFrom本身完全没有改动。
+  function handleJumpToSentence(sentenceIndex) {
+    if (phase !== 'playing' && phase !== 'loading-chapter') return;
+    const chapters = chaptersRef.current;
+    const current = posRef.current;
+    const currentChapter = chapters[current.chapterIdx];
+    const paragraphs = currentChapter ? paragraphCacheRef.current[currentChapter.id] : null;
+    if (!currentChapter || !paragraphs) return; // 字幕能显示出来，说明这份分块理应已经缓存过
+    const sentences = splitCaptionSentences(currentCaption);
+    const sentence = sentences[sentenceIndex];
+    if (!sentence) return;
+    const target = resolveJumpTarget({
+      chunkLengths: paragraphs.map((p) => p.length),
+      chapterIdx: current.chapterIdx,
+      charOffset: sentence.start,
+    });
+    if (!target) return;
+    const epoch = ++epochRef.current;
+    // 跳转是"从当前正在播的地方直接切走"，不像上一段/下一段那样需要先转
+    // loading-chapter态等资源——目标段落已经在缓存里，phase保持playing，
+    // 用户体感更像"拖进度条"而不是"切章节"。
+    stopSound().then(() => {
+      if (epoch !== epochRef.current) return;
+      posRef.current = target;
+      paragraphProgressRef.current = target;
+      flushListenProgress('点句跳转', true);
+      // 恢复自动跟随：用户这次点击就是"我选好位置了"，接下来应该跟着新
+      // 位置的朗读自动滚动，不需要再等4秒弹回倒计时。
+      captionUserScrollingRef.current = false;
+      clearCaptionIdleTimer();
+      clearCaptionMomentumWait();
+      playFrom(target.chapterIdx, target.paragraphIdx, epoch);
+    });
+  }
+
   // 环境监听时metering回调判定"开始说话"之后调用的入口——停掉环境监听那路
   // 录音（内容不要，只是刚才拿来测音量），马上开一路全新的录音正式捕捉
   // 这句话，全程留在朗读字幕视图（phase不变，不跳转），跟手动"打断"那套
@@ -2873,6 +2921,7 @@ export default function ListenScreen({ route, navigation }) {
                               captionSentenceLayoutsRef.current[index] = layout;
                               if (captionPendingScrollRef.current?.index === index) retryPendingCaptionScroll();
                             }}
+                            onSentencePress={handleJumpToSentence}
                           />
                           {captionSentenceCount > 0 && (
                             <Text style={styles.captionCountText}>

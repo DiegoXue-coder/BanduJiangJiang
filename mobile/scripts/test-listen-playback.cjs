@@ -5,6 +5,7 @@ const {
   playbackRecoveryAction,
   preparedSoundMatches,
   resolveNarrationStep,
+  resolveJumpTarget,
 } = require('../lib/listenPlayback');
 
 assert.equal(captionOpacityForIndex(3, 3), 1, '当前句必须首帧直接亮起');
@@ -54,5 +55,19 @@ assert.equal(resolveNarrationStep({
 assert.equal(preparedSoundMatches(prepared, {
   chapterIdx: 2, paragraphIdx: 7, voice: 'voice-b', rate: '+10%',
 }), false);
+
+assert.deepEqual(resolveJumpTarget({
+  chunkLengths: [60, 55, 70], chapterIdx: 4, charOffset: 61,
+}), { chapterIdx: 4, paragraphIdx: 1, charOffset: 1 }, '偏移落在第二块开头附近');
+assert.deepEqual(resolveJumpTarget({
+  chunkLengths: [60, 55, 70], chapterIdx: 4, charOffset: 0,
+}), { chapterIdx: 4, paragraphIdx: 0, charOffset: 0 }, '偏移0落在第一块开头');
+assert.deepEqual(resolveJumpTarget({
+  chunkLengths: [60, 55, 70], chapterIdx: 4, charOffset: 59,
+}), { chapterIdx: 4, paragraphIdx: 0, charOffset: 59 }, '偏移落在第一块最后一个字');
+assert.deepEqual(resolveJumpTarget({
+  chunkLengths: [60, 55, 70], chapterIdx: 4, charOffset: 10000,
+}), { chapterIdx: 4, paragraphIdx: 2, charOffset: 70 }, '超出总长度兜底落在最后一块末尾');
+assert.equal(resolveJumpTarget({ chunkLengths: [], chapterIdx: 0, charOffset: 5 }), null, '空章节没有可跳转的块');
 
 console.log('listen playback tests passed');
