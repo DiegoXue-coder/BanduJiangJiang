@@ -88,6 +88,12 @@ async def init_db():
         await conn.execute(
             "ALTER TABLE qa_history ADD COLUMN IF NOT EXISTS style TEXT NOT NULL DEFAULT 'simple'"
         )
+        await conn.execute(
+            "ALTER TABLE qa_history ADD COLUMN IF NOT EXISTS session_id TEXT NOT NULL DEFAULT ''"
+        )
+        await conn.execute(
+            "ALTER TABLE qa_history ADD COLUMN IF NOT EXISTS modality TEXT NOT NULL DEFAULT ''"
+        )
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS daily_usage (
                 ip    TEXT    NOT NULL,
@@ -198,6 +204,25 @@ async def init_db():
                 updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 PRIMARY KEY (user_id, book_id)
             )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS listen_progress (
+                user_id         BIGINT NOT NULL REFERENCES users(id),
+                book_id         BIGINT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+                chapter_kind    TEXT NOT NULL DEFAULT 'chapter',
+                chapter_id      BIGINT,
+                chapter_title   TEXT NOT NULL DEFAULT '',
+                paragraph_index INTEGER NOT NULL DEFAULT 0,
+                char_offset     INTEGER NOT NULL DEFAULT 0,
+                voice           TEXT NOT NULL DEFAULT 'zh-CN-XiaoxiaoNeural',
+                rate            TEXT NOT NULL DEFAULT '+0%',
+                updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (user_id, book_id)
+            )
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_qa_history_user_book_listen
+            ON qa_history (user_id, book_id, created_at DESC)
         """)
         # 阶段十二：知识图谱。concepts 是去重合并后的canonical概念节点（不是每条
         # 划线/问答一个节点），concept_sources 记录"这个概念是从哪些原始记录提炼
@@ -576,6 +601,8 @@ class HistorySaveRequest(BaseModel):
     selection: str = ""
     cfi_location: str = ""
     style: str = "simple"
+    session_id: str = ""
+    modality: str = ""
 
 class VoiceLatencyMetricIn(BaseModel):
     book_id: str = ""
@@ -627,6 +654,15 @@ class HighlightOut(BaseModel):
 
 class ProgressIn(BaseModel):
     cfi_location: str
+
+class ListenProgressIn(BaseModel):
+    chapter_kind: str = "chapter"
+    chapter_id: int | None = None
+    chapter_title: str = ""
+    paragraph_index: int = 0
+    char_offset: int = 0
+    voice: str = "zh-CN-XiaoxiaoNeural"
+    rate: str = "+0%"
 
 class BookExportOut(BaseModel):
     book_id: int
@@ -684,8 +720,15 @@ SYSTEM_PROMPT = """你是"伴读讲讲"，一位亲切的读书陪伴助手。
 SIMILARITY_THRESHOLD = 0.72
 MEMORY_THRESHOLD     = 0.65
 
-async def _get_memory_context(question: str, sf: OpenAI | None = None) -> str:
-    """用 pgvector 在历史库中检索语义相关问答，组装为 prompt 片段。"""
+async def _get_memory_context(
+    question: str,
+    user_id: int | None,
+    sf: OpenAI | None = None,
+) -> str:
+    """只在当前登录用户自己的历史库中检索语义相关问答。"""
+    # 旧扩展和访客没有JWT。这里宁可不提供私人记忆，也不能退化成跨全表检索。
+    if user_id is None:
+        return ""
     try:
         q_vec = _vec_to_str(await _embed(question[:500], sf))
     except Exception:
@@ -697,11 +740,12 @@ async def _get_memory_context(question: str, sf: OpenAI | None = None) -> str:
             SELECT book_title, question, answer,
                    1 - (embedding <=> $1::vector) AS sim
             FROM qa_history
-            WHERE embedding IS NOT NULL
+            WHERE user_id = $3
+              AND embedding IS NOT NULL
               AND 1 - (embedding <=> $1::vector) >= $2
             ORDER BY embedding <=> $1::vector
             LIMIT 3
-        """, q_vec, MEMORY_THRESHOLD)
+        """, q_vec, MEMORY_THRESHOLD, user_id)
 
     if not rows:
         return ""
@@ -2216,6 +2260,12 @@ async def save_history(req: HistorySaveRequest, request: Request, _=ExtAuth, use
     十三新增：带了手机端登录后的JWT就按真实用户存 user_id，插件调用方式
     完全没变（不发JWT），继续落到 qa_history.user_id 的默认值1，行为不变。
     """
+    # 手机端会同时带旧 HMAC 和 Bearer JWT。Bearer 明确存在却解析失败时，
+    # 不能把该用户的私人问答降级写入种子用户1；只有完全不带 Bearer 的
+    # 旧扩展请求才保留历史兼容行为。
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.lower().startswith("bearer ") and user_id is None:
+        raise HTTPException(status_code=401, detail="登录状态无效，请重新登录")
     sf = _make_sf(_sf_key(request))
     emb_str = None
     try:
@@ -2235,17 +2285,21 @@ async def save_history(req: HistorySaveRequest, request: Request, _=ExtAuth, use
         if emb_str:
             await conn.execute("""
                 INSERT INTO qa_history
-                    (user_id, book_id, book_title, chapter_title, question, answer, selection, cfi_location, style, embedding)
-                VALUES (COALESCE($1, 1),$2,$3,$4,$5,$6,$7,$8,$9,$10::vector)
+                    (user_id, book_id, book_title, chapter_title, question, answer, selection,
+                     cfi_location, style, session_id, modality, embedding)
+                VALUES (COALESCE($1, 1),$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::vector)
             """, user_id, req.book_id, req.book_title, req.chapter_title,
-                req.question, req.answer, req.selection, req.cfi_location, req.style, emb_str)
+                req.question, req.answer, req.selection, req.cfi_location, req.style,
+                req.session_id[:120], req.modality[:40], emb_str)
         else:
             await conn.execute("""
                 INSERT INTO qa_history
-                    (user_id, book_id, book_title, chapter_title, question, answer, selection, cfi_location, style)
-                VALUES (COALESCE($1, 1),$2,$3,$4,$5,$6,$7,$8,$9)
+                    (user_id, book_id, book_title, chapter_title, question, answer, selection,
+                     cfi_location, style, session_id, modality)
+                VALUES (COALESCE($1, 1),$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
             """, user_id, req.book_id, req.book_title, req.chapter_title,
-                req.question, req.answer, req.selection, req.cfi_location, req.style)
+                req.question, req.answer, req.selection, req.cfi_location, req.style,
+                req.session_id[:120], req.modality[:40])
     return {"ok": True}
 
 @app.post("/history/backfill-embeddings")
@@ -2463,7 +2517,7 @@ def _build_ask_messages(
         messages.append({"role": "user", "content": user_message})
         return messages, 512, 1.0
 
-async def _prepare_ask(req: AskRequest, request: Request):
+async def _prepare_ask(req: AskRequest, request: Request, user_id: int | None = None):
     """/ask 和 /ask/stream 共用的准备逻辑：鉴权+限额检查、拼上下文、按苏格拉底/
     直接讲解两种模式组装 messages。抽出来是因为流式版本除了"最后一次性拿结果"
     变成"边生成边推"之外，前面这一整段完全一样，不想复制一遍容易改漏。
@@ -2509,7 +2563,7 @@ async def _prepare_ask(req: AskRequest, request: Request):
     if ctx.popularHighlights:
         context_block += f"【本书热门划线】{'；'.join(ctx.popularHighlights[:3])}\n"
 
-    memory = await _get_memory_context(req.question, sf=sf)
+    memory = await _get_memory_context(req.question, user_id=user_id, sf=sf)
     if memory:
         context_block += memory
 
@@ -2540,8 +2594,8 @@ def _finalize_socratic_text(raw: str, style: str, round_num: int) -> str:
     return raw[:40]
 
 @app.post("/ask", response_model=AskResponse)
-async def ask(req: AskRequest, request: Request, _=ExtAuth):
-    ds, messages, max_tokens, temperature, round_num = await _prepare_ask(req, request)
+async def ask(req: AskRequest, request: Request, _=ExtAuth, user_id: int | None = OptionalUser):
+    ds, messages, max_tokens, temperature, round_num = await _prepare_ask(req, request, user_id)
     try:
         resp = await asyncio.to_thread(
             lambda: ds.chat.completions.create(
@@ -2574,7 +2628,7 @@ async def debug_stream_test(_=ExtAuth):
     )
 
 @app.post("/ask/stream")
-async def ask_stream(req: AskRequest, request: Request, _=ExtAuth):
+async def ask_stream(req: AskRequest, request: Request, _=ExtAuth, user_id: int | None = OptionalUser):
     """流式版 /ask（阶段六）：DeepSeek 边生成边推给客户端，配合客户端按句切分
     TTS，不用等完整回答生成完才开口。苏格拉底模式一旦检测到该截断的问号，
     直接提前终止生成（不用等 max_tokens 耗尽），比非流式版本还省 token。
@@ -2582,7 +2636,7 @@ async def ask_stream(req: AskRequest, request: Request, _=ExtAuth):
     SSE 事件格式：`data: {"delta": "..."}` 增量文本；结束时
     `data: {"done": true, "answer": "最终完整文本"}`；出错 `data: {"error": "..."}`。
     """
-    ds, messages, max_tokens, temperature, round_num = await _prepare_ask(req, request)
+    ds, messages, max_tokens, temperature, round_num = await _prepare_ask(req, request, user_id)
     is_socr_truncatable = req.style == "socratic" and round_num < SOCR_MAX_ROUNDS
 
     async def event_gen():
@@ -3698,6 +3752,89 @@ async def app_update_progress(book_id: int, body: ProgressIn, user_id: int = Cur
                 SET current_cfi_location = $3, updated_at = NOW()
         """, user_id, book_id, body.cfi_location)
     return {"ok": True}
+
+@app.get("/app/books/{book_id}/listen-progress")
+async def app_get_listen_progress(book_id: int, user_id: int = CurrentUser):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        book = await conn.fetchrow(
+            "SELECT id, source, imported_by FROM books WHERE id = $1", book_id
+        )
+        if not book:
+            raise HTTPException(status_code=404, detail="书本不存在")
+        _assert_book_readable(book, user_id)
+        row = await conn.fetchrow("""
+            SELECT chapter_kind, chapter_id, chapter_title, paragraph_index,
+                   char_offset, voice, rate, updated_at
+            FROM listen_progress
+            WHERE user_id = $1 AND book_id = $2
+        """, user_id, book_id)
+    return {"progress": dict(row) if row else None}
+
+@app.put("/app/books/{book_id}/listen-progress")
+async def app_update_listen_progress(
+    book_id: int,
+    body: ListenProgressIn,
+    user_id: int = CurrentUser,
+):
+    chapter_kind = body.chapter_kind if body.chapter_kind in {"chapter", "standard"} else "chapter"
+    paragraph_index = max(0, body.paragraph_index)
+    char_offset = max(0, body.char_offset)
+    if not _RATE_PATTERN.match(body.rate):
+        raise HTTPException(status_code=400, detail="rate参数格式错误")
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        book = await conn.fetchrow(
+            "SELECT id, source, imported_by FROM books WHERE id = $1", book_id
+        )
+        if not book:
+            raise HTTPException(status_code=404, detail="书本不存在")
+        _assert_book_readable(book, user_id)
+        row = await conn.fetchrow("""
+            INSERT INTO listen_progress
+                (user_id, book_id, chapter_kind, chapter_id, chapter_title,
+                 paragraph_index, char_offset, voice, rate, updated_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW())
+            ON CONFLICT (user_id, book_id) DO UPDATE SET
+                chapter_kind = EXCLUDED.chapter_kind,
+                chapter_id = EXCLUDED.chapter_id,
+                chapter_title = EXCLUDED.chapter_title,
+                paragraph_index = EXCLUDED.paragraph_index,
+                char_offset = EXCLUDED.char_offset,
+                voice = EXCLUDED.voice,
+                rate = EXCLUDED.rate,
+                updated_at = NOW()
+            RETURNING chapter_kind, chapter_id, chapter_title, paragraph_index,
+                      char_offset, voice, rate, updated_at
+        """, user_id, book_id, chapter_kind, body.chapter_id, body.chapter_title[:500],
+            paragraph_index, char_offset, body.voice[:120], body.rate)
+    return {"progress": dict(row)}
+
+@app.get("/app/books/{book_id}/listen-history")
+async def app_get_listen_history(
+    book_id: int,
+    limit: int = 30,
+    user_id: int = CurrentUser,
+):
+    safe_limit = max(1, min(limit, 50))
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        book = await conn.fetchrow(
+            "SELECT id, source, imported_by FROM books WHERE id = $1", book_id
+        )
+        if not book:
+            raise HTTPException(status_code=404, detail="书本不存在")
+        _assert_book_readable(book, user_id)
+        rows = await conn.fetch("""
+            SELECT id, created_at, chapter_title, question, answer, selection,
+                   style, session_id, modality
+            FROM qa_history
+            WHERE user_id = $1 AND book_id = $2
+              AND (modality = 'listen' OR cfi_location LIKE 'listen:%')
+            ORDER BY created_at DESC
+            LIMIT $3
+        """, user_id, str(book_id), safe_limit)
+    return [dict(row) for row in rows]
 
 @app.get("/app/review", response_model=list[ReviewItemOut])
 async def app_get_review(user_id: int = CurrentUser):

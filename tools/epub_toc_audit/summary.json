@@ -1,10 +1,118 @@
 {
-  "generated_at": "2026-09-23 02:23:32",
-  "books_dir_book_count": 13,
-  "unique_book_count": 12,
+  "generated_at": "2026-09-23 13:22:24",
+  "books_dir_book_count": 19,
+  "unique_book_count": 18,
   "duplicate_file_count": 1,
-  "parse_error_count": 0,
+  "parse_error_count": 1,
   "books": [
+    {
+      "book_id": "1dcb62356b",
+      "title": "Steve Jobs",
+      "spine_doc_count": 64,
+      "toc_like_doc_count": 1,
+      "raw_total_chars": 1323725,
+      "raw_total_images": 113,
+      "raw_total_tables": 0,
+      "toc_total_entries": 60,
+      "toc_max_depth": 1,
+      "toc_group_node_count": 1,
+      "toc_unique_files_referenced": 58,
+      "current": {
+        "chapter_count": 63,
+        "total_chars": 1309149,
+        "total_images": 113,
+        "total_tables": 0,
+        "short_chapters": 6,
+        "exact_title_dup_groups": 0,
+        "exact_title_dup_extra": 0,
+        "chapter_num_prefix_dup_groups": 0,
+        "chapter_num_prefix_dup_extra": 0,
+        "fabricated_placeholder_titles": 12
+      },
+      "hybrid": {
+        "chapter_count": 63,
+        "total_chars": 1309149,
+        "total_images": 113,
+        "total_tables": 0,
+        "short_chapters": 6,
+        "low_confidence_titles": 6,
+        "same_scope_title_dup_extra": 0,
+        "chapter_num_prefix_dup_groups_before_disambiguation": 0,
+        "distinct_group_paths": 1,
+        "max_group_depth": 1,
+        "folded_beyond_2_levels": 0,
+        "outlier_long_chapters": 1,
+        "fabricated_placeholder_titles": 0
+      },
+      "severe_flag_count": 0,
+      "warn_flag_count": 1,
+      "flags": [
+        {
+          "level": "warn",
+          "code": "fabricated_title_current",
+          "message": "当前生产算法生成了 12 个无来源依据的\"第N章\"占位标题"
+        },
+        {
+          "level": "info",
+          "code": "outlier_long_hybrid",
+          "message": "混合方案有 1 章明显偏长（>中位数3倍），建议人工看一眼是不是又把多章合并了"
+        }
+      ]
+    },
+    {
+      "book_id": "27ac707db1",
+      "title": "《毛泽东年谱(全九卷)》",
+      "spine_doc_count": 159,
+      "toc_like_doc_count": 10,
+      "raw_total_chars": 4070296,
+      "raw_total_images": 26,
+      "raw_total_tables": 1,
+      "toc_total_entries": 123,
+      "toc_max_depth": 1,
+      "toc_group_node_count": 9,
+      "toc_unique_files_referenced": 114,
+      "current": {
+        "chapter_count": 148,
+        "total_chars": 4008082,
+        "total_images": 26,
+        "total_tables": 1,
+        "short_chapters": 32,
+        "exact_title_dup_groups": 9,
+        "exact_title_dup_extra": 9,
+        "chapter_num_prefix_dup_groups": 0,
+        "chapter_num_prefix_dup_extra": 0,
+        "fabricated_placeholder_titles": 62
+      },
+      "hybrid": {
+        "chapter_count": 148,
+        "total_chars": 4008082,
+        "total_images": 26,
+        "total_tables": 1,
+        "short_chapters": 32,
+        "low_confidence_titles": 43,
+        "same_scope_title_dup_extra": 0,
+        "chapter_num_prefix_dup_groups_before_disambiguation": 0,
+        "distinct_group_paths": 9,
+        "max_group_depth": 1,
+        "folded_beyond_2_levels": 0,
+        "outlier_long_chapters": 25,
+        "fabricated_placeholder_titles": 0
+      },
+      "severe_flag_count": 0,
+      "warn_flag_count": 1,
+      "flags": [
+        {
+          "level": "warn",
+          "code": "fabricated_title_current",
+          "message": "当前生产算法生成了 62 个无来源依据的\"第N章\"占位标题"
+        },
+        {
+          "level": "info",
+          "code": "outlier_long_hybrid",
+          "message": "混合方案有 25 章明显偏长（>中位数3倍），建议人工看一眼是不是又把多章合并了"
+        }
+      ]
+    },
     {
       "book_id": "a4d5b1e569",
       "title": "中国的奋斗 : 1600—2000",
@@ -120,6 +228,55 @@
           "level": "info",
           "code": "outlier_long_hybrid",
           "message": "混合方案有 15 章明显偏长（>中位数3倍），建议人工看一眼是不是又把多章合并了"
+        }
+      ]
+    },
+    {
+      "book_id": "7af45644a7",
+      "title": "反三国演义（上下卷）",
+      "spine_doc_count": 6,
+      "toc_like_doc_count": 0,
+      "raw_total_chars": 322735,
+      "raw_total_images": 3,
+      "raw_total_tables": 0,
+      "toc_total_entries": 65,
+      "toc_max_depth": 0,
+      "toc_group_node_count": 0,
+      "toc_unique_files_referenced": 5,
+      "current": {
+        "chapter_count": 6,
+        "total_chars": 321075,
+        "total_images": 3,
+        "total_tables": 0,
+        "short_chapters": 1,
+        "exact_title_dup_groups": 0,
+        "exact_title_dup_extra": 0,
+        "chapter_num_prefix_dup_groups": 0,
+        "chapter_num_prefix_dup_extra": 0,
+        "fabricated_placeholder_titles": 6
+      },
+      "hybrid": {
+        "chapter_count": 6,
+        "total_chars": 321075,
+        "total_images": 3,
+        "total_tables": 0,
+        "short_chapters": 1,
+        "low_confidence_titles": 1,
+        "same_scope_title_dup_extra": 0,
+        "chapter_num_prefix_dup_groups_before_disambiguation": 0,
+        "distinct_group_paths": 0,
+        "max_group_depth": 0,
+        "folded_beyond_2_levels": 0,
+        "outlier_long_chapters": 0,
+        "fabricated_placeholder_titles": 0
+      },
+      "severe_flag_count": 0,
+      "warn_flag_count": 1,
+      "flags": [
+        {
+          "level": "warn",
+          "code": "fabricated_title_current",
+          "message": "当前生产算法生成了 6 个无来源依据的\"第N章\"占位标题"
         }
       ]
     },
@@ -252,6 +409,60 @@
       ]
     },
     {
+      "book_id": "e62eb79774",
+      "title": "巨婴国: 国内心理学家系统透视中国国民性",
+      "spine_doc_count": 115,
+      "toc_like_doc_count": 2,
+      "raw_total_chars": 304442,
+      "raw_total_images": 0,
+      "raw_total_tables": 0,
+      "toc_total_entries": 111,
+      "toc_max_depth": 1,
+      "toc_group_node_count": 7,
+      "toc_unique_files_referenced": 111,
+      "current": {
+        "chapter_count": 112,
+        "total_chars": 300257,
+        "total_images": 0,
+        "total_tables": 0,
+        "short_chapters": 2,
+        "exact_title_dup_groups": 0,
+        "exact_title_dup_extra": 0,
+        "chapter_num_prefix_dup_groups": 0,
+        "chapter_num_prefix_dup_extra": 0,
+        "fabricated_placeholder_titles": 112
+      },
+      "hybrid": {
+        "chapter_count": 112,
+        "total_chars": 300257,
+        "total_images": 0,
+        "total_tables": 0,
+        "short_chapters": 2,
+        "low_confidence_titles": 1,
+        "same_scope_title_dup_extra": 0,
+        "chapter_num_prefix_dup_groups_before_disambiguation": 0,
+        "distinct_group_paths": 7,
+        "max_group_depth": 1,
+        "folded_beyond_2_levels": 0,
+        "outlier_long_chapters": 1,
+        "fabricated_placeholder_titles": 0
+      },
+      "severe_flag_count": 0,
+      "warn_flag_count": 1,
+      "flags": [
+        {
+          "level": "warn",
+          "code": "fabricated_title_current",
+          "message": "当前生产算法生成了 112 个无来源依据的\"第N章\"占位标题"
+        },
+        {
+          "level": "info",
+          "code": "outlier_long_hybrid",
+          "message": "混合方案有 1 章明显偏长（>中位数3倍），建议人工看一眼是不是又把多章合并了"
+        }
+      ]
+    },
+    {
       "book_id": "9ebc35620d",
       "title": "明史纪事本末",
       "spine_doc_count": 101,
@@ -361,6 +572,60 @@
           "level": "info",
           "code": "outlier_long_hybrid",
           "message": "混合方案有 12 章明显偏长（>中位数3倍），建议人工看一眼是不是又把多章合并了"
+        }
+      ]
+    },
+    {
+      "book_id": "a3fe86de96",
+      "title": "毛泽东大传(终极版)",
+      "spine_doc_count": 510,
+      "toc_like_doc_count": 0,
+      "raw_total_chars": 6598512,
+      "raw_total_images": 1,
+      "raw_total_tables": 0,
+      "toc_total_entries": 510,
+      "toc_max_depth": 1,
+      "toc_group_node_count": 11,
+      "toc_unique_files_referenced": 510,
+      "current": {
+        "chapter_count": 499,
+        "total_chars": 6498945,
+        "total_images": 1,
+        "total_tables": 0,
+        "short_chapters": 2,
+        "exact_title_dup_groups": 1,
+        "exact_title_dup_extra": 1,
+        "chapter_num_prefix_dup_groups": 76,
+        "chapter_num_prefix_dup_extra": 381,
+        "fabricated_placeholder_titles": 0
+      },
+      "hybrid": {
+        "chapter_count": 499,
+        "total_chars": 6498945,
+        "total_images": 1,
+        "total_tables": 0,
+        "short_chapters": 2,
+        "low_confidence_titles": 0,
+        "same_scope_title_dup_extra": 1,
+        "chapter_num_prefix_dup_groups_before_disambiguation": 76,
+        "distinct_group_paths": 11,
+        "max_group_depth": 1,
+        "folded_beyond_2_levels": 0,
+        "outlier_long_chapters": 0,
+        "fabricated_placeholder_titles": 0
+      },
+      "severe_flag_count": 0,
+      "warn_flag_count": 2,
+      "flags": [
+        {
+          "level": "warn",
+          "code": "dup_chapter_num_current",
+          "message": "当前生产算法里有 76 组重复章号前缀（多 381 条），无法从标题看出属于哪一册"
+        },
+        {
+          "level": "warn",
+          "code": "dup_same_scope_hybrid",
+          "message": "混合方案里同一分组下仍有 1 条重复标题（分组没能消歧）"
         }
       ]
     },
@@ -683,5 +948,10 @@
       ]
     }
   ],
-  "parse_errors": []
+  "parse_errors": [
+    {
+      "file_hash": "b5a2bee171",
+      "error": "读取失败：\"There is no item named 'nav.' in the archive\""
+    }
+  ]
 }
