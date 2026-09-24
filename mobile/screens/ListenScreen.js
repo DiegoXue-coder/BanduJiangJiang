@@ -22,7 +22,7 @@ import {
   IconChevronLeft, IconList, IconVolume, IconBolt,
   IconPlayerTrackPrevFilled, IconPlayerTrackNextFilled,
   IconPlayerPlayFilled, IconPlayerPauseFilled,
-  IconMicrophone, IconSend,
+  IconMicrophone, IconSend, IconVolumeOff,
 } from '@tabler/icons-react-native';
 import {
   getBookContext, getChapterText, getStandardChapterText, getTtsPlayUrl, getTtsWithTiming, transcribeAudio,
@@ -48,6 +48,7 @@ const {
   splitCaptionPhrases,
   rangeIndexAtOffset,
   stripCitationMarkersForSpeech,
+  expectsExternalSearch,
 } = require('../lib/listenPlayback');
 
 // 听书页使用最终原型 listen-final-prototype 的中性炭黑暗色，不再沿用旧版
@@ -671,7 +672,8 @@ export default function ListenScreen({ route, navigation }) {
   // 命名前缀hf（hands-free），跟方案A的auto*/方案B旧的vad*/手动的
   // recordingRef等等这些完全不共用，就是要做到用户明确要求的"两条线互不
   // 干扰"。
-  const [hfStage, setHfStage] = useState(''); // '' | 'listening' | 'thinking' | 'replying'
+  const [hfStage, setHfStage] = useState(''); // '' | 'listening' | 'transcribing' | 'searching' | 'thinking' | 'replying'
+  const [hfReplyMuted, setHfReplyMuted] = useState(false);
   const [voiceMessages, setVoiceMessages] = useState([]);
   const [conversationExpanded, setConversationExpanded] = useState(false);
   const [conversationDrawerMounted, setConversationDrawerMounted] = useState(false);
@@ -1047,6 +1049,7 @@ export default function ListenScreen({ route, navigation }) {
   // “清空引用”和“原生 unload 真正完成”之间存在窗口，Android 上会在正文
   // 已恢复后仍听到 AI 尾音，甚至让下一段回复与正文同时播放。
   const hfReplySoundRef = useRef(null);
+  const hfReplyMutedRef = useRef(false);
   const hfReplyInterruptingRef = useRef(false);
   const hfTimingRef = useRef(null);
   const hfResumePendingRef = useRef(false);
@@ -2129,6 +2132,16 @@ export default function ListenScreen({ route, navigation }) {
     await sound.unloadAsync().catch(() => {});
   }
 
+  function toggleHandsFreeReplyMute() {
+    const next = !hfReplyMutedRef.current;
+    hfReplyMutedRef.current = next;
+    setHfReplyMuted(next);
+    const sound = hfReplySoundRef.current;
+    if (!sound) return;
+    if (next) sound.pauseAsync().catch(() => {});
+    else sound.playAsync().catch(() => {});
+  }
+
   // 环境监听时metering回调判定"开始说话"之后调用的入口——停掉环境监听那路
   // 录音（内容不要，只是刚才拿来测音量），马上开一路全新的录音正式捕捉
   // 这句话，全程留在朗读字幕视图（phase不变，不跳转），跟手动"打断"那套
@@ -2282,6 +2295,7 @@ export default function ListenScreen({ route, navigation }) {
         return null;
       }
       markHfTiming('开始ASR识别', 'asr_start');
+      setHfStage('transcribing');
       const text = await transcribeAudio(
         uri,
         FileSystem.uploadAsync,
@@ -2321,7 +2335,7 @@ export default function ListenScreen({ route, navigation }) {
       finishHandsFreeTurn();
       return;
     }
-    setHfStage('thinking');
+    setHfStage(expectsExternalSearch(text) ? 'searching' : 'thinking');
     const chapter = chaptersRef.current[posRef.current.chapterIdx];
     let relevant = true;
     if (skipIntent) {
@@ -2357,6 +2371,8 @@ export default function ListenScreen({ route, navigation }) {
   async function askHandsFree(question) {
     if (!hfActiveRef.current) return;
     hfReplyInterruptingRef.current = false;
+    hfReplyMutedRef.current = false;
+    setHfReplyMuted(false);
     markHfTiming(`开始AI问答 questionChars=${question.length}`);
     setHfTimingMeta({ questionChars: question.length });
     const chapter = chaptersRef.current[posRef.current.chapterIdx];
@@ -2477,7 +2493,7 @@ export default function ListenScreen({ route, navigation }) {
           }
         });
         if (item.seq === 1) markHfTiming('首段TTS请求播放', 'first_tts_play_request');
-        sound.playAsync().then(() => {
+        const beginReplyPlayback = () => sound.playAsync().then(() => {
           if (!hfTimingRef.current?.marks?.answer_audio_start) {
             markHfTiming('AI回复TTS开始播放', 'answer_audio_start');
             if (handsFreeEnabled && !handsFreeMuted && !MANUAL_HOLD_TO_TALK) {
@@ -2492,6 +2508,7 @@ export default function ListenScreen({ route, navigation }) {
           playing = false;
           playNext();
         });
+        if (!hfReplyMutedRef.current) beginReplyPlayback();
         prefetchNext();
       };
 
@@ -2693,7 +2710,7 @@ export default function ListenScreen({ route, navigation }) {
 
   function handleVoiceModeMicGestureStart() {
     if (MANUAL_HOLD_TO_TALK) {
-      if (hfStage === 'listening' || hfStage === 'thinking') return;
+      if (hfStage && hfStage !== 'replying') return;
       setVoiceMicError('');
       voiceHoldActiveRef.current = true;
       console.log(`[免提诊断] mic gestureStart stage=${hfStage || 'idle'} muted=${handsFreeMuted} phase=${phase}`);
@@ -2717,6 +2734,8 @@ export default function ListenScreen({ route, navigation }) {
     voiceHoldActiveRef.current = false;
     console.log(`[免提诊断] mic gestureEnd reason=${reason} stage=${hfStage || 'idle'} resolve=${!!hfListenResolveRef.current}`);
     setHandsFreeMuted(true);
+    setHfStage('transcribing');
+    setConversationExpanded(true);
     hfListenResolveRef.current?.(reason);
   }
 
@@ -3132,11 +3151,23 @@ export default function ListenScreen({ route, navigation }) {
       ? '打断追问'
       : hfStage === 'listening'
         ? '正在听你说'
-        : hfStage === 'thinking'
-          ? '正在思考…'
-          : '开始提问';
+        : hfStage === 'transcribing'
+          ? '正在转写…'
+          : hfStage === 'searching'
+            ? '正在联网查证…'
+            : hfStage === 'thinking'
+              ? '正在思考…'
+              : '开始提问';
   const voiceModeStatus = (!hfStage && voiceMicError) ? voiceMicError : hfStage
-    ? (hfStage === 'listening' ? '已锁定当前句 · 松开发送' : hfStage === 'thinking' ? '正在识别和思考…' : '按住麦克风打断追问')
+    ? (hfStage === 'listening'
+      ? '已锁定当前句 · 松开发送'
+      : hfStage === 'transcribing'
+        ? '正在把语音转成文字…'
+        : hfStage === 'searching'
+          ? '正在联网查证…'
+          : hfStage === 'thinking'
+            ? '正在理解问题…'
+            : '正在组织回答…')
     : handsFreeMuted
       ? (MANUAL_HOLD_TO_TALK ? '按住左下角麦克风随时提问' : '已静音 · 继续讲书')
       : MANUAL_HOLD_TO_TALK
@@ -3414,10 +3445,32 @@ export default function ListenScreen({ route, navigation }) {
                           )}
                           {!!hfStage && (
                             <View style={styles.voiceStageRow}>
-                              {hfStage === 'thinking' && <ActivityIndicator size="small" color={EMBER.emberBright} />}
+                              {['transcribing', 'searching', 'thinking'].includes(hfStage) && (
+                                <ActivityIndicator size="small" color={EMBER.emberBright} />
+                              )}
                               <Text style={styles.voiceStageText}>
-                                {hfStage === 'listening' ? '正在聆听…' : hfStage === 'thinking' ? 'AI正在思考…' : 'AI正在回答'}
+                                {hfStage === 'listening'
+                                  ? '正在聆听…'
+                                  : hfStage === 'transcribing'
+                                    ? '正在转写你的问题…'
+                                    : hfStage === 'searching'
+                                      ? '正在联网查证…'
+                                      : hfStage === 'thinking'
+                                        ? '正在理解问题…'
+                                        : '正在组织回答…'}
                               </Text>
+                              {hfStage === 'replying' && (
+                                <TouchableOpacity
+                                  style={styles.replyMuteButton}
+                                  onPress={toggleHandsFreeReplyMute}
+                                  accessibilityRole="button"
+                                  accessibilityLabel={hfReplyMuted ? '继续朗读AI回答' : '暂停朗读AI回答'}
+                                >
+                                  {hfReplyMuted
+                                    ? <IconVolumeOff color={EMBER.emberBright} size={16} strokeWidth={2} />
+                                    : <IconVolume color={EMBER.paperDim} size={16} strokeWidth={2} />}
+                                </TouchableOpacity>
+                              )}
                             </View>
                           )}
                         </>
@@ -3742,6 +3795,11 @@ const styles = StyleSheet.create({
   conversationSpeaker: { marginBottom: 5, fontSize: 10, color: EMBER.paperDim },
   voiceStageRow: { minHeight: 28, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
   voiceStageText: { fontSize: 12, color: EMBER.inkSoft },
+  replyMuteButton: {
+    width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center',
+    borderWidth: StyleSheet.hairlineWidth, borderColor: 'rgba(239,237,232,0.18)',
+    backgroundColor: EMBER.dusk2,
+  },
 
   chatBody: { flexGrow: 1, padding: 16, gap: 14 },
   contextChip: {

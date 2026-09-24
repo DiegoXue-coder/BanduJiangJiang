@@ -128,6 +128,23 @@ function stripCitationMarkersForSpeech(text) {
     .trim();
 }
 
+function expectsExternalSearch(question) {
+  const text = String(question || '');
+  const bookAnchors = ['这段', '这句', '这里', '这一段', '这一句', '原文', '书中', '书里', '上文', '上面这'];
+  if (bookAnchors.some((hint) => text.includes(hint))) return false;
+  const directHints = [
+    '现在', '最近', '目前', '最新', '近期', '如今', '现状', '今年', '去年', '作者',
+    '现实中', '真实存在', '历史上', '新闻', '报道', '官方', '数据是', '规模', '统计',
+    '创始人', '创办人', '谁创办', '成立于', '营收', '收入', '利润', '财报', '市值',
+    '总部', '首席执行官', 'CEO', '员工数', '市场份额',
+  ];
+  if (directHints.some((hint) => text.includes(hint))) return true;
+  const entities = ['事务所', '公司', '企业', '机构', '品牌', '银行', '基金', '大学', '医院', '组织'];
+  const factQuestions = ['是什么', '是谁', '有哪些', '哪几', '多少', '怎么样', '如何', '情况'];
+  return entities.some((hint) => text.includes(hint))
+    && factQuestions.some((hint) => text.includes(hint));
+}
+
 module.exports = {
   captionOpacityForIndex,
   captionVisualStateForSentence,
@@ -139,4 +156,5 @@ module.exports = {
   splitCaptionPhrases,
   rangeIndexAtOffset,
   stripCitationMarkersForSpeech,
+  expectsExternalSearch,
 };

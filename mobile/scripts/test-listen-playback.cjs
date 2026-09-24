@@ -10,6 +10,7 @@ const {
   splitCaptionPhrases,
   rangeIndexAtOffset,
   stripCitationMarkersForSpeech,
+  expectsExternalSearch,
 } = require('../lib/listenPlayback');
 
 assert.equal(captionOpacityForIndex(3, 3), 1, '当前句必须首帧直接亮起');
@@ -114,5 +115,8 @@ assert.equal(
   '数据来自公开报告，请查看来源。',
   '连续引用编号及其标点前空格应一起清理',
 );
+assert.equal(expectsExternalSearch('八大会计师事务所是什么？'), true);
+assert.equal(expectsExternalSearch('这些事务所的营收怎么样？'), true);
+assert.equal(expectsExternalSearch('这段话里的公司是什么意思？'), false);
 
 console.log('listen playback tests passed');
