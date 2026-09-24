@@ -28,7 +28,11 @@ DASHSCOPE_BASE_URL = (
     or "https://dashscope.aliyuncs.com/api/v1"
 )
 DASHSCOPE_SEARCH_MODEL = os.environ.get("DASHSCOPE_SEARCH_MODEL", "qwen-flash")
-EXTERNAL_SEARCH_TIMEOUT_S = float(os.environ.get("EXTERNAL_SEARCH_TIMEOUT_S", "6"))
+# 2026-09-24真机复测实测：千问联网搜索（返回10条来源那种）经常要6.7~6.9秒，
+# 原来设的6秒超时几乎每次都卡在临界点被打断，表现成"总是搜不到"，误以为是
+# 千问不稳定——其实是自己的超时设短了。改成12秒留够余量，仍然是"几秒级"，
+# 不会让用户觉得卡死；触发条件本身已经过滤了大部分问题，只有少数会走这条路。
+EXTERNAL_SEARCH_TIMEOUT_S = float(os.environ.get("EXTERNAL_SEARCH_TIMEOUT_S", "12"))
 
 # ── 触发判断（MVP：规则+关键词，不是模型自主决定要不要查）──────────────────
 # 真正"模型自己判断该不该查"需要接 DeepSeek 的工具调用做两轮对话，风险和工作量
@@ -45,6 +49,25 @@ _REAL_WORLD_HINTS = ("作者", "现实中", "真实存在", "历史上", "新闻
 # 书中"这类明确指向当前文本的说法就不触发，避免真正在问书内内容时被现实世界
 # 关键词(比如"作者现在这段话什么意思"里的"作者""现在")误触发。
 _BOOK_ANCHORED_HINTS = ("这段", "这句", "这里", "这一段", "这一句", "原文", "书中", "书里", "上文", "上面这")
+
+
+# 问题里出现"这本书/本书"这类模糊指代时，单独拿这句话去搜引擎搜不到东西——
+# "这本书的作者现在在干什么"这句话本身没有任何具名实体，千问不知道"这本书"
+# 指的是谁，实测会搜出完全不相关的结果（2026-09-24真机复测发现，问罗伯特·清崎
+# 近况，搜索结果却是几个不相关的作家）。有书名/作者信息时，把它们拼进搜索
+# 查询里再发给千问，不改变发给用户看的问题原文，只改这一次搜索请求本身。
+_VAGUE_BOOK_REFERENCE_HINTS = ("这本书", "本书", "这本")
+
+
+def build_external_search_query(question: str, book_title: str, author: str) -> str:
+    """给模糊指代的问题补上具体书名/作者再去搜；没有模糊指代或没有书名信息时
+    原样返回问题，不画蛇添足。"""
+    if not book_title:
+        return question
+    if not any(h in (question or "") for h in _VAGUE_BOOK_REFERENCE_HINTS):
+        return question
+    author_part = f"，作者{author}" if author else ""
+    return f"《{book_title}》{author_part}。{question}"
 
 
 def should_trigger_external_search(question: str, style: str, available_evidence_type: str) -> bool:

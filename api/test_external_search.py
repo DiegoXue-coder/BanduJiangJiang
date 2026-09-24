@@ -2,11 +2,33 @@ import unittest
 from unittest.mock import AsyncMock
 
 from api.external_search import (
+    build_external_search_query,
     fetch_external_evidence,
     format_external_evidence_block,
     label_source_trust,
     should_trigger_external_search,
 )
+
+
+class BuildSearchQueryTests(unittest.TestCase):
+    def test_vague_reference_gets_book_title_prepended(self):
+        q = build_external_search_query("这本书的作者现在在干什么？", "富爸爸商学院", "罗伯特·清崎")
+        self.assertIn("富爸爸商学院", q)
+        self.assertIn("罗伯特·清崎", q)
+        self.assertIn("这本书的作者现在在干什么", q)
+
+    def test_no_vague_reference_returns_question_unchanged(self):
+        q = build_external_search_query("罗伯特·清崎现在在干什么？", "富爸爸商学院", "罗伯特·清崎")
+        self.assertEqual(q, "罗伯特·清崎现在在干什么？")
+
+    def test_no_book_title_returns_question_unchanged(self):
+        q = build_external_search_query("这本书的作者现在在干什么？", "", "")
+        self.assertEqual(q, "这本书的作者现在在干什么？")
+
+    def test_no_author_still_prepends_title_only(self):
+        q = build_external_search_query("这本书的作者现在在干什么？", "富爸爸商学院", "")
+        self.assertIn("富爸爸商学院", q)
+        self.assertNotIn("，作者", q)
 
 
 class TriggerRuleTests(unittest.TestCase):

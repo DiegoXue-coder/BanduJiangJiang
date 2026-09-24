@@ -44,6 +44,7 @@ try:
     # 本地/仓库里 main.py 被当作 api.main 这个包的一部分导入（测试文件都是
     # `from api.main import ...`），这种情况下用绝对包路径导入。
     from api.external_search import (
+        build_external_search_query,
         fetch_external_evidence,
         format_external_evidence_block,
         should_trigger_external_search,
@@ -53,6 +54,7 @@ except ModuleNotFoundError:
     # main:app` 启动，main.py 被当成顶层模块跑，这时候没有 `api` 这个包可导入，
     # external_search.py 是跟 main.py 同目录的普通文件，退回不带包前缀的导入。
     from external_search import (  # type: ignore[no-redef]
+        build_external_search_query,
         fetch_external_evidence,
         format_external_evidence_block,
         should_trigger_external_search,
@@ -2824,8 +2826,9 @@ async def _prepare_ask(req: AskRequest, request: Request, user_id: int | None = 
     # 不阻塞主问答。选型依据和真实对比测试见 docs/项目管理/14/15 号文档。
     external_sources: list[dict] = []
     if should_trigger_external_search(req.question, req.style, available_evidence_type):
+        search_query = build_external_search_query(req.question, ctx.bookTitle, ctx.author)
         evidence = await fetch_external_evidence(
-            _http, os.environ.get("DASHSCOPE_API_KEY", ""), req.question
+            _http, os.environ.get("DASHSCOPE_API_KEY", ""), search_query
         )
         if evidence:
             context_block += format_external_evidence_block(evidence) + "\n"
