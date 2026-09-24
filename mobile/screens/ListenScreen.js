@@ -254,6 +254,9 @@ const CAPTION_CANDIDATE_DWELL_MS = 500;
 const CAPTION_MOMENTUM_WAIT_MS = 80;
 const CAPTION_MOMENTUM_SAFETY_MS = 450;
 const CAPTION_STALL_REALIGN_MS = 600;
+// Android 的 ScrollView + flexWrap 文本在字体重排或长时间播放后，偶尔会吞掉
+// 单次 scrollTo。朗读期间低频复核当前位置，只有偏离中心时才会真正滚动。
+const ANDROID_CAPTION_FOLLOW_WATCHDOG_MS = 400;
 const LISTEN_PROGRESS_SAVE_INTERVAL_MS = 3000;
 const LISTEN_HISTORY_TURNS = 4;
 const NARRATION_STATUS_INTERVAL_MS = 100;
@@ -704,6 +707,7 @@ export default function ListenScreen({ route, navigation }) {
   const captionContentHeightRef = useRef(0);
   const captionCurrentScrollYRef = useRef(0);
   const captionCenterCorrectionTimerRef = useRef(null);
+  const captionFollowRetryTimersRef = useRef([]);
   const captionCandidateDwellTimerRef = useRef(null);
   const captionPendingScrollRef = useRef(null);
   // true=用户手指正在拖/惯性滚动尚未停，此时不能被代码的自动滚动打断。
@@ -786,6 +790,28 @@ export default function ListenScreen({ route, navigation }) {
     requestAnimationFrame(() => scrollCaptionToPhrase(pending.index, pending.animated));
   }, [scrollCaptionToPhrase]);
 
+  const clearCaptionFollowRetries = useCallback(() => {
+    captionFollowRetryTimersRef.current.forEach(clearTimeout);
+    captionFollowRetryTimersRef.current = [];
+  }, []);
+
+  const followCaptionPhrase = useCallback((index, animated = true) => {
+    if (captionUserScrollingRef.current) return;
+    captionPendingScrollRef.current = { index, animated };
+    clearCaptionFollowRetries();
+    // 首次定位负责正常跟随；后两次覆盖 Android 字体换行、布局提交和
+    // ScrollView 偶发吞掉 scrollTo 的时序，不会在用户手动浏览时执行。
+    [0, 100, 280].forEach((delay) => {
+      const timer = setTimeout(() => {
+        captionFollowRetryTimersRef.current = captionFollowRetryTimersRef.current
+          .filter((item) => item !== timer);
+        if (captionUserScrollingRef.current || index !== captionPhraseIndexRef.current) return;
+        scrollCaptionToPhrase(index, delay === 0 ? animated : false);
+      }, delay);
+      captionFollowRetryTimersRef.current.push(timer);
+    });
+  }, [clearCaptionFollowRetries, scrollCaptionToPhrase]);
+
   const clearCaptionIdleTimer = useCallback(() => {
     if (captionIdleTimerRef.current) {
       clearTimeout(captionIdleTimerRef.current);
@@ -817,12 +843,11 @@ export default function ListenScreen({ route, navigation }) {
       }
       captionUserScrollingRef.current = false;
       const activeIndex = captionPhraseIndexRef.current;
-      captionPendingScrollRef.current = { index: activeIndex, animated: true };
       // 候选句的按钮消失会让flexWrap重新排版；等React提交新布局后再居中，
       // 避免拿“按钮仍在时”的旧y坐标弹回一个略偏的位置。
-      requestAnimationFrame(() => scrollCaptionToPhrase(activeIndex, true));
+      requestAnimationFrame(() => followCaptionPhrase(activeIndex, true));
     }, CAPTION_IDLE_SNAPBACK_MS);
-  }, [clearCaptionIdleTimer, scrollCaptionToPhrase]);
+  }, [clearCaptionIdleTimer, followCaptionPhrase]);
 
   const clearCaptionCandidate = useCallback((restartSnapback = true) => {
     if (candidateSentenceIndexRef.current == null) return;
@@ -887,9 +912,8 @@ export default function ListenScreen({ route, navigation }) {
     clearCaptionIdleTimer();
     clearCaptionMomentumWait();
     clearCaptionMomentumSafety();
-    captionPendingScrollRef.current = { index, animated: false };
-    retryPendingCaptionScroll();
-  }, [clearCaptionIdleTimer, clearCaptionMomentumSafety, clearCaptionMomentumWait, retryPendingCaptionScroll]);
+    followCaptionPhrase(index, false);
+  }, [clearCaptionIdleTimer, clearCaptionMomentumSafety, clearCaptionMomentumWait, followCaptionPhrase]);
 
   const armCaptionMomentumSafety = useCallback(() => {
     clearCaptionMomentumSafety();
@@ -923,9 +947,10 @@ export default function ListenScreen({ route, navigation }) {
     captionMomentumActiveRef.current = false;
     clearCaptionIdleTimer();
     clearCaptionCandidateDwell();
+    clearCaptionFollowRetries();
     clearCaptionMomentumWait();
     clearCaptionMomentumSafety();
-  }, [clearCaptionCandidate, clearCaptionCandidateDwell, clearCaptionIdleTimer, clearCaptionMomentumSafety, clearCaptionMomentumWait]);
+  }, [clearCaptionCandidate, clearCaptionCandidateDwell, clearCaptionFollowRetries, clearCaptionIdleTimer, clearCaptionMomentumSafety, clearCaptionMomentumWait]);
   const handleCaptionScrollEndDrag = useCallback(() => {
     captionSuppressPressUntilRef.current = Date.now() + 250;
     clearCaptionMomentumWait();
@@ -975,10 +1000,21 @@ export default function ListenScreen({ route, navigation }) {
   // onLayout/onContentSizeChange一到就重试，不再只等固定60ms后永久放弃。
   useEffect(() => {
     if (captionUserScrollingRef.current) return undefined;
-    captionPendingScrollRef.current = { index: captionPhraseIndex, animated: true };
-    const t = setTimeout(retryPendingCaptionScroll, 0);
-    return () => clearTimeout(t);
-  }, [captionPhraseIndex, currentCaption, retryPendingCaptionScroll]);
+    followCaptionPhrase(captionPhraseIndex, true);
+    return clearCaptionFollowRetries;
+  }, [captionPhraseIndex, currentCaption, clearCaptionFollowRetries, followCaptionPhrase]);
+
+  // 真机兜底：Android 长章播放时即使没有新的 React 布局事件，原生文本仍
+  // 可能在字体加载或换行后漂移。守护器只在非手势状态复核，iOS保持原路径。
+  useEffect(() => {
+    if (Platform.OS !== 'android' || phase !== 'playing') return undefined;
+    const interval = setInterval(() => {
+      if (captionUserScrollingRef.current || hfActiveRef.current) return;
+      const index = captionPhraseIndexRef.current;
+      scrollCaptionToPhrase(index, false);
+    }, ANDROID_CAPTION_FOLLOW_WATCHDOG_MS);
+    return () => clearInterval(interval);
+  }, [phase, scrollCaptionToPhrase]);
 
   // playOneParagraph在playFrom的异步循环里调用，如果直接读voice/rate这两个
   // state会有闭包过期的问题（循环开始时闭包捕获的是当时的值，用户中途在
