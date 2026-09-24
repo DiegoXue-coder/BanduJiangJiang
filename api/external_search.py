@@ -39,7 +39,11 @@ EXTERNAL_SEARCH_TIMEOUT_S = float(os.environ.get("EXTERNAL_SEARCH_TIMEOUT_S", "1
 # 都更大，MVP先用便宜可靠的规则版，命中现实世界/时效性信号才触发；正式版可以
 # 升级成工具调用，见15号任务卡"待确认"部分之外的后续方向。
 _TIME_SENSITIVE_HINTS = ("现在", "最近", "目前", "最新", "近期", "如今", "现状", "今年", "去年")
-_REAL_WORLD_HINTS = ("作者", "现实中", "真实存在", "历史上", "新闻", "报道", "官方", "数据是", "规模", "统计")
+_REAL_WORLD_HINTS = (
+    "作者", "现实中", "真实存在", "历史上", "新闻", "报道", "官方", "数据是", "规模", "统计",
+    "创始人", "创办人", "谁创办", "成立于", "营收", "收入", "利润", "财报", "市值", "总部",
+    "首席执行官", "CEO", "员工数", "市场份额",
+)
 # 2026-09-24真机实测发现的真bug：听书页打断提问时，context永远带着当前正在念
 # 的那句(selection非空)，导致available_evidence_type变成user_selection——原来
 # 要求"必须是insufficient_context/general_knowledge才触发"这条限制，会让所有
@@ -57,17 +61,38 @@ _BOOK_ANCHORED_HINTS = ("这段", "这句", "这里", "这一段", "这一句", 
 # 近况，搜索结果却是几个不相关的作家）。有书名/作者信息时，把它们拼进搜索
 # 查询里再发给千问，不改变发给用户看的问题原文，只改这一次搜索请求本身。
 _VAGUE_BOOK_REFERENCE_HINTS = ("这本书", "本书", "这本")
+_VAGUE_CONVERSATION_REFERENCE_HINTS = (
+    "这些", "这几家", "上述", "前面提到", "刚才提到", "他们", "它们", "其创始", "其营收",
+)
 
 
-def build_external_search_query(question: str, book_title: str, author: str) -> str:
+def build_external_search_query(
+    question: str, book_title: str, author: str, history: list[dict] | None = None,
+) -> str:
     """给模糊指代的问题补上具体书名/作者再去搜；没有模糊指代或没有书名信息时
-    原样返回问题，不画蛇添足。"""
-    if not book_title:
-        return question
-    if not any(h in (question or "") for h in _VAGUE_BOOK_REFERENCE_HINTS):
-        return question
-    author_part = f"，作者{author}" if author else ""
-    return f"《{book_title}》{author_part}。{question}"
+    原样返回问题，不画蛇添足。连续追问里的“这些/他们/上述”需要最近对话才能
+    知道指的是谁，只把当前一句交给搜索服务会丢掉具名实体。"""
+    text = question or ""
+    prefixes: list[str] = []
+    if book_title and any(h in text for h in _VAGUE_BOOK_REFERENCE_HINTS):
+        author_part = f"，作者{author}" if author else ""
+        prefixes.append(f"书籍背景：《{book_title}》{author_part}")
+
+    if any(h in text for h in _VAGUE_CONVERSATION_REFERENCE_HINTS):
+        recent_turns = []
+        for turn in (history or [])[-4:]:
+            role = turn.get("role")
+            content = str(turn.get("content", "")).strip()
+            if role not in ("user", "assistant") or not content:
+                continue
+            label = "用户" if role == "user" else "助手"
+            recent_turns.append(f"{label}：{content[:600]}")
+        if recent_turns:
+            prefixes.append("最近对话：" + "\n".join(recent_turns))
+
+    if not prefixes:
+        return text
+    return "\n".join(prefixes) + f"\n当前要查证的问题：{text}"
 
 
 def should_trigger_external_search(question: str, style: str, available_evidence_type: str) -> bool:
@@ -108,12 +133,26 @@ def label_source_trust(url: str) -> str:
     return "来源未知"
 
 
+EXTERNAL_SEARCH_MAX_ATTEMPTS = int(os.environ.get("EXTERNAL_SEARCH_MAX_ATTEMPTS", "2"))
+
+
 async def fetch_external_evidence(client: httpx.AsyncClient, api_key: str, question: str) -> dict | None:
-    """调千问查一次。成功返回 {"sources": [{"index","title","url","site_name",
-    "trust"}...]}；任何失败（超时/异常/没有key/空结果）一律返回 None，调用方
-    按"没查到"处理，不抛异常拖垮主问答——外部查证从设计上就是可选的补充信息。"""
+    """调千问查，最多重试一次。真实测试反复验证过：同一个问题不同时刻调用，
+    有时候能拿到十条真实来源，有时候search_results就是空数组——不是问题
+    本身没有信息，是这个搜索服务单次调用本身就有一定失败率(2026-09-24决策层
+    多轮真机复测确认过，不是猜测)。第一次没拿到结果时马上重试一次，明显能
+    提高命中率，成本是失败这条路径上多等几秒——只有第一次真的没查到才会
+    触发这多出来的一次调用，成功路径完全不受影响。"""
     if not api_key:
         return None
+    for attempt in range(EXTERNAL_SEARCH_MAX_ATTEMPTS):
+        result = await _fetch_once(client, api_key, question)
+        if result:
+            return result
+    return None
+
+
+async def _fetch_once(client: httpx.AsyncClient, api_key: str, question: str) -> dict | None:
     try:
         resp = await client.post(
             f"{DASHSCOPE_BASE_URL}/services/aigc/text-generation/generation",
@@ -135,7 +174,8 @@ async def fetch_external_evidence(client: httpx.AsyncClient, api_key: str, quest
     except Exception:
         return None
 
-    raw_sources = (((data.get("output") or {}).get("search_info") or {}).get("search_results") or [])
+    output = data.get("output") or {}
+    raw_sources = ((output.get("search_info") or {}).get("search_results") or [])
     if not raw_sources:
         return None
     sources = [
@@ -151,7 +191,11 @@ async def fetch_external_evidence(client: httpx.AsyncClient, api_key: str, quest
     ]
     if not sources:
         return None
-    return {"sources": sources}
+    choices = output.get("choices") or []
+    reference_text = ""
+    if choices:
+        reference_text = str(((choices[0] or {}).get("message") or {}).get("content") or "").strip()
+    return {"reference_text": reference_text[:5000], "sources": sources}
 
 
 def format_external_evidence_block(evidence: dict) -> str:
@@ -161,4 +205,15 @@ def format_external_evidence_block(evidence: dict) -> str:
         f"[{s['index']}] {s['title']}（{s['site_name']}，{s['trust']}）：{s['url']}"
         for s in evidence["sources"]
     ]
-    return "【外部查证来源，仅供参考，需在回答中用[数字]标明引用哪一条，多条来源冲突要如实说明分歧】\n" + "\n".join(lines)
+    reference_text = str(evidence.get("reference_text") or "").strip()
+    sections = []
+    if reference_text:
+        sections.append(
+            "【外部查证参考摘要，由搜索模型根据下列来源生成，不等于已经核实；"
+            "只采用能被来源支持的内容】\n" + reference_text
+        )
+    sections.append(
+        "【外部查证来源，仅供参考，需在回答中用[数字]标明引用哪一条，多条来源冲突要如实说明分歧】\n"
+        + "\n".join(lines)
+    )
+    return "\n".join(sections)

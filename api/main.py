@@ -746,6 +746,7 @@ SYSTEM_PROMPT = """你是"伴读讲讲"，一位亲切的读书陪伴助手。
 - 明确区分四类信息：书中上下文明确表达的内容、根据上下文作出的推断、你掌握的一般背景知识、下面【外部查证来源】里的查证结果——回答里要让读者分得清哪句话是书里的、哪句是查来的、哪句是你自己的背景知识
 - 上下文不足以回答时，要自然地说明依据不足，并建议用户划选相关原文或切换到相关章节；没有收到【外部查证来源】时不要假装联网查过
 - 收到【外部查证来源】时，只能依据这些来源本身回答，用[数字]标明引用的是哪一条；多条来源说法不一致时要如实说明分歧，不能自己选一边当定论；这些来源不是你自己想验证就能验证的书内内容，不要跟书里的原文混在一起说
+- 【外部查证参考摘要】是搜索模型根据来源生成的二次整理，不是网页原文；只能采用其中带有对应[数字]引用、且与该来源标题主题一致的内容，回答中保留同一编号并用“根据查到的资料”表述。没有编号支撑的细节必须舍弃
 - 医疗、法律、政治、金融等高风险问题，没有可靠来源时不得作确定性事实判断，应提醒用户进一步查证；即使收到了外部查证来源，也不能把某条来源的说法包装成绝对正确的结论
 - 正常的文学理解和开放讨论可以提出解释，但要表明那是解读或推断，不要堆砌机械免责声明
 
@@ -2826,7 +2827,9 @@ async def _prepare_ask(req: AskRequest, request: Request, user_id: int | None = 
     # 不阻塞主问答。选型依据和真实对比测试见 docs/项目管理/14/15 号文档。
     external_sources: list[dict] = []
     if should_trigger_external_search(req.question, req.style, available_evidence_type):
-        search_query = build_external_search_query(req.question, ctx.bookTitle, ctx.author)
+        search_query = build_external_search_query(
+            req.question, ctx.bookTitle, ctx.author, req.history,
+        )
         evidence = await fetch_external_evidence(
             _http, os.environ.get("DASHSCOPE_API_KEY", ""), search_query
         )
@@ -2834,6 +2837,17 @@ async def _prepare_ask(req: AskRequest, request: Request, user_id: int | None = 
             context_block += format_external_evidence_block(evidence) + "\n"
             available_evidence_type = "external_fact"
             external_sources = evidence["sources"]
+        else:
+            # 真机反馈：查证已经触发但搜索本身没拿到结果时，模型看不到任何
+            # 【外部查证来源】标签块，跟"压根没触发查证"长得一模一样，只能
+            # 含糊地说"需要联网"，听起来像是从没尝试过——用户实测反馈过这个
+            # 措辞很容易让人误以为AI在推卸("你自己去联网")。这里明确告诉
+            # 模型"已经查过、只是没查到"，让它如实说清楚，不要说得像没试过。
+            context_block += (
+                "【外部查证：已尝试联网查证这个问题，但这次没有获得可用的搜索结果——"
+                "回答里要明确说明已经查证过、只是没有查到可靠信息，不要用"
+                "听起来像完全没有尝试过联网这类的措辞】\n"
+            )
 
     user_message = (context_block + f"\n用户问题：{req.question}") if context_block else req.question
     round_num = len(req.history) // 2 + 1

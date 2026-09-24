@@ -30,6 +30,25 @@ class BuildSearchQueryTests(unittest.TestCase):
         self.assertIn("富爸爸商学院", q)
         self.assertNotIn("，作者", q)
 
+    def test_followup_reference_gets_recent_conversation_context(self):
+        q = build_external_search_query(
+            "这些事务所的创始人是谁，营收状况怎么样？", "", "",
+            [
+                {"role": "user", "content": "八大会计师事务所是什么？"},
+                {"role": "assistant", "content": "后来合并为四大：德勤、普华永道、安永、毕马威。"},
+            ],
+        )
+        self.assertIn("德勤", q)
+        self.assertIn("普华永道", q)
+        self.assertIn("当前要查证的问题", q)
+
+    def test_non_referential_question_does_not_leak_history_into_search(self):
+        q = build_external_search_query(
+            "德勤目前的营收是多少？", "", "",
+            [{"role": "assistant", "content": "不相关的旧回答"}],
+        )
+        self.assertEqual(q, "德勤目前的营收是多少？")
+
 
 class TriggerRuleTests(unittest.TestCase):
     def test_socratic_never_triggers(self):
@@ -61,6 +80,11 @@ class TriggerRuleTests(unittest.TestCase):
 
     def test_real_world_hint_triggers_on_general_knowledge(self):
         self.assertTrue(should_trigger_external_search("这本书的作者是真实存在的历史人物吗", "default", "general_knowledge"))
+
+    def test_founder_and_revenue_followup_triggers(self):
+        self.assertTrue(should_trigger_external_search(
+            "这些事务所的创始人是谁，营收状况怎么样？", "simple", "current_context",
+        ))
 
 
 class TrustLabelTests(unittest.TestCase):
@@ -106,6 +130,19 @@ class FetchExternalEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["sources"][0]["trust"], "较可信")
         self.assertEqual(result["sources"][1]["trust"], "来源未知")
 
+    async def test_success_keeps_search_model_reference_text(self):
+        client = AsyncMock()
+        client.post.return_value = _FakeResponse(200, {
+            "output": {
+                "choices": [{"message": {"content": "德勤2025财年营收为……[1]"}}],
+                "search_info": {"search_results": [
+                    {"index": 1, "title": "年度营收", "url": "https://example.com/a", "site_name": "示例"},
+                ]},
+            }
+        })
+        result = await fetch_external_evidence(client, "key", "问题")
+        self.assertEqual(result["reference_text"], "德勤2025财年营收为……[1]")
+
     async def test_non_200_returns_none(self):
         client = AsyncMock()
         client.post.return_value = _FakeResponse(401, {})
@@ -138,12 +175,14 @@ class FetchExternalEvidenceTests(unittest.IsolatedAsyncioTestCase):
 class FormatBlockTests(unittest.TestCase):
     def test_format_includes_index_title_url_and_instruction(self):
         block = format_external_evidence_block({
+            "reference_text": "一条带引用的参考内容[1]。",
             "sources": [{"index": 1, "title": "标题", "url": "https://a.com", "site_name": "站点", "trust": "较可信"}]
         })
         self.assertIn("[1]", block)
         self.assertIn("标题", block)
         self.assertIn("https://a.com", block)
         self.assertIn("外部查证", block)
+        self.assertIn("一条带引用的参考内容[1]", block)
         self.assertIn("需在回答中用[数字]标明", block)
 
 
