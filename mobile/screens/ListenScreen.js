@@ -251,7 +251,6 @@ const CAPTION_MOMENTUM_WAIT_MS = 80;
 const CAPTION_MOMENTUM_SAFETY_MS = 450;
 const CAPTION_STALL_REALIGN_MS = 600;
 const ANDROID_CAPTION_FOLLOW_WATCHDOG_MS = 600;
-const CAPTION_FOLLOW_REVISION = '跟随 R6';
 const LISTEN_PROGRESS_SAVE_INTERVAL_MS = 3000;
 const LISTEN_HISTORY_TURNS = 4;
 const NARRATION_STATUS_INTERVAL_MS = 100;
@@ -326,6 +325,20 @@ function mergeParagraphsForNarration(paragraphs) {
   pending += buffer; // 结尾不满一句/不够长度的尾巴，直接并进最后一段，不丢内容
   if (pending) merged.push(pending);
   return merged;
+}
+
+// 真机反馈：用户在打断提问/免提提问时，AI经常回答"手头没有这段内容"，
+// 但用户明明已经听到了——旧逻辑只把"当前正在播的这一段"塞进context，
+// 用户往后跳过播放位置、或者问的是刚听完的上一段时，那段文字早就不在
+// "当前段"里了。改成把本章已经播放过的所有段落（含当前段）拼起来当
+// selection，AI手头就有听众实际听过的全部内容。经典公版文本单章通常
+// 不长，直接拼全量；只在极端长章节时从末尾截断，保证"刚听完的内容"
+// 优先保留，不会被章节开头的内容挤掉。
+const HEARD_CONTEXT_MAX_CHARS = 6000;
+function buildHeardChapterContext(paragraphs, paragraphIdx) {
+  if (!Array.isArray(paragraphs) || !paragraphs.length) return '';
+  const heard = paragraphs.slice(0, Math.max(0, paragraphIdx) + 1).join('');
+  return heard.length > HEARD_CONTEXT_MAX_CHARS ? heard.slice(-HEARD_CONTEXT_MAX_CHARS) : heard;
 }
 
 function splitCaptionSentences(text) {
@@ -403,7 +416,7 @@ function NarrationSentenceRow({ sentence, index, activeIndex, candidateIndex, ro
   const isCandidate = candidateIndex === index;
   const visualState = captionVisualStateForSentence(index, activeIndex);
   return (
-    <View ref={rowRef} style={styles.captionSentenceRow}>
+    <View ref={rowRef} style={[styles.captionSentenceRow, isCandidate && styles.captionSentenceRowCandidate]}>
       <Text
         suppressHighlighting
         style={[styles.captionParagraphText, styles.captionSentenceText, narrationPhraseStyle(visualState)]}
@@ -419,7 +432,7 @@ function NarrationSentenceRow({ sentence, index, activeIndex, candidateIndex, ro
             accessibilityRole="button"
             accessibilityLabel="从这句话开始播放"
           >
-            <IconPlayerPlayFilled color={EMBER.paper} size={12} />
+            <IconPlayerPlayFilled color={EMBER.paperDim} size={12} />
           </TouchableOpacity>
         </View>
       )}
@@ -549,6 +562,7 @@ export default function ListenScreen({ route, navigation }) {
   // false，不然上一段暂停过的状态会误跟着下一段。
   const [isManuallyPaused, setIsManuallyPaused] = useState(false);
   const [capturedText, setCapturedText] = useState('');
+  const capturedHeardContextRef = useRef('');
   const [question, setQuestion] = useState('');
   // 决策层这轮派发：连续追问改成对话式UI——这一轮打断期间的问答历史，
   // 既用来渲染屏幕上的对话线，也直接当streamAsk的history参数（跟消息
@@ -655,7 +669,7 @@ export default function ListenScreen({ route, navigation }) {
     const count = captionSentencesRef.current.length;
     const index = Math.max(0, Math.min(Number(rawIndex) || 0, count - 1));
     if (!count || !captionScrollRef.current) return false;
-    const useAnimation = Platform.OS === 'android' ? false : animated;
+    const useAnimation = animated;
     captionProgrammaticScrollUntilRef.current = Date.now() + (useAnimation ? 1000 : 180);
     try {
       captionScrollRef.current.scrollToIndex({ index, viewPosition: 0.5, animated: useAnimation });
@@ -1817,7 +1831,11 @@ export default function ListenScreen({ route, navigation }) {
     const { chapterIdx, paragraphIdx } = posRef.current;
     const chapter = chaptersRef.current[chapterIdx];
     const paragraphs = paragraphCacheRef.current[chapter?.id] || [];
+    // capturedText只用于给用户看"当前问的是这一段"，保持简短；真正发给
+    // AI的选段单独存一份完整版（含本章已播完的全部内容），两者分开，
+    // 展示不会因为拼了一整章而变成一堵文字墙。
     setCapturedText(paragraphs[paragraphIdx] || '');
+    capturedHeardContextRef.current = buildHeardChapterContext(paragraphs, paragraphIdx);
     setQuestion('');
     setConversation(promptHistoryRef.current.map((message) => ({ ...message, historical: true })));
     setPhase('paused');
@@ -2442,11 +2460,15 @@ export default function ListenScreen({ route, navigation }) {
       };
 
       markHfTiming('LLM请求开始', 'llm_start');
+      const heardContext = buildHeardChapterContext(
+        paragraphCacheRef.current[chapter?.id] || [],
+        posRef.current.paragraphIdx,
+      );
       hfAbortRef.current = streamAsk(
         {
           context: {
             bookTitle, author, chapterTitle: chapter?.title || '',
-            selection: currentCaption, pageText: '',
+            selection: heardContext || currentCaption, pageText: '',
             userHighlights: [], popularHighlights: [],
           },
           question,
@@ -2685,7 +2707,7 @@ export default function ListenScreen({ route, navigation }) {
       {
         context: {
           bookTitle, author, chapterTitle: chapter?.title || '',
-          selection: capturedText, pageText: '',
+          selection: capturedHeardContextRef.current || capturedText, pageText: '',
           userHighlights: [], popularHighlights: [],
         },
         question: q,
@@ -3095,9 +3117,6 @@ export default function ListenScreen({ route, navigation }) {
     </View>
   );
   const captionSentenceCount = captionSentences.length;
-  const captionMarkerTop = captionSentenceCount > 1
-    ? `${22 + (Math.min(captionSentenceIndex, captionSentenceCount - 1) / (captionSentenceCount - 1)) * 56}%`
-    : '48%';
   const drawerClosedOffset = Math.max(0, (mainStageHeight || 800) * 0.66 - 42);
   const drawerTranslateY = conversationDrawerProgress.interpolate({
     inputRange: [0, 1],
@@ -3222,13 +3241,6 @@ export default function ListenScreen({ route, navigation }) {
                         <ActivityIndicator color={EMBER.emberBright} />
                       ) : (
                         <>
-                          <View pointerEvents="none" style={styles.captionReadingRail}>
-                            <View style={styles.captionReadingLine} />
-                            <View style={[styles.captionReadingMarker, { top: captionMarkerTop }]} />
-                          </View>
-                          <Text pointerEvents="none" style={styles.captionFollowRevision}>
-                            {CAPTION_FOLLOW_REVISION}
-                          </Text>
                           <FlatList
                           ref={captionScrollRef}
                           data={captionSentences}
@@ -3642,6 +3654,10 @@ const styles = StyleSheet.create({
   // 完整句子作为FlatList原生列表项，scrollToIndex可跨平台稳定定位。
   captionSentenceRow: {
     width: '100%', flexDirection: 'row', alignItems: 'center', minHeight: 32,
+    borderRadius: 10, paddingHorizontal: 8, marginHorizontal: -8,
+  },
+  captionSentenceRowCandidate: {
+    backgroundColor: 'rgba(239,237,232,0.07)',
   },
   captionSentenceText: { flex: 1 },
   captionParagraphText: {
@@ -3653,21 +3669,10 @@ const styles = StyleSheet.create({
   },
   captionJumpButton: {
     width: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center',
-    backgroundColor: EMBER.ember, borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(239,237,232,0.58)', elevation: 4,
-  },
-  captionReadingRail: { position: 'absolute', left: 27, top: '17%', bottom: '17%', width: 10, alignItems: 'center', zIndex: 2 },
-  captionReadingLine: { position: 'absolute', top: 0, bottom: 0, width: 0.5, backgroundColor: 'rgba(239,237,232,0.1)' },
-  captionReadingMarker: {
-    position: 'absolute', top: '48%', width: 7, height: 7, borderRadius: 3.5,
-    backgroundColor: EMBER.emberBright, shadowColor: EMBER.emberBright,
-    shadowOpacity: 0.32, shadowRadius: 7, shadowOffset: { width: 0, height: 0 }, elevation: 3,
+    backgroundColor: 'rgba(239,237,232,0.16)', borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(239,237,232,0.3)', elevation: 4,
   },
   captionCountText: { fontSize: 11, color: EMBER.paperDim, marginTop: 17, alignSelf: 'flex-start' },
-  captionFollowRevision: {
-    position: 'absolute', top: 2, right: 1, zIndex: 3,
-    fontSize: 9, color: EMBER.emberBright, opacity: 0.72,
-  },
   captionVoiceStatus: {
     position: 'absolute', left: 0, right: 0, bottom: 7,
     fontSize: 11, color: EMBER.paperDim, textAlign: 'center',
