@@ -2481,6 +2481,12 @@ _SOCRATIC_HIGH_RISK_RULE = (
     '一般阅读交流不要附加机械免责声明。'
 )
 
+_SOCRATIC_OPEN_INTERPRETATION_RULE = (
+    '开放解读规则：当用户询问文学意象、象征、人物动机、留白或表达效果“可以怎样理解”时，'
+    '不能只把问题原样反问回去。必须先给出至少一种由当前原文细节支撑的可能解释，并明确'
+    '这是可讨论的解读而非作者唯一确定的答案；之后才可以用一个问题继续引导用户。'
+)
+
 _MEDICAL_ACTION_PREFIX = (
     '不能仅根据书中内容自行停药、改变剂量或用其他方法替代治疗；'
     '请先咨询医生或其他合格医疗专业人士。'
@@ -2625,6 +2631,7 @@ def _build_ask_messages(
         system_prompt, max_tokens = _socratic_system_prompt(round_num)
         system_prompt = (
             f"{system_prompt}\n\n{_SOCRATIC_EVIDENCE_RULE}\n\n{_SOCRATIC_HIGH_RISK_RULE}"
+            f"\n\n{_SOCRATIC_OPEN_INTERPRETATION_RULE}"
         )
         if safety_prefix:
             system_prompt += (
