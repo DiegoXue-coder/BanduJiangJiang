@@ -1,6 +1,6 @@
 const ACTIVE_CAPTION_OPACITY = 1;
-const READ_CAPTION_OPACITY = 0.36;
-const UPCOMING_CAPTION_OPACITY = 0.62;
+const READ_CAPTION_OPACITY = 0.58;
+const UPCOMING_CAPTION_OPACITY = 0.74;
 const DEFAULT_CAPTION_PHRASE_MAX_LENGTH = 14;
 
 function captionOpacityForIndex(index, activeIndex) {
@@ -15,7 +15,8 @@ function centeredScrollOffset({ layout, containerY = 0, viewportHeight = 0, cont
   return Math.max(0, Math.min(maxY, targetCenter - viewportHeight / 2));
 }
 
-function playbackRecoveryAction({ status, phase, isManuallyPaused }) {
+function playbackRecoveryAction({ status, phase, isManuallyPaused, voiceInteractionActive = false }) {
+  if (voiceInteractionActive) return 'none';
   if (phase !== 'playing') return 'none';
   if (!status || status.isLoaded !== true) return isManuallyPaused ? 'wait-for-user' : 'rebuild';
   if (isManuallyPaused) return 'keep-paused';
@@ -76,6 +77,11 @@ function resolveJumpTarget({ chunkLengths, chapterIdx, charOffset }) {
   return null; // 不可达：lengths非空时循环一定会在isLast命中返回
 }
 
+function captionVisualStateForSentence(sentenceIndex, activeSentenceIndex) {
+  if (sentenceIndex === activeSentenceIndex) return 1;
+  return sentenceIndex < activeSentenceIndex ? 0 : 2;
+}
+
 function splitCaptionPhrases(text, maxLength = DEFAULT_CAPTION_PHRASE_MAX_LENGTH) {
   if (!text) return [];
   const safeMaxLength = Math.max(8, Number(maxLength) || DEFAULT_CAPTION_PHRASE_MAX_LENGTH);
@@ -116,6 +122,7 @@ function rangeIndexAtOffset(ranges, offset) {
 
 module.exports = {
   captionOpacityForIndex,
+  captionVisualStateForSentence,
   centeredScrollOffset,
   playbackRecoveryAction,
   preparedSoundMatches,

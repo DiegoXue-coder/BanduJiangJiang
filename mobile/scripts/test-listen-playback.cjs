@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const {
   captionOpacityForIndex,
+  captionVisualStateForSentence,
   centeredScrollOffset,
   playbackRecoveryAction,
   preparedSoundMatches,
@@ -11,8 +12,16 @@ const {
 } = require('../lib/listenPlayback');
 
 assert.equal(captionOpacityForIndex(3, 3), 1, '当前句必须首帧直接亮起');
-assert.equal(captionOpacityForIndex(2, 3), 0.36);
-assert.equal(captionOpacityForIndex(4, 3), 0.62);
+assert.equal(captionOpacityForIndex(2, 3), 0.58);
+assert.equal(captionOpacityForIndex(4, 3), 0.74);
+assert.equal(captionVisualStateForSentence(3, 3), 1);
+assert.equal(captionVisualStateForSentence(2, 3), 0);
+assert.equal(captionVisualStateForSentence(4, 3), 2);
+assert.deepEqual(
+  [3, 3, 4].map((sentenceIndex) => captionVisualStateForSentence(sentenceIndex, 3)),
+  [1, 1, 2],
+  '同一句里的多个短语必须一起高亮，不能半句话一块一块变化',
+);
 
 assert.equal(centeredScrollOffset({
   layout: { y: 300, height: 40 }, containerY: 200, viewportHeight: 400, contentHeight: 1200,
@@ -31,6 +40,9 @@ assert.equal(playbackRecoveryAction({ status: { isLoaded: true, isPlaying: false
 assert.equal(playbackRecoveryAction({ status: { isLoaded: true, isPlaying: true }, phase: 'playing', isManuallyPaused: false }), 'none');
 assert.equal(playbackRecoveryAction({ status: { isLoaded: false }, phase: 'playing', isManuallyPaused: true }), 'wait-for-user');
 assert.equal(playbackRecoveryAction({ status: null, phase: 'paused', isManuallyPaused: false }), 'none');
+assert.equal(playbackRecoveryAction({
+  status: null, phase: 'playing', isManuallyPaused: false, voiceInteractionActive: true,
+}), 'none', '语音问答期间回前台不得重建正文朗读');
 
 const prepared = { ci: 2, pi: 7, voice: 'voice-a', rate: '+10%' };
 assert.equal(preparedSoundMatches(prepared, {

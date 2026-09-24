@@ -39,6 +39,7 @@ const {
   resolveListenParagraph,
 } = require('../lib/listenContinuity');
 const {
+  captionVisualStateForSentence,
   centeredScrollOffset,
   playbackRecoveryAction,
   preparedSoundMatches,
@@ -398,7 +399,7 @@ function buildCaptionContext(chunks, currentIndex) {
 // Pressable/TouchableOpacity——点按跳转朗读复用的是这同一批盒子。
 function NarrationParagraph({
   text,
-  activePhraseIndex,
+  activeSentenceIndex,
   candidateSentenceIndex,
   candidatePhraseIndex,
   onContainerLayout,
@@ -412,22 +413,18 @@ function NarrationParagraph({
     ...phrase,
     sentenceIndex: rangeIndexAtOffset(sentences, phrase.start),
   })), [sentences, text]);
-  const previousActivePhraseRef = useRef(activePhraseIndex);
-  const previousActivePhraseIndex = previousActivePhraseRef.current;
-
-  useEffect(() => {
-    previousActivePhraseRef.current = activePhraseIndex;
-  }, [activePhraseIndex]);
-
   return (
     <View style={styles.captionFlow} onLayout={onContainerLayout}>
       {phrases.map((phrase, index) => {
         const showJumpButton = candidateSentenceIndex === phrase.sentenceIndex && candidatePhraseIndex === index;
-        const visualState = index < activePhraseIndex ? 0 : index === activePhraseIndex ? 1 : 2;
-        const previousVisualState = index < previousActivePhraseIndex
-          ? 0
-          : index === previousActivePhraseIndex ? 1 : 2;
-        const shouldAnimate = index === activePhraseIndex || index === previousActivePhraseIndex;
+        // 短语仍然是自动居中的定位锚点，但视觉明暗按完整语义句变化。Android
+        // 会把每个顶层 Text 当作独立布局盒；逐短语改字号/透明度会让半句话一块
+        // 一块地跳动，并在长章频繁重排。整句统一样式能保持连续阅读，同时不
+        // 牺牲短语级的滚动定位精度。
+        const visualState = captionVisualStateForSentence(
+          phrase.sentenceIndex,
+          activeSentenceIndex,
+        );
         const phraseProps = {
           phrase,
           onLayout: onPhraseLayout ? (e) => onPhraseLayout(index, e.nativeEvent.layout) : undefined,
@@ -436,19 +433,10 @@ function NarrationParagraph({
         };
         return (
           <React.Fragment key={`${phrase.start}-${phrase.end}`}>
-            {shouldAnimate ? (
-              <AnimatedNarrationPhrase
-                {...phraseProps}
-                initialVisualState={previousVisualState}
-                visualState={visualState}
-                active={index === activePhraseIndex}
-              />
-            ) : (
-              <StaticNarrationPhrase
-                {...phraseProps}
-                visualState={visualState}
-              />
-            )}
+            <StaticNarrationPhrase
+              {...phraseProps}
+              visualState={visualState}
+            />
             {showJumpButton && (
               <View style={styles.captionJumpButtonSlot}>
                 <TouchableOpacity
@@ -472,12 +460,12 @@ function NarrationParagraph({
 
 function narrationPhraseStyle(visualState) {
   if (visualState === 1) {
-    return { color: EMBER.paper, opacity: 1, fontSize: 19, lineHeight: 34.2, fontWeight: '500' };
+    return { color: EMBER.paper, opacity: 1, fontWeight: '400' };
   }
   if (visualState === 0) {
-    return { color: EMBER.paperDim, opacity: 0.34, fontSize: 17, lineHeight: 32.3, fontWeight: '400' };
+    return { color: EMBER.paperDim, opacity: 0.58, fontWeight: '400' };
   }
-  return { color: EMBER.inkSoft, opacity: 0.62, fontSize: 17, lineHeight: 32.3, fontWeight: '400' };
+  return { color: EMBER.inkSoft, opacity: 0.74, fontWeight: '400' };
 }
 
 function StaticNarrationPhrase({ phrase, visualState, onLayout, onPressIn, onPress }) {
@@ -491,62 +479,6 @@ function StaticNarrationPhrase({ phrase, visualState, onLayout, onPressIn, onPre
     >
       {phrase.text}
     </Text>
-  );
-}
-
-// 只让“刚念完”和“正在念”两个短语持有动画值。这样上一句会在半秒内
-// 自然淡出、当前句同时点亮并略微放大，又不会为整章数百个短语常驻数百个
-// Animated.Value，避免长章节额外挤占 Android JS 线程。
-function AnimatedNarrationPhrase({
-  phrase,
-  initialVisualState,
-  visualState,
-  active,
-  onLayout,
-  onPressIn,
-  onPress,
-}) {
-  const progress = useRef(new Animated.Value(initialVisualState)).current;
-
-  useEffect(() => {
-    Animated.timing(progress, {
-      toValue: visualState,
-      duration: 500,
-      useNativeDriver: false,
-    }).start();
-  }, [progress, visualState]);
-
-  return (
-    <Animated.Text
-      onLayout={onLayout}
-      onPressIn={onPressIn}
-      onPress={onPress}
-      suppressHighlighting
-      style={[
-        styles.captionParagraphText,
-        {
-          color: progress.interpolate({
-            inputRange: [0, 1, 2],
-            outputRange: [EMBER.paperDim, EMBER.paper, EMBER.inkSoft],
-          }),
-          opacity: progress.interpolate({
-            inputRange: [0, 1, 2],
-            outputRange: [0.34, 1, 0.62],
-          }),
-          fontSize: progress.interpolate({
-            inputRange: [0, 1, 2],
-            outputRange: [17, 19, 17],
-          }),
-          lineHeight: progress.interpolate({
-            inputRange: [0, 1, 2],
-            outputRange: [32.3, 34.2, 32.3],
-          }),
-          fontWeight: active ? '500' : '400',
-        },
-      ]}
-    >
-      {phrase.text}
-    </Animated.Text>
   );
 }
 
@@ -963,6 +895,10 @@ export default function ListenScreen({ route, navigation }) {
   const micGestureHandlersRef = useRef({ grant: null, release: null, cancel: null });
   const drawerGestureHandlersRef = useRef({ expand: null, collapse: null, toggle: null });
   const hfAbortRef = useRef(null);
+  // 正文和 AI 回复必须各自拥有音频引用。此前共用 soundRef，回答收尾时
+  // “清空引用”和“原生 unload 真正完成”之间存在窗口，Android 上会在正文
+  // 已恢复后仍听到 AI 尾音，甚至让下一段回复与正文同时播放。
+  const hfReplySoundRef = useRef(null);
   const hfReplyInterruptingRef = useRef(false);
   const hfTimingRef = useRef(null);
   const hfResumePendingRef = useRef(false);
@@ -1604,6 +1540,12 @@ export default function ListenScreen({ route, navigation }) {
         status,
         phase: phaseRef.current,
         isManuallyPaused: manuallyPausedRef.current,
+        // 语音提问沿用 playing 页面承载字幕，不能只凭 phase 判断正文应恢复。
+        // Android 在录音授权/音频模式切换时可能触发 AppState 变化；这道屏障
+        // 防止回前台恢复与 ASR/AI TTS 同时启动。
+        voiceInteractionActive: hfActiveRef.current
+          || !!hfRecordingRef.current
+          || !!hfReplySoundRef.current,
       });
       console.log(`[听书恢复] ${reason} action=${action} loaded=${!!status?.isLoaded} playing=${!!status?.isPlaying}`);
       if (action === 'rebuild') {
@@ -1993,6 +1935,15 @@ export default function ListenScreen({ route, navigation }) {
     });
   }
 
+  async function stopHandsFreeReplySound() {
+    const sound = hfReplySoundRef.current;
+    hfReplySoundRef.current = null;
+    if (!sound) return;
+    try { sound.setOnPlaybackStatusUpdate(null); } catch (_) {}
+    await sound.stopAsync().catch(() => {});
+    await sound.unloadAsync().catch(() => {});
+  }
+
   // 环境监听时metering回调判定"开始说话"之后调用的入口——停掉环境监听那路
   // 录音（内容不要，只是刚才拿来测音量），马上开一路全新的录音正式捕捉
   // 这句话，全程留在朗读字幕视图（phase不变，不跳转），跟手动"打断"那套
@@ -2012,11 +1963,13 @@ export default function ListenScreen({ route, navigation }) {
     hfActiveRef.current = true;
     epochRef.current += 1;
     startHfTiming(interruptingReply ? 'AI回复中二次打断' : '正文朗读中免提打断');
+    // 先给触摸反馈，再做 Android 上可能较慢的 stop/unload 与录音模式切换。
+    setHfStage('listening');
     (async () => {
       await stopSound();
+      await stopHandsFreeReplySound();
       await stopHandsFreeAmbient(); // 等它真的放开麦克风，再开正式录音那一路，两路录音先后而不是同时存在
       markHfTiming('打断音频并释放环境监听');
-      setHfStage('listening');
       await hfListenTurnLoop({ skipIntent: forceMic });
     })();
   }
@@ -2223,6 +2176,7 @@ export default function ListenScreen({ route, navigation }) {
     let prepared = null;
     let markedPlayEnd = false;
     let firstTtsQueued = false;
+    let replyClosing = false;
     let seq = 0;
     const replyId = ++voiceMessageIdRef.current;
     const queue = [];
@@ -2239,7 +2193,7 @@ export default function ListenScreen({ route, navigation }) {
       };
 
       const prefetchNext = async () => {
-        if (prepared || preparing || queue.length === 0) return;
+        if (replyClosing || prepared || preparing || queue.length === 0) return;
         const item = queue.shift();
         preparing = true;
         try {
@@ -2247,7 +2201,7 @@ export default function ListenScreen({ route, navigation }) {
             { uri: getTtsPlayUrl(item.text, voiceRef.current, rateRef.current) },
             { shouldPlay: false },
           );
-          if (epoch !== epochRef.current || !hfActiveRef.current) {
+          if (replyClosing || epoch !== epochRef.current || !hfActiveRef.current) {
             sound.unloadAsync().catch(() => {});
             return;
           }
@@ -2261,7 +2215,7 @@ export default function ListenScreen({ route, navigation }) {
       };
 
       const playNext = async () => {
-        if (playing) return;
+        if (replyClosing || playing) return;
         if (epoch !== epochRef.current || !hfActiveRef.current) {
           maybeResolve();
           return;
@@ -2302,7 +2256,7 @@ export default function ListenScreen({ route, navigation }) {
             return;
           }
         }
-        soundRef.current = sound;
+        hfReplySoundRef.current = sound;
         sound.setOnPlaybackStatusUpdate((s) => {
           // !isLoaded 不等于自然播放完成：它也可能是音频对象切换期间的
           // 瞬时状态或真正的加载错误。此前把两者合并处理，会提前 unload
@@ -2311,7 +2265,7 @@ export default function ListenScreen({ route, navigation }) {
             if (s.error) {
               markHfTiming(`AI回复播放状态错误 ${s.error}`);
               sound.unloadAsync().catch(() => {});
-              if (soundRef.current === sound) soundRef.current = null;
+              if (hfReplySoundRef.current === sound) hfReplySoundRef.current = null;
               playing = false;
               playNext();
             }
@@ -2322,7 +2276,7 @@ export default function ListenScreen({ route, navigation }) {
           }
           if (s.didJustFinish) {
             sound.unloadAsync().catch(() => {});
-            if (soundRef.current === sound) soundRef.current = null;
+            if (hfReplySoundRef.current === sound) hfReplySoundRef.current = null;
             playing = false;
             playNext();
           }
@@ -2453,10 +2407,21 @@ export default function ListenScreen({ route, navigation }) {
             streamDone = true;
             maybeResolve();
           },
-          onError: () => {
+          onError: async () => {
             hfAbortRef.current = null;
             markHfTiming('AI问答失败');
+            replyClosing = true;
             streamDone = true;
+            queue.length = 0;
+            const unusedPrepared = prepared;
+            prepared = null;
+            if (unusedPrepared?.sound) {
+              try { unusedPrepared.sound.setOnPlaybackStatusUpdate(null); } catch (_) {}
+              await unusedPrepared.sound.stopAsync().catch(() => {});
+              await unusedPrepared.sound.unloadAsync().catch(() => {});
+            }
+            await stopHandsFreeReplySound();
+            playing = false;
             resolve();
           },
         },
@@ -2466,10 +2431,7 @@ export default function ListenScreen({ route, navigation }) {
     if (!replyWasInterrupted) {
       await stopHandsFreeAmbient();
     }
-    if (soundRef.current) {
-      soundRef.current.unloadAsync().catch(() => {});
-      soundRef.current = null;
-    }
+    await stopHandsFreeReplySound();
     if (!hfActiveRef.current) return;
     if (replyWasInterrupted) return;
     if (MANUAL_HOLD_TO_TALK) {
@@ -2485,9 +2447,11 @@ export default function ListenScreen({ route, navigation }) {
   // 播完的追问窗口安静下来）——恢复朗读，并且如果免提总开关还开着、没被
   // 静音，重新开一路环境监听录音接回。
   function finishHandsFreeTurn() {
+    if (!hfActiveRef.current) return;
     hfActiveRef.current = false;
     hfReplyInterruptingRef.current = false;
     setHfStage('');
+    setConversationExpanded(false);
     const { chapterIdx, paragraphIdx } = posRef.current;
     epochRef.current += 1;
     hfResumePendingRef.current = true;
@@ -2495,6 +2459,7 @@ export default function ListenScreen({ route, navigation }) {
     const epoch = epochRef.current;
     (async () => {
       await stopSound();
+      await stopHandsFreeReplySound();
       await restorePlaybackAudioMode().catch(() => {});
       playFrom(chapterIdx, paragraphIdx, epoch);
     })();
@@ -2521,6 +2486,7 @@ export default function ListenScreen({ route, navigation }) {
     }
     hfAbortRef.current?.();
     hfAbortRef.current = null;
+    stopHandsFreeReplySound();
     const rec = hfRecordingRef.current;
     hfRecordingRef.current = null;
     if (rec) {
@@ -3156,7 +3122,7 @@ export default function ListenScreen({ route, navigation }) {
                           <View style={{ height: Math.max(0, captionViewportHeight / 2 - 20) }} />
                           <NarrationParagraph
                             text={currentCaption}
-                            activePhraseIndex={captionPhraseIndex}
+                            activeSentenceIndex={captionSentenceIndex}
                             candidateSentenceIndex={candidateSentenceIndex}
                             candidatePhraseIndex={candidatePhraseIndex}
                             onContainerLayout={({ nativeEvent }) => {
