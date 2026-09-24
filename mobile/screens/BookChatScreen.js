@@ -5,7 +5,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity,
-  StyleSheet, Alert, Keyboard, Platform, ActivityIndicator,
+  StyleSheet, Alert, Keyboard, Platform, ActivityIndicator, Linking,
 } from 'react-native';
 import { BottomSheetScrollView } from '@gorhom/bottom-sheet';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -33,7 +33,45 @@ const SENTENCE_END = /([。！？；\n])/;
 const MIN_TTS_CHUNK_LEN = 20;
 const MAX_RECORDING_MS = 55000; // 腾讯云ASR单次连接音频时长硬上限60秒，留5秒安全余量
 
-function Bubble({ role, text, theme }) {
+// AI质量第二阶段：触发过外部查证时，回答会带一份来源列表(externalSources)。
+// 正文本身不展示链接（跟SYSTEM_PROMPT"不用Markdown"的要求一致），来源单独
+// 放在气泡下方一条可展开的"查看来源"里——只是给用户核实用的辅助信息，默认
+// 收起，不打断阅读；availableEvidenceType/来源本身不代表内容已被核验过，
+// 这点跟后端的注释保持一致的理解，这里不重复宣称"已验证"。
+function SourcesRow({ sources, theme }) {
+  const [expanded, setExpanded] = useState(false);
+  if (!sources || sources.length === 0) return null;
+  return (
+    <View style={styles.sourcesWrap}>
+      <TouchableOpacity onPress={() => setExpanded(v => !v)} style={styles.sourcesToggle}>
+        <Text style={[styles.sourcesToggleText, { color: theme.textMuted }]}>
+          {expanded ? '收起来源' : `查看来源（${sources.length}）`}
+        </Text>
+      </TouchableOpacity>
+      {expanded && sources.map((s, i) => (
+        <TouchableOpacity
+          key={`${s.url}-${i}`}
+          style={styles.sourceItem}
+          onPress={() => s.url && Linking.openURL(s.url).catch(() => {})}
+        >
+          <Text
+            style={[
+              styles.sourceTrustTag,
+              { color: s.trust === '较可信' ? theme.accent : theme.textMuted, borderColor: s.trust === '较可信' ? theme.accent : theme.cardBorder },
+            ]}
+          >
+            {s.trust || '来源未知'}
+          </Text>
+          <Text style={[styles.sourceTitle, { color: theme.text }]} numberOfLines={1}>
+            {s.title || s.siteName || s.url}
+          </Text>
+        </TouchableOpacity>
+      ))}
+    </View>
+  );
+}
+
+function Bubble({ role, text, sources, theme }) {
   const isUser = role === 'user';
   return (
     <View style={[
@@ -45,6 +83,7 @@ function Bubble({ role, text, theme }) {
       <Text style={[styles.bubbleText, { color: isUser ? theme.text : theme.text }]}>
         {text}
       </Text>
+      {!isUser && <SourcesRow sources={sources} theme={theme} />}
     </View>
   );
 }
@@ -428,11 +467,15 @@ export default function BookChatScreen({
           setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 30);
           flushSentences(false);
         },
-        onDone: (answer) => {
+        onDone: (answer, _evidenceType, externalSources) => {
           flushSentences(true);
           setThinking(false);
           setStreamingId(null);
           abortStreamRef.current = null;
+          if (externalSources && externalSources.length > 0 && assistantMsgId !== null) {
+            const id = assistantMsgId;
+            setMessages(prev => prev.map(m => (m.id === id ? { ...m, sources: externalSources } : m)));
+          }
           saveQaHistory({ bookId, bookTitle, chapterTitle, question: q, answer, selection, cfiRange, style }).catch(() => {});
         },
         onError: (e) => {
@@ -612,7 +655,7 @@ export default function BookChatScreen({
             {selection ? '针对这段文字提问，或者随便聊聊' : '用语音或文字提问'}
           </Text>
         )}
-        {messages.map(m => <Bubble key={m.id} role={m.role} text={m.text} theme={theme} />)}
+        {messages.map(m => <Bubble key={m.id} role={m.role} text={m.text} sources={m.sources} theme={theme} />)}
         {isThinking && streamingId === null && <TypingBubble theme={theme} />}
       </BottomSheetScrollView>
 
@@ -734,6 +777,12 @@ const styles = StyleSheet.create({
   bubbleUser: { alignSelf: 'flex-end' },
   bubbleAI:   { alignSelf: 'flex-start' },
   bubbleText: { fontSize: 14, lineHeight: 22 },
+  sourcesWrap: { marginTop: 8 },
+  sourcesToggle: { paddingVertical: 2 },
+  sourcesToggleText: { fontSize: 11.5 },
+  sourceItem: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 4 },
+  sourceTrustTag: { fontSize: 10, borderWidth: 1, borderRadius: 4, paddingHorizontal: 4, paddingVertical: 1 },
+  sourceTitle: { flex: 1, fontSize: 11.5 },
   typingText: { letterSpacing: 6 },
 
   statusRow: {

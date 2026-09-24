@@ -682,7 +682,9 @@ export function streamAsk({ context, question, style = 'simple', history = [] },
       if (payload.delta) onDelta(payload.delta);
       else if (payload.done) {
         // 第二个参数只表示请求里可用的上下文，不表示回答已经由该来源核验。
-        onDone(payload.answer, payload.availableEvidenceType || payload.evidenceType);
+        // 第三个参数(externalSources)只在触发过外部查证时非空，旧调用方不传
+        // 第三个回调参数也不受影响。
+        onDone(payload.answer, payload.availableEvidenceType || payload.evidenceType, payload.externalSources || []);
       }
       else if (payload.error) onError(new Error(payload.error));
     }
