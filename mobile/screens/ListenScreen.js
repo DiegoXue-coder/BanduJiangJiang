@@ -2467,9 +2467,6 @@ export default function ListenScreen({ route, navigation }) {
         paragraphCacheRef.current[chapter?.id] || [],
         posRef.current.paragraphIdx,
       );
-      if (Platform.OS === 'android') {
-        console.log(`[上下文诊断] 免提提问 chapterId=${chapter?.id} paragraphIdx=${posRef.current.paragraphIdx} 段落总数=${(paragraphCacheRef.current[chapter?.id] || []).length} heardContext长度=${heardContext.length} 尾部50字=${JSON.stringify(heardContext.slice(-50))}`);
-      }
       hfAbortRef.current = streamAsk(
         {
           context: {
@@ -2709,9 +2706,6 @@ export default function ListenScreen({ route, navigation }) {
     setPhase('thinking');
     const chapter = chaptersRef.current[posRef.current.chapterIdx];
     let fullAnswer = '';
-    if (Platform.OS === 'android') {
-      console.log(`[上下文诊断] 打断提问 capturedHeardContext长度=${capturedHeardContextRef.current.length} capturedText长度=${capturedText.length} 尾部50字=${JSON.stringify(capturedHeardContextRef.current.slice(-50))}`);
-    }
     abortAskRef.current = streamAsk(
       {
         context: {
