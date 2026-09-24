@@ -71,6 +71,41 @@ function SourcesRow({ sources, theme }) {
   );
 }
 
+// 真机反馈：正文里的[1][2]这类引用编号一开始只是纯文字，点了没反应，用户
+// 得先自己去展开下面的"查看来源"才能核对——不符合"点数字直接看来源"的直觉。
+// 按[数字]这个模式切开文字，命中的编号在sources里能找到对应链接时，单独渲染
+// 成一段可点的Text（RN原生支持嵌套Text各自带onPress），点了直接跳转链接，
+// 不用先手动展开来源列表；找不到对应链接（比如流式过程中sources还没到）
+// 就原样当纯文字显示，不强行做成假的可点状态。
+function AnswerText({ text, sources, theme }) {
+  const sourceByIndex = React.useMemo(() => {
+    const map = {};
+    (sources || []).forEach((s) => { if (s.index != null) map[s.index] = s; });
+    return map;
+  }, [sources]);
+  const parts = React.useMemo(() => String(text || '').split(/(\[\d+\])/g), [text]);
+  return (
+    <Text style={[styles.bubbleText, { color: theme.text }]}>
+      {parts.map((part, i) => {
+        const m = part.match(/^\[(\d+)\]$/);
+        const source = m ? sourceByIndex[Number(m[1])] : null;
+        if (source && source.url) {
+          return (
+            <Text
+              key={i}
+              style={[styles.citationMark, { color: theme.accent }]}
+              onPress={() => Linking.openURL(source.url).catch(() => {})}
+            >
+              {part}
+            </Text>
+          );
+        }
+        return part;
+      })}
+    </Text>
+  );
+}
+
 function Bubble({ role, text, sources, theme }) {
   const isUser = role === 'user';
   return (
@@ -80,9 +115,11 @@ function Bubble({ role, text, sources, theme }) {
       isUser ? styles.bubbleUser : styles.bubbleAI,
       !isUser && { borderWidth: 0.5, borderColor: theme.cardBorder, shadowColor: theme.shadowColor },
     ]}>
-      <Text style={[styles.bubbleText, { color: isUser ? theme.text : theme.text }]}>
-        {text}
-      </Text>
+      {isUser ? (
+        <Text style={[styles.bubbleText, { color: theme.text }]}>{text}</Text>
+      ) : (
+        <AnswerText text={text} sources={sources} theme={theme} />
+      )}
       {!isUser && <SourcesRow sources={sources} theme={theme} />}
     </View>
   );
@@ -777,6 +814,7 @@ const styles = StyleSheet.create({
   bubbleUser: { alignSelf: 'flex-end' },
   bubbleAI:   { alignSelf: 'flex-start' },
   bubbleText: { fontSize: 14, lineHeight: 22 },
+  citationMark: { fontSize: 12, fontWeight: '700', textDecorationLine: 'underline' },
   sourcesWrap: { marginTop: 8 },
   sourcesToggle: { paddingVertical: 2 },
   sourcesToggleText: { fontSize: 11.5 },
