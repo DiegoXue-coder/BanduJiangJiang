@@ -10,7 +10,7 @@ import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import {
   View, Text, StyleSheet, TouchableOpacity, TextInput,
   ActivityIndicator, ScrollView, Platform, KeyboardAvoidingView, Switch,
-  Modal, Animated, AppState,
+  Modal, Animated, AppState, Pressable,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Audio, InterruptionModeIOS, InterruptionModeAndroid } from 'expo-av';
@@ -425,19 +425,31 @@ function NarrationParagraph({
           phrase.sentenceIndex,
           activeSentenceIndex,
         );
-        const phraseProps = {
-          phrase,
-          onLayout: onPhraseLayout ? (e) => onPhraseLayout(index, e.nativeEvent.layout) : undefined,
-          onPressIn: onInteractivePressIn,
-          onPress: onSentenceCandidate ? () => onSentenceCandidate(phrase.sentenceIndex, index) : undefined,
-        };
-        return (
-          <React.Fragment key={`${phrase.start}-${phrase.end}`}>
-            <StaticNarrationPhrase
-              {...phraseProps}
-              visualState={visualState}
-            />
-            {showJumpButton && (
+        const selectPhrase = onSentenceCandidate
+          ? () => onSentenceCandidate(phrase.sentenceIndex, index)
+          : undefined;
+        const layoutPhrase = onPhraseLayout
+          ? (e) => onPhraseLayout(index, e.nativeEvent.layout)
+          : undefined;
+        if (showJumpButton) {
+          return (
+            <View
+              key={`${phrase.start}-${phrase.end}`}
+              style={styles.captionCandidateGroup}
+              onLayout={layoutPhrase}
+            >
+              <Pressable
+                style={styles.captionPhrasePressable}
+                onPressIn={onInteractivePressIn}
+                onPress={selectPhrase}
+              >
+                <Text
+                  suppressHighlighting
+                  style={[styles.captionParagraphText, narrationPhraseStyle(visualState)]}
+                >
+                  {phrase.text}
+                </Text>
+              </Pressable>
               <View style={styles.captionJumpButtonSlot}>
                 <TouchableOpacity
                   style={styles.captionJumpButton}
@@ -450,8 +462,18 @@ function NarrationParagraph({
                   <IconPlayerPlayFilled color={EMBER.paper} size={12} />
                 </TouchableOpacity>
               </View>
-            )}
-          </React.Fragment>
+            </View>
+          );
+        }
+        return (
+          <StaticNarrationPhrase
+            key={`${phrase.start}-${phrase.end}`}
+            phrase={phrase}
+            visualState={visualState}
+            onLayout={layoutPhrase}
+            onPressIn={onInteractivePressIn}
+            onPress={selectPhrase}
+          />
         );
       })}
     </View>
@@ -470,15 +492,19 @@ function narrationPhraseStyle(visualState) {
 
 function StaticNarrationPhrase({ phrase, visualState, onLayout, onPressIn, onPress }) {
   return (
-    <Text
+    <Pressable
       onLayout={onLayout}
       onPressIn={onPressIn}
       onPress={onPress}
-      suppressHighlighting
-      style={[styles.captionParagraphText, narrationPhraseStyle(visualState)]}
+      style={styles.captionPhrasePressable}
     >
-      {phrase.text}
-    </Text>
+      <Text
+        suppressHighlighting
+        style={[styles.captionParagraphText, narrationPhraseStyle(visualState)]}
+      >
+        {phrase.text}
+      </Text>
+    </Pressable>
   );
 }
 
@@ -615,6 +641,10 @@ export default function ListenScreen({ route, navigation }) {
   const captionMomentumWaitRef = useRef(null);
   const captionMomentumSafetyRef = useRef(null);
   const captionMomentumActiveRef = useRef(false);
+  // ScrollView会把scrollTo(animated:true)产生的动画也上报成滚动/惯性事件。
+  // 若不区分，程序自己的跟随滚动会把自己误标为“用户正在滑动”，播放越久
+  // 越容易永久停止居中。这里只记录程序滚动的短保护窗口；真正手势开始时清零。
+  const captionProgrammaticScrollUntilRef = useRef(0);
   const captionChildTouchRef = useRef(false);
   const captionSuppressPressUntilRef = useRef(0);
   const candidateSentenceIndexRef = useRef(null);
@@ -644,6 +674,7 @@ export default function ListenScreen({ route, navigation }) {
       return false;
     }
     captionPendingScrollRef.current = null;
+    captionProgrammaticScrollUntilRef.current = Date.now() + (animated ? 1200 : 120);
     scrollNode.scrollTo({ y: targetY, animated });
     return true;
   }, []);
@@ -675,12 +706,20 @@ export default function ListenScreen({ route, navigation }) {
   // 手指离开+惯性也停了之后才真正开始倒计时；倒计时到了就弹回当前正在
   // 念的那句、恢复自动跟随，跟"自动滚动让当前句居中"复用同一个函数。
   const startCaptionIdleTimer = useCallback(() => {
-    if (candidateSentenceIndexRef.current != null) return;
     clearCaptionIdleTimer();
     captionIdleTimerRef.current = setTimeout(() => {
       captionIdleTimerRef.current = null;
+      if (candidateSentenceIndexRef.current != null) {
+        candidateSentenceIndexRef.current = null;
+        setCandidateSentenceIndex(null);
+        setCandidatePhraseIndex(null);
+      }
       captionUserScrollingRef.current = false;
-      scrollCaptionToPhrase(captionPhraseIndexRef.current, true);
+      const activeIndex = captionPhraseIndexRef.current;
+      captionPendingScrollRef.current = { index: activeIndex, animated: true };
+      // 候选句的按钮消失会让flexWrap重新排版；等React提交新布局后再居中，
+      // 避免拿“按钮仍在时”的旧y坐标弹回一个略偏的位置。
+      requestAnimationFrame(() => scrollCaptionToPhrase(activeIndex, true));
     }, CAPTION_IDLE_SNAPBACK_MS);
   }, [clearCaptionIdleTimer, scrollCaptionToPhrase]);
 
@@ -705,7 +744,8 @@ export default function ListenScreen({ route, navigation }) {
     clearCaptionIdleTimer();
     clearCaptionMomentumWait();
     clearCaptionMomentumSafety();
-  }, [clearCaptionIdleTimer, clearCaptionMomentumSafety, clearCaptionMomentumWait, phase]);
+    startCaptionIdleTimer();
+  }, [clearCaptionIdleTimer, clearCaptionMomentumSafety, clearCaptionMomentumWait, phase, startCaptionIdleTimer]);
 
   const forceCaptionVisualAlignment = useCallback((index = captionPhraseIndexRef.current) => {
     candidateSentenceIndexRef.current = null;
@@ -734,12 +774,13 @@ export default function ListenScreen({ route, navigation }) {
   // 还按着、还在惯性滑）时碰屏幕是正常操作的一部分，不需要特殊处理。
   const handleCaptionTouchStart = useCallback(() => {
     captionChildTouchRef.current = false;
-    if (captionIdleTimerRef.current && candidateSentenceIndexRef.current == null) startCaptionIdleTimer();
+    if (captionIdleTimerRef.current) startCaptionIdleTimer();
   }, [startCaptionIdleTimer]);
   const handleCaptionTouchEnd = useCallback(() => {
     if (!captionChildTouchRef.current && !captionMomentumActiveRef.current) clearCaptionCandidate(true);
   }, [clearCaptionCandidate]);
   const handleCaptionScrollBeginDrag = useCallback(() => {
+    captionProgrammaticScrollUntilRef.current = 0;
     captionSuppressPressUntilRef.current = Date.now() + 500;
     clearCaptionCandidate(false);
     captionUserScrollingRef.current = true;
@@ -759,6 +800,7 @@ export default function ListenScreen({ route, navigation }) {
     }, CAPTION_MOMENTUM_WAIT_MS);
   }, [clearCaptionMomentumWait, startCaptionIdleTimer]);
   const handleCaptionMomentumScrollBegin = useCallback(() => {
+    if (Date.now() < captionProgrammaticScrollUntilRef.current) return;
     captionMomentumActiveRef.current = true;
     clearCaptionMomentumWait();
     clearCaptionIdleTimer();
@@ -768,6 +810,10 @@ export default function ListenScreen({ route, navigation }) {
     if (captionMomentumActiveRef.current) armCaptionMomentumSafety();
   }, [armCaptionMomentumSafety]);
   const handleCaptionMomentumScrollEnd = useCallback(() => {
+    if (Date.now() < captionProgrammaticScrollUntilRef.current) {
+      captionProgrammaticScrollUntilRef.current = 0;
+      return;
+    }
     captionSuppressPressUntilRef.current = Date.now() + 120;
     clearCaptionMomentumSafety();
     captionMomentumActiveRef.current = false;
@@ -3525,17 +3571,21 @@ const styles = StyleSheet.create({
   // 整章连续字幕：每句是同级Text（不是嵌套inline span，见NarrationParagraph
   // 顶部注释），靠flexWrap让句子照常一行行流着排，同时每句都能measure。
   captionFlow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'flex-start' },
+  captionPhrasePressable: { flexShrink: 1 },
+  captionCandidateGroup: {
+    flexDirection: 'row', alignItems: 'center', flexShrink: 1,
+  },
   captionParagraphText: {
     fontSize: 17, lineHeight: 32.3, textAlign: 'left', color: EMBER.paper,
     fontFamily: FONTS.serifRegular,
   },
   captionJumpButtonSlot: {
-    width: 29, height: 32, alignItems: 'center', justifyContent: 'center',
+    width: 34, height: 32, alignItems: 'center', justifyContent: 'center', marginLeft: 2,
   },
   captionJumpButton: {
-    width: 24, height: 24, borderRadius: 12, alignItems: 'center', justifyContent: 'center',
+    width: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center',
     backgroundColor: EMBER.ember, borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(239,237,232,0.34)',
+    borderColor: 'rgba(239,237,232,0.58)', elevation: 4,
   },
   captionReadingRail: { position: 'absolute', left: -19, top: '17%', bottom: '17%', width: 10, alignItems: 'center' },
   captionReadingLine: { position: 'absolute', top: 0, bottom: 0, width: 0.5, backgroundColor: 'rgba(239,237,232,0.1)' },
