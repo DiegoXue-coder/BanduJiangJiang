@@ -40,6 +40,12 @@ import pdfplumber
 from bs4 import BeautifulSoup, Tag, UnicodeDammit
 from dotenv import load_dotenv
 
+from api.external_search import (
+    fetch_external_evidence,
+    format_external_evidence_block,
+    should_trigger_external_search,
+)
+
 load_dotenv()
 
 # ── 数据库连接池 ───────────────────────────────────────────────────
@@ -578,10 +584,20 @@ class AskRequest(BaseModel):
     style: str = "simple"
     history: list[dict] = []
 
+class ExternalSourceOut(BaseModel):
+    index: int | None = None
+    title: str = ""
+    url: str = ""
+    siteName: str = ""
+    trust: str = ""
+
 class AskResponse(BaseModel):
     answer: str
     # 只表示请求中可用/优先的上下文，不表示模型回答已被该来源核验。
     availableEvidenceType: str
+    # 只有触发了外部查证(availableEvidenceType=="external_fact")才非空，供前端
+    # 渲染"查看来源"小条；不影响旧客户端(忽略未知字段即可)。
+    externalSources: list[ExternalSourceOut] = []
 
 class ClassifyIntentRequest(BaseModel):
     text: str
@@ -713,9 +729,10 @@ SYSTEM_PROMPT = """你是"伴读讲讲"，一位亲切的读书陪伴助手。
 
 证据边界（必须遵守）：
 - 不得伪造书中原句、章节位置、作者观点、数据或外部来源；没有看到的内容不能假装看过
-- 明确区分三类信息：书中上下文明确表达的内容、根据上下文作出的推断、你掌握的一般背景知识
-- 上下文不足以回答时，要自然地说明依据不足，并建议用户划选相关原文或切换到相关章节；需要最新外部事实时，说明当前未联网查证
-- 医疗、法律、政治、金融等高风险问题，没有可靠来源时不得作确定性事实判断，应提醒用户进一步查证
+- 明确区分四类信息：书中上下文明确表达的内容、根据上下文作出的推断、你掌握的一般背景知识、下面【外部查证来源】里的查证结果——回答里要让读者分得清哪句话是书里的、哪句是查来的、哪句是你自己的背景知识
+- 上下文不足以回答时，要自然地说明依据不足，并建议用户划选相关原文或切换到相关章节；没有收到【外部查证来源】时不要假装联网查过
+- 收到【外部查证来源】时，只能依据这些来源本身回答，用[数字]标明引用的是哪一条；多条来源说法不一致时要如实说明分歧，不能自己选一边当定论；这些来源不是你自己想验证就能验证的书内内容，不要跟书里的原文混在一起说
+- 医疗、法律、政治、金融等高风险问题，没有可靠来源时不得作确定性事实判断，应提醒用户进一步查证；即使收到了外部查证来源，也不能把某条来源的说法包装成绝对正确的结论
 - 正常的文学理解和开放讨论可以提出解释，但要表明那是解读或推断，不要堆砌机械免责声明
 
 格式要求（必须严格遵守）：
@@ -2732,13 +2749,25 @@ def _build_book_context(ctx: BookContext) -> tuple[str, str]:
         available_evidence_type = "general_knowledge"
     return ("\n".join(parts) + "\n" if parts else ""), available_evidence_type
 
-def _stream_done_payload(answer: str, available_evidence_type: str) -> dict:
-    """构造向后兼容的流式完成事件：旧客户端只读 answer，新客户端读上下文类型。"""
-    return {
+def _stream_done_payload(
+    answer: str, available_evidence_type: str, external_sources: list[dict] | None = None,
+) -> dict:
+    """构造向后兼容的流式完成事件：旧客户端只读 answer，新客户端读上下文类型和
+    （触发了外部查证时的）来源列表；externalSources 为空列表时旧客户端行为不变。"""
+    payload = {
         "done": True,
         "answer": answer,
         "availableEvidenceType": available_evidence_type,
     }
+    if external_sources:
+        payload["externalSources"] = [
+            {
+                "index": s.get("index"), "title": s.get("title", ""), "url": s.get("url", ""),
+                "siteName": s.get("site_name", ""), "trust": s.get("trust", ""),
+            }
+            for s in external_sources
+        ]
+    return payload
 
 async def _prepare_ask(req: AskRequest, request: Request, user_id: int | None = None):
     """/ask 和 /ask/stream 共用的准备逻辑：鉴权+限额检查、拼上下文、按苏格拉底/
@@ -2777,6 +2806,20 @@ async def _prepare_ask(req: AskRequest, request: Request, user_id: int | None = 
     if memory:
         context_block += memory
 
+    # AI质量第二阶段MVP：书内依据不够、且问题像在问现实世界事实时，去查一次
+    # 千问(DashScope原生接口)。只补充结构化来源，最终回答仍由DeepSeek组织，
+    # 不是把千问自己写的答案展示给用户；查询失败/超时/无结果一律静默跳过，
+    # 不阻塞主问答。选型依据和真实对比测试见 docs/项目管理/14/15 号文档。
+    external_sources: list[dict] = []
+    if should_trigger_external_search(req.question, req.style, available_evidence_type):
+        evidence = await fetch_external_evidence(
+            _http, os.environ.get("DASHSCOPE_API_KEY", ""), req.question
+        )
+        if evidence:
+            context_block += format_external_evidence_block(evidence) + "\n"
+            available_evidence_type = "external_fact"
+            external_sources = evidence["sources"]
+
     user_message = (context_block + f"\n用户问题：{req.question}") if context_block else req.question
     round_num = len(req.history) // 2 + 1
     safety_prefix = (
@@ -2790,7 +2833,7 @@ async def _prepare_ask(req: AskRequest, request: Request, user_id: int | None = 
     )
     return (
         ds, messages, max_tokens, temperature, round_num,
-        available_evidence_type, safety_prefix,
+        available_evidence_type, safety_prefix, external_sources,
     )
 
 def _finalize_socratic_text(raw: str, style: str, round_num: int) -> str:
@@ -2813,10 +2856,19 @@ def _finalize_socratic_text(raw: str, style: str, round_num: int) -> str:
     # 的完整短回答（生成长度已经受 max_tokens 限制），不能在字符中间硬截断。
     return raw.strip()
 
+def _to_external_sources_out(sources: list[dict]) -> list["ExternalSourceOut"]:
+    return [
+        ExternalSourceOut(
+            index=s.get("index"), title=s.get("title", ""), url=s.get("url", ""),
+            siteName=s.get("site_name", ""), trust=s.get("trust", ""),
+        )
+        for s in (sources or [])
+    ]
+
 @app.post("/ask", response_model=AskResponse)
 async def ask(req: AskRequest, request: Request, _=ExtAuth, user_id: int | None = OptionalUser):
     (ds, messages, max_tokens, temperature, round_num,
-     available_evidence_type, safety_prefix) = await _prepare_ask(req, request, user_id)
+     available_evidence_type, safety_prefix, external_sources) = await _prepare_ask(req, request, user_id)
     try:
         resp = await asyncio.to_thread(
             lambda: ds.chat.completions.create(
@@ -2833,6 +2885,7 @@ async def ask(req: AskRequest, request: Request, _=ExtAuth, user_id: int | None 
         return AskResponse(
             answer=_with_safety_prefix(final_text, safety_prefix),
             availableEvidenceType=available_evidence_type,
+            externalSources=_to_external_sources_out(external_sources),
         )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"DeepSeek API 错误: {e}")
@@ -2859,12 +2912,13 @@ async def ask_stream(req: AskRequest, request: Request, _=ExtAuth, user_id: int 
     直接提前终止生成（不用等 max_tokens 耗尽），比非流式版本还省 token。
 
     SSE 事件格式：`data: {"delta": "..."}` 增量文本；结束时
-    `data: {"done": true, "answer": "最终完整文本", "availableEvidenceType": "current_context"}`；
-    出错 `data: {"error": "..."}`。`availableEvidenceType` 只描述请求时可用的上下文，
-    不代表答案已经由该来源核验；新增字段不改变现有 delta/answer 的消费方式。
+    `data: {"done": true, "answer": "最终完整文本", "availableEvidenceType": "current_context"}`，
+    触发过外部查证时额外带 `"externalSources": [{"index","title","url","siteName","trust"}...]`；
+    出错 `data: {"error": "..."}`。`availableEvidenceType`/`externalSources` 只描述请求时
+    用了什么材料，不代表答案已经由该来源核验；新增字段不改变现有 delta/answer 的消费方式。
     """
     (ds, messages, max_tokens, temperature, round_num,
-     available_evidence_type, safety_prefix) = await _prepare_ask(req, request, user_id)
+     available_evidence_type, safety_prefix, external_sources) = await _prepare_ask(req, request, user_id)
     is_socr_truncatable = req.style == "socratic" and round_num < SOCR_MAX_ROUNDS
 
     async def event_gen():
@@ -2931,7 +2985,7 @@ async def ask_stream(req: AskRequest, request: Request, _=ExtAuth, user_id: int 
                 final_text = _finalize_socratic_text(payload, req.style, round_num)
                 final_text = _with_safety_prefix(final_text, safety_prefix)
                 print(f"[AskStream] round={round_num} style={req.style} final={repr(final_text[:80])}")
-                done_payload = _stream_done_payload(final_text, available_evidence_type)
+                done_payload = _stream_done_payload(final_text, available_evidence_type, external_sources)
                 yield f"data: {json.dumps(done_payload, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(

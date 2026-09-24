@@ -184,7 +184,7 @@ class AiEvidenceTests(unittest.TestCase):
         )
         prepared = (
             fake_ds, [{"role": "user", "content": "问题"}], 130, 0.3, 1,
-            "current_context", prefix,
+            "current_context", prefix, [],
         )
         request = Request({
             "type": "http", "method": "POST", "path": "/ask/stream",
