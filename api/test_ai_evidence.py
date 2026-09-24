@@ -117,7 +117,8 @@ class AiEvidenceTests(unittest.TestCase):
         self.assertIn("普通文学解读", messages[0]["content"])
         self.assertIn("不要附加机械免责声明", messages[0]["content"])
         self.assertIn("不能只把问题原样反问回去", messages[0]["content"])
-        self.assertIn("解读而非作者唯一确定的答案", messages[0]["content"])
+        self.assertIn("回答必须以“一种可能的理解是”开头", messages[0]["content"])
+        self.assertIn("而非作者唯一确定的", messages[0]["content"])
         self.assertEqual(messages[-1]["content"], "鲲鹏意象可以怎样理解？")
 
     def test_action_guard_detects_explicit_medical_legal_and_financial_requests(self):
