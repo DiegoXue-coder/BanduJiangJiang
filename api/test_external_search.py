@@ -12,10 +12,24 @@ from api.external_search import (
 class TriggerRuleTests(unittest.TestCase):
     def test_socratic_never_triggers(self):
         self.assertFalse(should_trigger_external_search("作者现在怎么样了", "socratic", "insufficient_context"))
+        self.assertFalse(should_trigger_external_search("作者现在怎么样了", "socratic", "user_selection"))
 
-    def test_has_book_grounding_does_not_trigger_even_with_hint(self):
-        self.assertFalse(should_trigger_external_search("作者现在怎么样了", "default", "current_context"))
-        self.assertFalse(should_trigger_external_search("作者现在怎么样了", "default", "user_selection"))
+    def test_triggers_regardless_of_evidence_type_when_question_has_real_world_signal(self):
+        # 2026-09-24真机实测发现的真bug的回归用例：听书/划线提问时selection
+        # 几乎总非空(available_evidence_type=user_selection)，之前版本会因此
+        # 永远不触发——即使有划线/当前页正文，只要问题本身在问现实世界的事，
+        # 也应该触发，不能让"有没有划线"盖过"问题到底在问什么"。
+        for evidence_type in ("insufficient_context", "general_knowledge", "user_selection", "current_context"):
+            self.assertTrue(
+                should_trigger_external_search("请问这本书的作者现在在干什么？他最近的近况怎么样？", "simple", evidence_type),
+                msg=f"evidence_type={evidence_type} 不应该阻止触发",
+            )
+
+    def test_book_anchored_question_does_not_trigger_even_with_hint_words(self):
+        # 问题里虽然出现"作者""现在"这类现实世界信号词，但"这段"这类指代词
+        # 说明问的其实是书里当前这段内容，不该触发外部查证。
+        self.assertFalse(should_trigger_external_search("这段里作者现在讲的道理是什么意思？", "default", "current_context"))
+        self.assertFalse(should_trigger_external_search("书中提到作者最近的这件事是什么意思", "default", "user_selection"))
 
     def test_no_hint_words_does_not_trigger(self):
         self.assertFalse(should_trigger_external_search("这句话是什么意思", "default", "insufficient_context"))

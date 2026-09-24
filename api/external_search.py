@@ -36,17 +36,31 @@ EXTERNAL_SEARCH_TIMEOUT_S = float(os.environ.get("EXTERNAL_SEARCH_TIMEOUT_S", "6
 # 升级成工具调用，见15号任务卡"待确认"部分之外的后续方向。
 _TIME_SENSITIVE_HINTS = ("现在", "最近", "目前", "最新", "近期", "如今", "现状", "今年", "去年")
 _REAL_WORLD_HINTS = ("作者", "现实中", "真实存在", "历史上", "新闻", "报道", "官方", "数据是", "规模", "统计")
+# 2026-09-24真机实测发现的真bug：听书页打断提问时，context永远带着当前正在念
+# 的那句(selection非空)，导致available_evidence_type变成user_selection——原来
+# 要求"必须是insufficient_context/general_knowledge才触发"这条限制，会让所有
+# 听书场景的现实世界问题永远查不到（用户问"作者现在在干什么"，AI只会说"需要
+# 联网查证才能回答"，但从来没有真的去查）。改成不看available_evidence_type，
+# 只看问题本身的信号；同时新增一份"书内指代词"名单，命中"这段/这句/这里/原文/
+# 书中"这类明确指向当前文本的说法就不触发，避免真正在问书内内容时被现实世界
+# 关键词(比如"作者现在这段话什么意思"里的"作者""现在")误触发。
+_BOOK_ANCHORED_HINTS = ("这段", "这句", "这里", "这一段", "这一句", "原文", "书中", "书里", "上文", "上面这")
 
 
 def should_trigger_external_search(question: str, style: str, available_evidence_type: str) -> bool:
-    """书内内容问题/文学讨论不触发：苏格拉底模式(以书内文本讨论为主)整体不触发；
-    直接讲解模式下，已经有当前页正文或用户划线可用时也不触发（不用外部信息去
-    盖过书内依据）。只有"没有书内依据可用 + 问题带现实世界/时效性信号"才触发。"""
+    """苏格拉底模式(以书内文本讨论为主)整体不触发。**不看`available_evidence_type`**
+    ——听书打断提问、划线提问这类场景 context 里几乎总是带着一段书内文字
+    (`selection`非空)，`available_evidence_type`会是`user_selection`，如果拿它当
+    触发条件的必要前提，会导致这些场景下的现实世界问题永远查不到（2026-09-24
+    真机实测发现的真bug，见开发进度记录续二十九）。改成只看问题本身：带明确的
+    "这段/这句/原文/书中"这类指代当前文本的说法就不触发（判断是在问书里写的
+    内容，即使问题里同时出现"作者""现在"这类词）；否则命中现实世界/时效性信号
+    就触发，不管当前有没有划线或页面正文。"""
     if style == "socratic":
         return False
-    if available_evidence_type not in ("insufficient_context", "general_knowledge"):
-        return False
     text = question or ""
+    if any(h in text for h in _BOOK_ANCHORED_HINTS):
+        return False
     return any(h in text for h in _TIME_SENSITIVE_HINTS) or any(h in text for h in _REAL_WORLD_HINTS)
 
 
