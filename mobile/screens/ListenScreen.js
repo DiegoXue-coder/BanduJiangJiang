@@ -17,6 +17,7 @@ import { Audio, InterruptionModeIOS, InterruptionModeAndroid } from 'expo-av';
 import * as FileSystem from 'expo-file-system/legacy';
 import Slider from '@react-native-community/slider';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+import Svg, { Defs, LinearGradient, RadialGradient, Rect, Stop } from 'react-native-svg';
 import {
   IconChevronLeft, IconList, IconVolume, IconBolt,
   IconPlayerTrackPrevFilled, IconPlayerTrackNextFilled,
@@ -38,7 +39,6 @@ const {
   resolveListenParagraph,
 } = require('../lib/listenContinuity');
 const {
-  captionOpacityForIndex,
   centeredScrollOffset,
   playbackRecoveryAction,
   preparedSoundMatches,
@@ -412,28 +412,43 @@ function NarrationParagraph({
     ...phrase,
     sentenceIndex: rangeIndexAtOffset(sentences, phrase.start),
   })), [sentences, text]);
+  const previousActivePhraseRef = useRef(activePhraseIndex);
+  const previousActivePhraseIndex = previousActivePhraseRef.current;
+
+  useEffect(() => {
+    previousActivePhraseRef.current = activePhraseIndex;
+  }, [activePhraseIndex]);
 
   return (
     <View style={styles.captionFlow} onLayout={onContainerLayout}>
       {phrases.map((phrase, index) => {
         const showJumpButton = candidateSentenceIndex === phrase.sentenceIndex && candidatePhraseIndex === index;
+        const visualState = index < activePhraseIndex ? 0 : index === activePhraseIndex ? 1 : 2;
+        const previousVisualState = index < previousActivePhraseIndex
+          ? 0
+          : index === previousActivePhraseIndex ? 1 : 2;
+        const shouldAnimate = index === activePhraseIndex || index === previousActivePhraseIndex;
+        const phraseProps = {
+          phrase,
+          onLayout: onPhraseLayout ? (e) => onPhraseLayout(index, e.nativeEvent.layout) : undefined,
+          onPressIn: onInteractivePressIn,
+          onPress: onSentenceCandidate ? () => onSentenceCandidate(phrase.sentenceIndex, index) : undefined,
+        };
         return (
           <React.Fragment key={`${phrase.start}-${phrase.end}`}>
-            <Text
-              onLayout={onPhraseLayout ? (e) => onPhraseLayout(index, e.nativeEvent.layout) : undefined}
-              onPressIn={onInteractivePressIn}
-              onPress={onSentenceCandidate ? () => onSentenceCandidate(phrase.sentenceIndex, index) : undefined}
-              suppressHighlighting
-              style={[
-                styles.captionParagraphText,
-                {
-                  color: index === activePhraseIndex ? EMBER.paper : index < activePhraseIndex ? EMBER.paperDim : EMBER.inkSoft,
-                  opacity: captionOpacityForIndex(index, activePhraseIndex),
-                },
-              ]}
-            >
-              {phrase.text}
-            </Text>
+            {shouldAnimate ? (
+              <AnimatedNarrationPhrase
+                {...phraseProps}
+                initialVisualState={previousVisualState}
+                visualState={visualState}
+                active={index === activePhraseIndex}
+              />
+            ) : (
+              <StaticNarrationPhrase
+                {...phraseProps}
+                visualState={visualState}
+              />
+            )}
             {showJumpButton && (
               <View style={styles.captionJumpButtonSlot}>
                 <TouchableOpacity
@@ -452,6 +467,112 @@ function NarrationParagraph({
         );
       })}
     </View>
+  );
+}
+
+function narrationPhraseStyle(visualState) {
+  if (visualState === 1) {
+    return { color: EMBER.paper, opacity: 1, fontSize: 19, lineHeight: 34.2, fontWeight: '500' };
+  }
+  if (visualState === 0) {
+    return { color: EMBER.paperDim, opacity: 0.34, fontSize: 17, lineHeight: 32.3, fontWeight: '400' };
+  }
+  return { color: EMBER.inkSoft, opacity: 0.62, fontSize: 17, lineHeight: 32.3, fontWeight: '400' };
+}
+
+function StaticNarrationPhrase({ phrase, visualState, onLayout, onPressIn, onPress }) {
+  return (
+    <Text
+      onLayout={onLayout}
+      onPressIn={onPressIn}
+      onPress={onPress}
+      suppressHighlighting
+      style={[styles.captionParagraphText, narrationPhraseStyle(visualState)]}
+    >
+      {phrase.text}
+    </Text>
+  );
+}
+
+// 只让“刚念完”和“正在念”两个短语持有动画值。这样上一句会在半秒内
+// 自然淡出、当前句同时点亮并略微放大，又不会为整章数百个短语常驻数百个
+// Animated.Value，避免长章节额外挤占 Android JS 线程。
+function AnimatedNarrationPhrase({
+  phrase,
+  initialVisualState,
+  visualState,
+  active,
+  onLayout,
+  onPressIn,
+  onPress,
+}) {
+  const progress = useRef(new Animated.Value(initialVisualState)).current;
+
+  useEffect(() => {
+    Animated.timing(progress, {
+      toValue: visualState,
+      duration: 500,
+      useNativeDriver: false,
+    }).start();
+  }, [progress, visualState]);
+
+  return (
+    <Animated.Text
+      onLayout={onLayout}
+      onPressIn={onPressIn}
+      onPress={onPress}
+      suppressHighlighting
+      style={[
+        styles.captionParagraphText,
+        {
+          color: progress.interpolate({
+            inputRange: [0, 1, 2],
+            outputRange: [EMBER.paperDim, EMBER.paper, EMBER.inkSoft],
+          }),
+          opacity: progress.interpolate({
+            inputRange: [0, 1, 2],
+            outputRange: [0.34, 1, 0.62],
+          }),
+          fontSize: progress.interpolate({
+            inputRange: [0, 1, 2],
+            outputRange: [17, 19, 17],
+          }),
+          lineHeight: progress.interpolate({
+            inputRange: [0, 1, 2],
+            outputRange: [32.3, 34.2, 32.3],
+          }),
+          fontWeight: active ? '500' : '400',
+        },
+      ]}
+    >
+      {phrase.text}
+    </Animated.Text>
+  );
+}
+
+function ListenAtmosphere() {
+  return (
+    <Svg pointerEvents="none" style={StyleSheet.absoluteFill} width="100%" height="100%">
+      <Defs>
+        <LinearGradient id="listenBase" x1="0" y1="0" x2="0" y2="1">
+          <Stop offset="0" stopColor="#18191c" />
+          <Stop offset="0.48" stopColor="#111214" />
+          <Stop offset="1" stopColor="#0d0e10" />
+        </LinearGradient>
+        <RadialGradient id="listenWarmGlow" cx="50%" cy="2%" rx="72%" ry="48%">
+          <Stop offset="0" stopColor="#b17c43" stopOpacity="0.11" />
+          <Stop offset="0.52" stopColor="#6f4e2d" stopOpacity="0.035" />
+          <Stop offset="1" stopColor="#101113" stopOpacity="0" />
+        </RadialGradient>
+        <RadialGradient id="listenLowerGlow" cx="18%" cy="94%" rx="62%" ry="42%">
+          <Stop offset="0" stopColor="#6f4e2d" stopOpacity="0.04" />
+          <Stop offset="1" stopColor="#101113" stopOpacity="0" />
+        </RadialGradient>
+      </Defs>
+      <Rect width="100%" height="100%" fill="url(#listenBase)" />
+      <Rect width="100%" height="100%" fill="url(#listenWarmGlow)" />
+      <Rect width="100%" height="100%" fill="url(#listenLowerGlow)" />
+    </Svg>
   );
 }
 
@@ -2928,6 +3049,7 @@ export default function ListenScreen({ route, navigation }) {
 
   return (
     <View style={styles.stage}>
+      <ListenAtmosphere />
       <SafeAreaView edges={['bottom', 'left', 'right']} style={styles.safe}>
         <View style={[styles.bar, { paddingTop: insets.top + 14 }]}>
           <TouchableOpacity onPress={handleStopListening} style={styles.iconBtn}>
