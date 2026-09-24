@@ -2466,7 +2466,9 @@ _META_COMPLAINT_RULE = (
 _SOCRATIC_EVIDENCE_RULE = (
     '阅读依据规则：只能把消息中明确提供的“用户划选”或“当前页面附近正文”当作原文依据；'
     '划选内容优先，附近正文只作补充。只有书名、章节名或位置而没有正文时，要自然说明'
-    '当前依据不足，不能假装看到了原文，也不得编造作者原话、章节内容或出处。'
+    '当前依据不足，不能假装看到了原文，也不得编造作者原话、章节内容或出处。依据不足时'
+    '不要把用户原问题换个说法反问回去；直接说明缺少哪部分依据，并建议用户划选相关原文'
+    '或切换到相关章节。'
 )
 
 _SOCRATIC_HIGH_RISK_RULE = (
@@ -2478,6 +2480,87 @@ _SOCRATIC_HIGH_RISK_RULE = (
     '用户。该规则只适用于可能导致现实行动风险的问题；普通文学解读、商业概念讨论和'
     '一般阅读交流不要附加机械免责声明。'
 )
+
+_MEDICAL_ACTION_PREFIX = (
+    '不能仅根据书中内容自行停药、改变剂量或用其他方法替代治疗；'
+    '请先咨询医生或其他合格医疗专业人士。'
+)
+_LEGAL_ACTION_PREFIX = (
+    '书中个案不能保证你的做法合法合规；行动前请依据所在地规则咨询合格律师、'
+    '税务师或相关专业人士。'
+)
+_FINANCIAL_ACTION_PREFIX = (
+    '不能根据书中个案保证收益或直接作出投资决定；请先评估风险，并咨询合格的金融专业人士。'
+)
+
+_ACTION_DECISION_PATTERN = (
+    r'(?:能否|能不能|可不可以|是否可以|要不要|该不该|是否应该|'
+    r'我(?:能|可以|要|该|应该|想|打算|准备|决定|考虑)|'
+    r'自己(?:能|可以|要|该|应该|想)|自行|照着|照做|按.{0,16}做)'
+)
+_MEDICAL_ACTION_PATTERN = (
+    r'(?:停(?:用|服)?[^，。！？?]{0,8}药|'
+    r'(?:改|加|减|调整|增加|减少)[^，。！？?]{0,6}(?:药|剂量|用量)|'
+    r'(?:不用|不再|停止)(?:吃|服|服用|使用)[^，。！？?]{0,8}药|'
+    r'(?:替代|代替)[^，。！？?]{0,10}(?:治疗|药物|用药)|'
+    r'用[^，。！？?]{0,12}(?:替代|代替)[^，。！？?]{0,8}(?:治疗|药物|用药))'
+)
+_LEGAL_ACTION_PATTERN = (
+    r'(?:报税|纳税申报|不申报|少报|虚报|隐瞒[^，。！？?]{0,6}(?:收入|所得)|'
+    r'报销|开[^，。！？?]{0,4}发票|避税|逃税|签[^，。！？?]{0,6}(?:合同|协议)|'
+    r'(?:解除|终止)[^，。！？?]{0,6}(?:合同|协议)|起诉|申请仲裁|'
+    r'照做[^，。！？?]{0,12}(?:合法|合规|税法))'
+)
+_FINANCIAL_ACTION_PATTERN = (
+    r'(?:(?:买入?|卖出?|加仓|减仓|满仓|清仓|梭哈|跟投|借钱|贷款|抵押)'
+    r'[^，。！？?]{0,12}(?:股票|基金|债券|理财|虚拟币|加密货币|期货|保险|房产)?|'
+    r'(?:保证|保本|稳赚)[^，。！？?]{0,8}(?:收益|回报|赚|盈利)|'
+    r'(?:按|照着|跟着)[^，。！？?]{0,16}(?:买|卖|投资|跟投))'
+)
+
+def _is_explicit_action_request(text: str, action_pattern: str) -> bool:
+    compact = re.sub(r'\s+', '', str(text or ''))
+    if not compact or not re.search(action_pattern, compact):
+        return False
+    if re.search(_ACTION_DECISION_PATTERN, compact):
+        return True
+    return bool(re.search(
+        rf'{action_pattern}[^，。！？?]{{0,10}}(?:行不行|可以吗|能行吗|安全吗|有没有风险|会不会违法|是否合规)',
+        compact,
+    ))
+
+def _socratic_action_safety_prefix(question: str) -> str:
+    """只识别用户问题里的明确现实行动请求；不扫描书内正文，避免文学讨论误触。"""
+    if _is_explicit_action_request(question, _MEDICAL_ACTION_PATTERN):
+        return _MEDICAL_ACTION_PREFIX
+    if _is_explicit_action_request(question, _LEGAL_ACTION_PATTERN):
+        return _LEGAL_ACTION_PREFIX
+    if _is_explicit_action_request(question, _FINANCIAL_ACTION_PATTERN):
+        return _FINANCIAL_ACTION_PREFIX
+    return ''
+
+def _with_safety_prefix(answer: str, prefix: str) -> str:
+    clean = str(answer or '').strip()
+    if not prefix or clean.startswith(prefix):
+        return clean
+    return f'{prefix}\n\n{clean}' if clean else prefix
+
+def _safety_prefix_delta(prefix: str) -> str:
+    return f'{prefix}\n\n' if prefix else ''
+
+def _filter_initial_safety_delta(
+    pending: str, delta: str, prefix: str, decided: bool,
+) -> tuple[str, str, bool]:
+    """流式首段去重：若模型也输出固定护栏，吞掉重复前缀后再转发正文。"""
+    if decided or not prefix:
+        return '', delta, True
+    combined = pending + delta
+    candidate = combined.lstrip()
+    if candidate.startswith(prefix):
+        return '', candidate[len(prefix):].lstrip(), True
+    if prefix.startswith(candidate):
+        return combined, '', False
+    return '', combined, True
 
 def _socratic_system_prompt(round_num: int) -> tuple[str, int]:
     """按 round_num 挑苏格拉底模式的 system_prompt + max_tokens。"""
@@ -2531,6 +2614,7 @@ def _history_messages(history: list[dict]) -> list[dict]:
 def _build_ask_messages(
     style: str, round_num: int, history: list[dict],
     question: str, user_message: str, selection: str, context_block: str = "",
+    safety_prefix: str = "",
 ) -> tuple[list[dict], int, float]:
     """纯函数：给定已解析好的输入，组装最终发给 LLM 的 messages + 采样参数。不碰
     鉴权/限额/DB记忆检索——那些留在 _prepare_ask 里处理。抽出来是为了让苏格拉底/
@@ -2542,6 +2626,11 @@ def _build_ask_messages(
         system_prompt = (
             f"{system_prompt}\n\n{_SOCRATIC_EVIDENCE_RULE}\n\n{_SOCRATIC_HIGH_RISK_RULE}"
         )
+        if safety_prefix:
+            system_prompt += (
+                f'\n\n系统会先自动输出固定安全边界：“{safety_prefix}”'
+                '你不要重复这句话；随后只需解释书中依据，并在合适时继续引导。'
+            )
         # 首轮把正文与问题放在同一条用户消息里，划选/页面上下文都只出现一次。
         # 后续轮次把阅读上下文作为独立的引用消息放在历史之前，既不把不可信原文
         # 提升成 system 指令，又能保持历史顺序和最新用户原话不变；否则会干扰
@@ -2682,12 +2771,19 @@ async def _prepare_ask(req: AskRequest, request: Request, user_id: int | None = 
 
     user_message = (context_block + f"\n用户问题：{req.question}") if context_block else req.question
     round_num = len(req.history) // 2 + 1
+    safety_prefix = (
+        _socratic_action_safety_prefix(req.question) if req.style == "socratic" else ""
+    )
     # 验收标准要求"追问时上下文连贯"，非苏格拉底模式原来没带历史轮次，补上
     # （跟苏格拉底分支同样的处理方式），history 为空时行为不变。
     messages, max_tokens, temperature = _build_ask_messages(
-        req.style, round_num, req.history, req.question, user_message, ctx.selection, context_block
+        req.style, round_num, req.history, req.question, user_message, ctx.selection,
+        context_block, safety_prefix,
     )
-    return ds, messages, max_tokens, temperature, round_num, available_evidence_type
+    return (
+        ds, messages, max_tokens, temperature, round_num,
+        available_evidence_type, safety_prefix,
+    )
 
 def _finalize_socratic_text(raw: str, style: str, round_num: int) -> str:
     """苏格拉底模式的截断规则：round_num < SOCR_MAX_ROUNDS 且不是"你已经推导出来了"/
@@ -2711,7 +2807,8 @@ def _finalize_socratic_text(raw: str, style: str, round_num: int) -> str:
 
 @app.post("/ask", response_model=AskResponse)
 async def ask(req: AskRequest, request: Request, _=ExtAuth, user_id: int | None = OptionalUser):
-    ds, messages, max_tokens, temperature, round_num, available_evidence_type = await _prepare_ask(req, request, user_id)
+    (ds, messages, max_tokens, temperature, round_num,
+     available_evidence_type, safety_prefix) = await _prepare_ask(req, request, user_id)
     try:
         resp = await asyncio.to_thread(
             lambda: ds.chat.completions.create(
@@ -2724,8 +2821,9 @@ async def ask(req: AskRequest, request: Request, _=ExtAuth, user_id: int | None 
         )
         raw = resp.choices[0].message.content
         print(f"[Ask] round={round_num} style={req.style} raw={repr(raw[:80])}")
+        final_text = _finalize_socratic_text(raw, req.style, round_num)
         return AskResponse(
-            answer=_finalize_socratic_text(raw, req.style, round_num),
+            answer=_with_safety_prefix(final_text, safety_prefix),
             availableEvidenceType=available_evidence_type,
         )
     except Exception as e:
@@ -2757,7 +2855,8 @@ async def ask_stream(req: AskRequest, request: Request, _=ExtAuth, user_id: int 
     出错 `data: {"error": "..."}`。`availableEvidenceType` 只描述请求时可用的上下文，
     不代表答案已经由该来源核验；新增字段不改变现有 delta/answer 的消费方式。
     """
-    ds, messages, max_tokens, temperature, round_num, available_evidence_type = await _prepare_ask(req, request, user_id)
+    (ds, messages, max_tokens, temperature, round_num,
+     available_evidence_type, safety_prefix) = await _prepare_ask(req, request, user_id)
     is_socr_truncatable = req.style == "socratic" and round_num < SOCR_MAX_ROUNDS
 
     async def event_gen():
@@ -2767,6 +2866,8 @@ async def ask_stream(req: AskRequest, request: Request, _=ExtAuth, user_id: int 
 
         def produce():
             accumulated = ""
+            pending_initial = ""
+            safety_prefix_decided = not bool(safety_prefix)
             try:
                 stream = ds.chat.completions.create(
                     model=DEEPSEEK_MODEL,
@@ -2781,7 +2882,11 @@ async def ask_stream(req: AskRequest, request: Request, _=ExtAuth, user_id: int 
                     if not delta:
                         continue
                     accumulated += delta
-                    loop.call_soon_threadsafe(queue.put_nowait, ("delta", delta))
+                    pending_initial, outgoing, safety_prefix_decided = _filter_initial_safety_delta(
+                        pending_initial, delta, safety_prefix, safety_prefix_decided
+                    )
+                    if outgoing:
+                        loop.call_soon_threadsafe(queue.put_nowait, ("delta", outgoing))
                     # 苏格拉底模式：一旦确认不是"你已经推导出来了"/"先说清楚——"这两种
                     # 纯解释开头、又出现了问号，说明这句追问已经完整，提前收工，不用烧
                     # 完 max_tokens；这两种开头是完整解释，中途出现的问号不代表说完了
@@ -2791,12 +2896,17 @@ async def ask_stream(req: AskRequest, request: Request, _=ExtAuth, user_id: int 
                             and len(accumulated) >= 2
                             and ("？" in accumulated or "?" in accumulated)):
                         break
+                if pending_initial and not safety_prefix_decided:
+                    loop.call_soon_threadsafe(queue.put_nowait, ("delta", pending_initial))
             except Exception as e:
                 loop.call_soon_threadsafe(queue.put_nowait, ("error", str(e)))
                 loop.call_soon_threadsafe(queue.put_nowait, SENTINEL)
                 return
             loop.call_soon_threadsafe(queue.put_nowait, ("raw_done", accumulated))
             loop.call_soon_threadsafe(queue.put_nowait, SENTINEL)
+
+        if safety_prefix:
+            yield f"data: {json.dumps({'delta': _safety_prefix_delta(safety_prefix)}, ensure_ascii=False)}\n\n"
 
         threading.Thread(target=produce, daemon=True).start()
 
@@ -2811,6 +2921,7 @@ async def ask_stream(req: AskRequest, request: Request, _=ExtAuth, user_id: int 
                 yield f"data: {json.dumps({'error': payload}, ensure_ascii=False)}\n\n"
             elif kind == "raw_done":
                 final_text = _finalize_socratic_text(payload, req.style, round_num)
+                final_text = _with_safety_prefix(final_text, safety_prefix)
                 print(f"[AskStream] round={round_num} style={req.style} final={repr(final_text[:80])}")
                 done_payload = _stream_done_payload(final_text, available_evidence_type)
                 yield f"data: {json.dumps(done_payload, ensure_ascii=False)}\n\n"

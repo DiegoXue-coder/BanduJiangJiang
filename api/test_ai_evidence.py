@@ -1,15 +1,27 @@
+import asyncio
+import json
 import os
 import unittest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
+from starlette.requests import Request
 
 from api.main import (
     DEEPSEEK_MODEL,
     SYSTEM_PROMPT,
+    AskRequest,
     BookContext,
     _bounded_context_text,
     _build_ask_messages,
     _build_book_context,
+    _filter_initial_safety_delta,
     _finalize_socratic_text,
+    _safety_prefix_delta,
+    _socratic_action_safety_prefix,
     _stream_done_payload,
+    _with_safety_prefix,
+    ask_stream,
 )
 
 
@@ -105,6 +117,109 @@ class AiEvidenceTests(unittest.TestCase):
         self.assertIn("普通文学解读", messages[0]["content"])
         self.assertIn("不要附加机械免责声明", messages[0]["content"])
         self.assertEqual(messages[-1]["content"], "鲲鹏意象可以怎样理解？")
+
+    def test_action_guard_detects_explicit_medical_legal_and_financial_requests(self):
+        medical = _socratic_action_safety_prefix("那我可以靠晨跑自己停降压药吗？")
+        legal = _socratic_action_safety_prefix("我照着作者这样报销可以吗？")
+        financial = _socratic_action_safety_prefix("我可以按作者的方法买这只基金吗？")
+        self.assertIn("不能仅根据书中内容自行停药", medical)
+        self.assertIn("合法合规", legal)
+        self.assertIn("不能根据书中个案保证收益", financial)
+
+    def test_action_guard_does_not_trigger_for_discussion_or_passive_mentions(self):
+        safe_questions = (
+            "小说里人物停药这一情节象征什么？",
+            "书中提到这种药的历史背景是什么？",
+            "这项政策公布的投资数据可靠吗？",
+            "集中持仓为什么会放大波动？",
+            "作者对税法改革的批评有道理吗？",
+        )
+        for question in safe_questions:
+            self.assertEqual(_socratic_action_safety_prefix(question), "", question)
+
+    def test_non_stream_safety_prefix_is_first_and_not_duplicated(self):
+        prefix = _socratic_action_safety_prefix("我可以停降压药吗？")
+        model_answer = "书中只是个人经历。我该如何观察血压？"
+        answer = _with_safety_prefix(model_answer, prefix)
+        self.assertTrue(answer.startswith(prefix))
+        self.assertEqual(answer.count(prefix), 1)
+        self.assertEqual(_with_safety_prefix(answer, prefix), answer)
+
+    def test_stream_safety_prefix_is_first_delta_and_model_duplicate_is_removed(self):
+        prefix = _socratic_action_safety_prefix("我可以停降压药吗？")
+        first_delta = _safety_prefix_delta(prefix)
+        pending = ""
+        decided = False
+        outputs = []
+        for chunk in (prefix[:8], prefix[8:], "书中只是个人经历。我该如何观察血压？"):
+            pending, outgoing, decided = _filter_initial_safety_delta(
+                pending, chunk, prefix, decided
+            )
+            if outgoing:
+                outputs.append(outgoing)
+        streamed = first_delta + "".join(outputs)
+        self.assertTrue(streamed.startswith(prefix))
+        self.assertEqual(streamed.count(prefix), 1)
+        self.assertIn("书中只是个人经历", streamed)
+
+    def test_stream_endpoint_emits_guard_before_model_and_done_answer_contains_it_once(self):
+        prefix = _socratic_action_safety_prefix("我可以停降压药吗？")
+        model_parts = (prefix[:10], prefix[10:], "书中只是个人经历。我该如何观察血压？")
+
+        class FakeCompletions:
+            @staticmethod
+            def create(**_kwargs):
+                return [
+                    SimpleNamespace(choices=[SimpleNamespace(
+                        delta=SimpleNamespace(content=part)
+                    )])
+                    for part in model_parts
+                ]
+
+        fake_ds = SimpleNamespace(
+            chat=SimpleNamespace(completions=FakeCompletions())
+        )
+        prepared = (
+            fake_ds, [{"role": "user", "content": "问题"}], 130, 0.3, 1,
+            "current_context", prefix,
+        )
+        request = Request({
+            "type": "http", "method": "POST", "path": "/ask/stream",
+            "headers": [], "client": ("127.0.0.1", 1234),
+        })
+        req = AskRequest(
+            question="我可以停降压药吗？",
+            context=BookContext(pageText="一次个人晨跑记录。"),
+            style="socratic",
+        )
+
+        async def collect_events():
+            with patch("api.main._prepare_ask", new=AsyncMock(return_value=prepared)):
+                response = await ask_stream(req, request, None, None)
+                body = ""
+                async for chunk in response.body_iterator:
+                    body += chunk.decode() if isinstance(chunk, bytes) else chunk
+            return [
+                json.loads(line[6:])
+                for line in body.splitlines()
+                if line.startswith("data: ")
+            ]
+
+        events = asyncio.run(collect_events())
+        self.assertEqual(events[0], {"delta": _safety_prefix_delta(prefix)})
+        done = next(event for event in events if event.get("done"))
+        self.assertTrue(done["answer"].startswith(prefix))
+        self.assertEqual(done["answer"].count(prefix), 1)
+        streamed_text = "".join(event.get("delta", "") for event in events)
+        self.assertEqual(streamed_text.count(prefix), 1)
+
+    def test_insufficient_context_rule_does_not_echo_question_as_reply(self):
+        messages, _, _ = _build_ask_messages(
+            "socratic", 1, [], "作者出生在哪座城市？",
+            "用户问题：作者出生在哪座城市？", "",
+        )
+        self.assertIn("不要把用户原问题换个说法反问回去", messages[0]["content"])
+        self.assertIn("建议用户划选相关原文", messages[0]["content"])
 
     def test_socratic_without_question_mark_is_not_cut_mid_sentence(self):
         raw = "现有内容只提到作者从小喜欢沿河散步，没有提供出生地或成长城市的信息，无法回答作者出生在哪座城市。"
