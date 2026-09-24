@@ -337,7 +337,10 @@ function mergeParagraphsForNarration(paragraphs) {
 const HEARD_CONTEXT_MAX_CHARS = 6000;
 function buildHeardChapterContext(paragraphs, paragraphIdx) {
   if (!Array.isArray(paragraphs) || !paragraphs.length) return '';
-  const heard = paragraphs.slice(0, Math.max(0, paragraphIdx) + 1).join('');
+  // 段落之间用空行分隔，后端_bounded_context_text按空行切段落、超长时保留
+  // 尾部——不加分隔符的话一整章会被后端当成一个大段落，尾部截断就退化成
+  // 只在一句话中间硬切，不如按段落边界收敛准。
+  const heard = paragraphs.slice(0, Math.max(0, paragraphIdx) + 1).join('\n\n');
   return heard.length > HEARD_CONTEXT_MAX_CHARS ? heard.slice(-HEARD_CONTEXT_MAX_CHARS) : heard;
 }
 
@@ -2464,6 +2467,9 @@ export default function ListenScreen({ route, navigation }) {
         paragraphCacheRef.current[chapter?.id] || [],
         posRef.current.paragraphIdx,
       );
+      if (Platform.OS === 'android') {
+        console.log(`[上下文诊断] 免提提问 chapterId=${chapter?.id} paragraphIdx=${posRef.current.paragraphIdx} 段落总数=${(paragraphCacheRef.current[chapter?.id] || []).length} heardContext长度=${heardContext.length} 尾部50字=${JSON.stringify(heardContext.slice(-50))}`);
+      }
       hfAbortRef.current = streamAsk(
         {
           context: {
@@ -2703,6 +2709,9 @@ export default function ListenScreen({ route, navigation }) {
     setPhase('thinking');
     const chapter = chaptersRef.current[posRef.current.chapterIdx];
     let fullAnswer = '';
+    if (Platform.OS === 'android') {
+      console.log(`[上下文诊断] 打断提问 capturedHeardContext长度=${capturedHeardContextRef.current.length} capturedText长度=${capturedText.length} 尾部50字=${JSON.stringify(capturedHeardContextRef.current.slice(-50))}`);
+    }
     abortAskRef.current = streamAsk(
       {
         context: {

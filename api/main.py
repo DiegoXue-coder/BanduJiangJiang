@@ -2699,8 +2699,14 @@ def _build_ask_messages(
         messages.append({"role": "user", "content": user_message})
         return messages, 512, 0.5
 
-def _bounded_context_text(text: str, limit: int = 1200) -> str:
-    """按自然段收敛上下文；超长单段尽量在句末截断，避免从词语中间硬切。"""
+def _bounded_context_text(text: str, limit: int = 1200, keep_tail: bool = False) -> str:
+    """按自然段收敛上下文；超长单段尽量在句末截断，避免从词语中间硬切。
+
+    keep_tail=True时从最后一段往前收（保留"最近的"内容，丢弃更早的），
+    服务听书场景——那里selection塞的是"本章已经播完的全部段落"，用户
+    追问的通常是刚听到的内容，越靠后越该保留；默认False是原来的行为，
+    服务划线/当前页正文这类"从哪段开始不重要"的场景，不受影响。
+    """
     paragraphs = [
         re.sub(r"[\t \u00a0]+", " ", part.replace("\n", " ")).strip()
         for part in re.split(r"\n\s*\n+", str(text or "").replace("\r\n", "\n").replace("\r", "\n"))
@@ -2712,23 +2718,36 @@ def _bounded_context_text(text: str, limit: int = 1200) -> str:
     if len(joined) <= limit:
         return joined
 
+    ordered = list(reversed(paragraphs)) if keep_tail else paragraphs
     selected: list[str] = []
     used = 0
-    for paragraph in paragraphs:
+    for paragraph in ordered:
         addition = len(paragraph) + (2 if selected else 0)
         if selected and used + addition > limit:
             break
         if not selected and len(paragraph) > limit:
             floor = int(limit * 0.72)
-            end = max(
-                (idx + 1 for idx, char in enumerate(paragraph[:limit])
-                 if idx + 1 >= floor and char in "。！？；：.!?;:"),
-                default=limit,
-            )
-            selected.append(paragraph[:end].strip())
+            if keep_tail:
+                # 保留最近的部分时，单段超长也该保留"尾部"（离当前朗读位置更近），
+                # 从段落末尾往回找句末标点，而不是照旧从头截。
+                start = min(
+                    (idx for idx, char in enumerate(paragraph)
+                     if len(paragraph) - idx <= limit and char in "。！？；：.!?;:"),
+                    default=max(0, len(paragraph) - limit),
+                )
+                selected.append(paragraph[start:].lstrip("。！？；：.!?;: ").strip())
+            else:
+                end = max(
+                    (idx + 1 for idx, char in enumerate(paragraph[:limit])
+                     if idx + 1 >= floor and char in "。！？；：.!?;:"),
+                    default=limit,
+                )
+                selected.append(paragraph[:end].strip())
             break
         selected.append(paragraph)
         used += addition
+    if keep_tail:
+        selected.reverse()
     return "\n\n".join(selected)
 
 def _build_book_context(ctx: BookContext) -> tuple[str, str]:
@@ -2742,7 +2761,12 @@ def _build_book_context(ctx: BookContext) -> tuple[str, str]:
     if ctx.positionId:
         parts.append(f"【稳定位置】{ctx.positionId}")
 
-    selection = _bounded_context_text(ctx.selection, 800)
+    # 2026-09-25修复：听书追问"AI接不住刚听到的内容"——根因是这里原来固定
+    # 从开头截断，用户在移动端把"本章已播完的全部段落"整段塞进selection时，
+    # 800字很快就被章节靠前的内容占满，用户实际问的、更靠后的"刚听到的"
+    # 那段反而被切掉。改成保留尾部（keep_tail），并把上限从800提到2000，
+    # 兼顾"划线原文一般不长，基本不受影响"和"听书场景要留够最近内容"。
+    selection = _bounded_context_text(ctx.selection, 2000, keep_tail=True)
     page_text = _bounded_context_text(ctx.pageText, 1200)
     if selection:
         parts.append(f"【用户明确划选（主要依据）】{selection}")
