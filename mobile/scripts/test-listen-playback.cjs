@@ -3,6 +3,7 @@ const {
   captionOpacityForIndex,
   captionVisualStateForSentence,
   centeredScrollOffset,
+  centeredPhraseIndex,
   playbackRecoveryAction,
   preparedSoundMatches,
   resolveNarrationStep,
@@ -35,6 +36,17 @@ assert.equal(centeredScrollOffset({
   layout: { y: 800, height: 40 }, containerY: 200, viewportHeight: 400, contentHeight: 1200,
 }), 800, '末句被限制在最大滚动位置');
 assert.equal(centeredScrollOffset({ layout: null, viewportHeight: 400, contentHeight: 1200 }), null);
+assert.equal(centeredPhraseIndex({
+  layouts: {
+    0: { y: 100, height: 30 },
+    1: { y: 280, height: 40 },
+    2: { y: 520, height: 30 },
+  },
+  containerY: 120,
+  scrollY: 200,
+  viewportHeight: 400,
+}), 1, '中央线应选择距离屏幕垂直中心最近的短语');
+assert.equal(centeredPhraseIndex({ layouts: {}, viewportHeight: 400 }), null);
 
 assert.equal(playbackRecoveryAction({ status: null, phase: 'playing', isManuallyPaused: false }), 'rebuild');
 assert.equal(playbackRecoveryAction({ status: { isLoaded: false }, phase: 'playing', isManuallyPaused: false }), 'rebuild');

@@ -41,6 +41,7 @@ const {
 const {
   captionVisualStateForSentence,
   centeredScrollOffset,
+  centeredPhraseIndex,
   playbackRecoveryAction,
   preparedSoundMatches,
   resolveNarrationStep,
@@ -244,6 +245,7 @@ const RESUME_CHAR_BACKTRACK = 12; // 段内恢复时回退少量字，避免从�
 // 还没有新动作，就自动弹回正在朗读的那句、恢复自动跟随。4秒是用户口述的
 // 起始估计值，先按这个实现，真机试过手感觉得太快/太慢再调。
 const CAPTION_IDLE_SNAPBACK_MS = 4000;
+const CAPTION_CANDIDATE_DWELL_MS = 500;
 // 手指抬起(onScrollEndDrag)后，等这么久看有没有紧接着的惯性滚动
 // (onMomentumScrollBegin)——安卓/iOS都存在"松手时已经没有速度，不会触发
 // 惯性滚动事件"的情况，纯靠onScrollEndDrag会导致这类场景永远等不到
@@ -702,6 +704,7 @@ export default function ListenScreen({ route, navigation }) {
   const captionContentHeightRef = useRef(0);
   const captionCurrentScrollYRef = useRef(0);
   const captionCenterCorrectionTimerRef = useRef(null);
+  const captionCandidateDwellTimerRef = useRef(null);
   const captionPendingScrollRef = useRef(null);
   // true=用户手指正在拖/惯性滚动尚未停，此时不能被代码的自动滚动打断。
   const captionUserScrollingRef = useRef(false);
@@ -761,8 +764,9 @@ export default function ListenScreen({ route, navigation }) {
       return false;
     }
     captionPendingScrollRef.current = null;
-    captionProgrammaticScrollUntilRef.current = Date.now() + (animated ? 1200 : 120);
-    scrollNode.scrollTo({ y: targetY, animated });
+    const useAnimatedScroll = Platform.OS === 'android' ? false : animated;
+    captionProgrammaticScrollUntilRef.current = Date.now() + (useAnimatedScroll ? 1200 : 180);
+    scrollNode.scrollTo({ y: targetY, animated: useAnimatedScroll });
     if (captionCenterCorrectionTimerRef.current) clearTimeout(captionCenterCorrectionTimerRef.current);
     if (Platform.OS === 'android') {
       // Android 的 flexWrap 文字在字体加载、换行和滚动动画结束后，屏幕实际
@@ -771,7 +775,7 @@ export default function ListenScreen({ route, navigation }) {
       captionCenterCorrectionTimerRef.current = setTimeout(() => {
         captionCenterCorrectionTimerRef.current = null;
         correctAndroidCaptionCenter(index);
-      }, animated ? 420 : 80);
+      }, 50);
     }
     return true;
   }, [correctAndroidCaptionCenter]);
@@ -844,6 +848,36 @@ export default function ListenScreen({ route, navigation }) {
     startCaptionIdleTimer();
   }, [clearCaptionIdleTimer, clearCaptionMomentumSafety, clearCaptionMomentumWait, phase, startCaptionIdleTimer]);
 
+  const clearCaptionCandidateDwell = useCallback(() => {
+    if (captionCandidateDwellTimerRef.current) {
+      clearTimeout(captionCandidateDwellTimerRef.current);
+      captionCandidateDwellTimerRef.current = null;
+    }
+  }, []);
+
+  const selectCenteredCaptionCandidate = useCallback(() => {
+    if (!captionUserScrollingRef.current || captionMomentumActiveRef.current) return;
+    const phraseIndex = centeredPhraseIndex({
+      layouts: captionPhraseLayoutsRef.current,
+      containerY: captionContainerYRef.current,
+      scrollY: captionCurrentScrollYRef.current,
+      viewportHeight: captionViewportHeightRef.current,
+    });
+    if (phraseIndex == null) return;
+    const phrase = splitCaptionPhrases(currentCaption)[phraseIndex];
+    if (!phrase) return;
+    const sentenceIndex = sentenceIndexAtOffset(splitCaptionSentences(currentCaption), phrase.start);
+    selectCaptionCandidate(sentenceIndex, phraseIndex);
+  }, [currentCaption, selectCaptionCandidate]);
+
+  const scheduleCenteredCaptionCandidate = useCallback(() => {
+    clearCaptionCandidateDwell();
+    captionCandidateDwellTimerRef.current = setTimeout(() => {
+      captionCandidateDwellTimerRef.current = null;
+      selectCenteredCaptionCandidate();
+    }, CAPTION_CANDIDATE_DWELL_MS);
+  }, [clearCaptionCandidateDwell, selectCenteredCaptionCandidate]);
+
   const forceCaptionVisualAlignment = useCallback((index = captionPhraseIndexRef.current) => {
     candidateSentenceIndexRef.current = null;
     setCandidateSentenceIndex(null);
@@ -863,9 +897,10 @@ export default function ListenScreen({ route, navigation }) {
       captionMomentumSafetyRef.current = null;
       if (!captionMomentumActiveRef.current) return;
       captionMomentumActiveRef.current = false;
+      scheduleCenteredCaptionCandidate();
       startCaptionIdleTimer();
     }, CAPTION_MOMENTUM_SAFETY_MS);
-  }, [clearCaptionMomentumSafety, startCaptionIdleTimer]);
+  }, [clearCaptionMomentumSafety, scheduleCenteredCaptionCandidate, startCaptionIdleTimer]);
   // 倒计时期间用户又碰了一下屏幕（不一定构成拖动），按需求要重新计时；
   // 只有已经在倒计时的情况下"碰一下"才算数，还没开始倒计时（比如手指
   // 还按着、还在惯性滑）时碰屏幕是正常操作的一部分，不需要特殊处理。
@@ -887,9 +922,10 @@ export default function ListenScreen({ route, navigation }) {
     captionUserScrollingRef.current = true;
     captionMomentumActiveRef.current = false;
     clearCaptionIdleTimer();
+    clearCaptionCandidateDwell();
     clearCaptionMomentumWait();
     clearCaptionMomentumSafety();
-  }, [clearCaptionCandidate, clearCaptionIdleTimer, clearCaptionMomentumSafety, clearCaptionMomentumWait]);
+  }, [clearCaptionCandidate, clearCaptionCandidateDwell, clearCaptionIdleTimer, clearCaptionMomentumSafety, clearCaptionMomentumWait]);
   const handleCaptionScrollEndDrag = useCallback(() => {
     captionSuppressPressUntilRef.current = Date.now() + 250;
     clearCaptionMomentumWait();
@@ -897,9 +933,12 @@ export default function ListenScreen({ route, navigation }) {
       captionMomentumWaitRef.current = null;
       // 等待窗口内如果惯性滚动没有开始，说明松手那一刻已经静止，从这里
       // 开始计时；如果惯性已经在跑，交给onMomentumScrollEnd去启动计时。
-      if (!captionMomentumActiveRef.current) startCaptionIdleTimer();
+      if (!captionMomentumActiveRef.current) {
+        scheduleCenteredCaptionCandidate();
+        startCaptionIdleTimer();
+      }
     }, CAPTION_MOMENTUM_WAIT_MS);
-  }, [clearCaptionMomentumWait, startCaptionIdleTimer]);
+  }, [clearCaptionMomentumWait, scheduleCenteredCaptionCandidate, startCaptionIdleTimer]);
   const handleCaptionMomentumScrollBegin = useCallback(() => {
     if (Date.now() < captionProgrammaticScrollUntilRef.current) return;
     captionMomentumActiveRef.current = true;
@@ -919,8 +958,9 @@ export default function ListenScreen({ route, navigation }) {
     captionSuppressPressUntilRef.current = Date.now() + 120;
     clearCaptionMomentumSafety();
     captionMomentumActiveRef.current = false;
+    scheduleCenteredCaptionCandidate();
     startCaptionIdleTimer();
-  }, [clearCaptionMomentumSafety, startCaptionIdleTimer]);
+  }, [clearCaptionMomentumSafety, scheduleCenteredCaptionCandidate, startCaptionIdleTimer]);
   // 换章节（currentCaption整章文本变了）时，旧的逐句布局按下标复用会指向
   // 错误的句子，清空等新章节的onLayout重新测。
   useEffect(() => {
@@ -1883,6 +1923,7 @@ export default function ListenScreen({ route, navigation }) {
       if (captionMomentumWaitRef.current) clearTimeout(captionMomentumWaitRef.current);
       if (captionMomentumSafetyRef.current) clearTimeout(captionMomentumSafetyRef.current);
       if (captionCenterCorrectionTimerRef.current) clearTimeout(captionCenterCorrectionTimerRef.current);
+      if (captionCandidateDwellTimerRef.current) clearTimeout(captionCandidateDwellTimerRef.current);
       if (autoListenRef.current && recordingRef.current) {
         recordingRef.current.stopAndUnloadAsync().catch(() => {});
       }
@@ -3366,7 +3407,6 @@ export default function ListenScreen({ route, navigation }) {
                               else delete captionPhraseNodesRef.current[index];
                             }}
                             onInteractivePressIn={() => { captionChildTouchRef.current = true; }}
-                            onSentenceCandidate={selectCaptionCandidate}
                             onConfirmSentence={handleJumpToSentence}
                           />
                           {captionSentenceCount > 0 && (

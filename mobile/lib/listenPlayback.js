@@ -15,6 +15,23 @@ function centeredScrollOffset({ layout, containerY = 0, viewportHeight = 0, cont
   return Math.max(0, Math.min(maxY, targetCenter - viewportHeight / 2));
 }
 
+function centeredPhraseIndex({ layouts, containerY = 0, scrollY = 0, viewportHeight = 0 }) {
+  if (!layouts || viewportHeight <= 0) return null;
+  const viewportCenter = scrollY + viewportHeight / 2;
+  let bestIndex = null;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  Object.entries(layouts).forEach(([rawIndex, layout]) => {
+    if (!layout || !Number.isFinite(layout.y) || !Number.isFinite(layout.height)) return;
+    const phraseCenter = containerY + layout.y + layout.height / 2;
+    const distance = Math.abs(phraseCenter - viewportCenter);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestIndex = Number(rawIndex);
+    }
+  });
+  return bestIndex;
+}
+
 function playbackRecoveryAction({ status, phase, isManuallyPaused, voiceInteractionActive = false }) {
   if (voiceInteractionActive) return 'none';
   if (phase !== 'playing') return 'none';
@@ -149,6 +166,7 @@ module.exports = {
   captionOpacityForIndex,
   captionVisualStateForSentence,
   centeredScrollOffset,
+  centeredPhraseIndex,
   playbackRecoveryAction,
   preparedSoundMatches,
   resolveNarrationStep,
