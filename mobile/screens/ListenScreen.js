@@ -2061,7 +2061,17 @@ export default function ListenScreen({ route, navigation }) {
         const db = typeof status.metering === 'number' ? status.metering : -160;
         // dBFS 映射为 0～1，只驱动现有麦克风按钮的光晕，不参与端点判断，
         // 因而灯效不会反过来改变录音何时开始/结束。
-        micLevelProgress.setValue(Math.max(0, Math.min(1, (db + 55) / 43)));
+        // 真机反馈：光晕一闪一闪、有点卡——原来每次metering回调都直接
+        // setValue，配合下面micGlowStyle之前跟"变色"那个必须走JS线程的动画
+        // 混在一起(Animated.multiply)，导致整个光晕每120ms都要在JS线程
+        // 重算一次。改成用短时长的Animated.timing(useNativeDriver:true)包一下，
+        // 既能让这个值真正注册进原生动画驱动、后续更新交给原生线程处理，
+        // 又顺带让音量变化之间的过渡更平滑，不是生硬地跳变。
+        Animated.timing(micLevelProgress, {
+          toValue: Math.max(0, Math.min(1, (db + 55) / 43)),
+          duration: HF_METER_INTERVAL_MS,
+          useNativeDriver: true,
+        }).start();
         if (db >= HF_SPEECH_DB) {
           speechEverDetected = true;
           silenceMs = 0;
@@ -3040,11 +3050,13 @@ export default function ListenScreen({ route, navigation }) {
       scale: micVisualProgress.interpolate({ inputRange: [0, 1], outputRange: [1, 0.94] }),
     }],
   };
+  // 之前用Animated.multiply把这个值跟micVisualProgress(必须走JS线程，因为
+  // 它还驱动着背景色变化)混在一起算透明度，导致光晕这个纯opacity/scale、
+  // 本可以走原生动画驱动的效果被一起拖慢。现在只用micLevelProgress自己算，
+  // 显示/隐藏改成在下面JSX里按hfStage直接条件渲染这个View，不再靠"乘以0"
+  // 去隐藏。
   const micGlowStyle = {
-    opacity: Animated.multiply(
-      micVisualProgress,
-      micLevelProgress.interpolate({ inputRange: [0, 1], outputRange: [0.14, 0.72] }),
-    ),
+    opacity: micLevelProgress.interpolate({ inputRange: [0, 1], outputRange: [0.14, 0.72] }),
     transform: [{
       scale: micLevelProgress.interpolate({ inputRange: [0, 1], outputRange: [1, 1.42] }),
     }],
@@ -3336,7 +3348,9 @@ export default function ListenScreen({ route, navigation }) {
                             accessibilityRole="button"
                             accessibilityLabel={manualAskLabel}
                           >
-                            <Animated.View pointerEvents="none" style={[styles.voiceModeMicGlow, micGlowStyle]} />
+                            {hfStage === 'listening' && (
+                              <Animated.View pointerEvents="none" style={[styles.voiceModeMicGlow, micGlowStyle]} />
+                            )}
                             <IconMicrophone
                               color={hfStage === 'listening' ? EMBER.ink : EMBER.inkSoft}
                               size={24}
