@@ -40,11 +40,23 @@ import pdfplumber
 from bs4 import BeautifulSoup, Tag, UnicodeDammit
 from dotenv import load_dotenv
 
-from api.external_search import (
-    fetch_external_evidence,
-    format_external_evidence_block,
-    should_trigger_external_search,
-)
+try:
+    # 本地/仓库里 main.py 被当作 api.main 这个包的一部分导入（测试文件都是
+    # `from api.main import ...`），这种情况下用绝对包路径导入。
+    from api.external_search import (
+        fetch_external_evidence,
+        format_external_evidence_block,
+        should_trigger_external_search,
+    )
+except ModuleNotFoundError:
+    # 腾讯云上 systemd 用 `WorkingDirectory=/opt/chatbook-api/api` + `uvicorn
+    # main:app` 启动，main.py 被当成顶层模块跑，这时候没有 `api` 这个包可导入，
+    # external_search.py 是跟 main.py 同目录的普通文件，退回不带包前缀的导入。
+    from external_search import (  # type: ignore[no-redef]
+        fetch_external_evidence,
+        format_external_evidence_block,
+        should_trigger_external_search,
+    )
 
 load_dotenv()
 
