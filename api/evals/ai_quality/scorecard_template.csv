@@ -1,1 +1,1 @@
-case_id,category,config_id,adapter,evidence_type,grounding_accuracy,factual_correctness,honest_uncertainty,answer_depth,clarity,evidence_labeling,score_total,ttft_ms,total_latency_ms,input_tokens,output_tokens,estimated_cost,error,reviewer_notes
+case_id,category,config_id,adapter,evidence_type,grounding_accuracy,factual_correctness,honest_uncertainty,answer_depth,clarity,evidence_labeling,citation_validity,score_total,ttft_ms,total_latency_ms,input_tokens,output_tokens,estimated_cost,error,reviewer_notes

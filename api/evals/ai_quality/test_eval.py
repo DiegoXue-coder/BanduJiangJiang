@@ -21,7 +21,7 @@ import score_eval  # noqa: E402
 class DatasetTests(unittest.TestCase):
     def test_dataset_is_balanced_and_fixed_size(self) -> None:
         cases = run_eval.load_cases(HERE / "cases.jsonl")
-        self.assertEqual(42, len(cases))
+        self.assertEqual(49, len(cases))
         self.assertEqual(
             {category: 7 for category in run_eval.ALLOWED_CATEGORIES},
             Counter(case["category"] for case in cases),
@@ -178,7 +178,7 @@ class ScoreTests(unittest.TestCase):
             score_eval.make_scorecard(HERE / "cases.jsonl", HERE / "configs.example.json", output, None)
             with output.open(encoding="utf-8-sig", newline="") as handle:
                 rows = list(csv.DictReader(handle))
-            self.assertEqual(42 * 3, len(rows))
+            self.assertEqual(49 * 3, len(rows))
 
     def test_summary_rejects_out_of_range_scores(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

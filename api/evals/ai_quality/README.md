@@ -4,7 +4,7 @@
 
 ## 目录
 
-- `cases.jsonl`：42 道固定题，六类各 7 道。
+- `cases.jsonl`：49 道固定题，七类各 7 道（2026-09-24 新增 `external_fact` 一类，专测 AI 质量第二阶段的外部联网查证）。
 - `configs.example.json`：直连模型与 ChatBook 生产接口配置示例，不含密钥。
 - `run_eval.py`：默认 dry-run 的双 adapter 流式运行器。
 - `score_eval.py`：生成评分表、校验人工评分并汇总。
@@ -20,7 +20,7 @@
 
 | 字段 | 含义 |
 |---|---|
-| `id` / `category` / `title` | 稳定标识、六类之一、可读标题 |
+| `id` / `category` / `title` | 稳定标识、七类之一、可读标题 |
 | `question` | 固定问题 |
 | `context` | 当前正文、划线、跨章检索片段和会话记忆 |
 | `expected_evidence_types` | 期望使用的依据类型，可多选 |
@@ -29,7 +29,11 @@
 | `human_scoring_notes` | 本题评分提示，不作为模型输入 |
 | `risk_level` / `source_kind` | 风险等级、`synthetic` 或 `public_domain` 来源 |
 
-当前五种证据类型是 `current_context`、`user_selection`、`conversation_memory`、`general_knowledge`、`insufficient_context`。`conversation_memory` 是未来能力的评测标识；当前候选若不支持，应如实暴露缺口，不要为了过题把记忆伪装成正文。
+当前六种证据类型是 `current_context`、`user_selection`、`conversation_memory`、`general_knowledge`、`insufficient_context`、`external_fact`。`conversation_memory` 是未来能力的评测标识；当前候选若不支持，应如实暴露缺口，不要为了过题把记忆伪装成正文。`external_fact` 对应 2026-09-24 上线的外部查证功能（千问 DashScope 接口），只表示"这次用了外部查证来源"，不表示答案已经被核实——语义边界跟其它证据类型一致，见 `docs/项目管理/14-方案讨论-外部资源联网查证.md`。
+
+### `external_fact` 这一类题的特殊之处
+
+跟其它六类不同，`external_fact` 依赖联网查证服务本身的可用性/搜索结果质量，同一道题**不保证每次运行都得到相同结果**（搜索结果本身就有波动，这是2026-09-24真机复测反复验证过的真实现象，不是评测代码的问题）。评分时不要因为某次跑出"没查到、诚实说依据不足"就直接扣分——这题的 `expected_evidence_types` 通常同时列出 `external_fact` 和 `insufficient_context`/`general_knowledge` 两种，只要回答诚实、没有编造，两种结果都算合格；真正该扣分的是编造内容、或者对现实世界问题避而不答却又不说明原因。
 
 ## 两种 adapter
 
@@ -87,7 +91,7 @@ python api/evals/ai_quality/run_eval.py --config C:\private\ai-quality.json --ta
 
 ## 人工评分
 
-从一次运行结果生成评分表。示例配置包含两个 direct target 和一个 ChatBook target，全量为 126 行；单独运行一个 target 为 42 行：
+从一次运行结果生成评分表。示例配置包含两个 direct target 和一个 ChatBook target，全量为 147 行；单独运行一个 target 为 49 行：
 
 ```powershell
 python api/evals/ai_quality/score_eval.py make `
@@ -95,7 +99,7 @@ python api/evals/ai_quality/score_eval.py make `
   --output api/evals/ai_quality/results/scorecard.csv
 ```
 
-也可不传 `--results`，先建立空白评分表。六项均只允许 `0/1/2`：
+也可不传 `--results`，先建立空白评分表。七项均只允许 `0/1/2`：
 
 | 指标 | 0 分 | 1 分 | 2 分 |
 |---|---|---|---|
@@ -105,8 +109,11 @@ python api/evals/ai_quality/score_eval.py make `
 | `answer_depth` | 未回答核心问题 | 回答核心但解释浅 | 有充分且相关的解释/比较 |
 | `clarity` | 难懂、矛盾或严重跑题 | 基本可懂但组织一般 | 简洁、连贯、直接 |
 | `evidence_labeling` | 混淆原文、记忆和常识 | 有区分但不稳定 | 清楚标明依据类型 |
+| `citation_validity` | 引用和答案对不上、或链接是编的 | 有引用但没真正支撑关键结论 | 引用确实支撑了给出的结论 |
 
-评分者应同时查看该题的 `must_include`、`must_not_claim` 和 `human_scoring_notes`。`score_total` 可留空，汇总工具会按六项直接计算，避免手填加总错误。
+`citation_validity` 只在题目实际用到了外部查证来源时才有意义；非 `external_fact` 类题目（没有联网查证）这项按不适用处理，评分者可以直接给 2 分或在 `reviewer_notes` 里注明"无需引用"，不强行扣分。
+
+评分者应同时查看该题的 `must_include`、`must_not_claim` 和 `human_scoring_notes`。`score_total` 可留空，汇总工具会按七项直接计算，避免手填加总错误。
 
 ```powershell
 python api/evals/ai_quality/score_eval.py summarize `
@@ -114,7 +121,7 @@ python api/evals/ai_quality/score_eval.py summarize `
   --output api/evals/ai_quality/results/summary.json
 ```
 
-汇总给出各配置六维均分、12 分制总均分、分类均分、延迟与成本。原始结果和逐题评分不得提交；对外只按 `summary_template.md` 去敏整理。没有完成同题对照和人工复核前，不得宣称候选质量提升。
+汇总给出各配置七维均分、14 分制总均分、分类均分、延迟与成本。原始结果和逐题评分不得提交；对外只按 `summary_template.md` 去敏整理。没有完成同题对照和人工复核前，不得宣称候选质量提升。
 
 ## 离线验证
 

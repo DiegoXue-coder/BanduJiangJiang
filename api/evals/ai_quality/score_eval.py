@@ -22,6 +22,12 @@ METRICS = (
     "answer_depth",
     "clarity",
     "evidence_labeling",
+    # AI质量第二阶段新增：专门看"引用是不是真的支撑了给出的结论"，不是随便
+    # 贴几个链接充数——0分=引用和答案对不上或者链接是编的，1分=有引用但没
+    # 真正支撑关键结论，2分=引用确实支撑了结论。非外部查证题（没有来源）
+    # 这项按不适用处理，评分时可以直接给2分或在reviewer_notes里注明"无需引用"，
+    # 不强行扣分。
+    "citation_validity",
 )
 FIELDNAMES = (
     "case_id",
@@ -124,7 +130,7 @@ def summarize(scorecard: Path) -> dict[str, Any]:
             by_category[row["category"]].append(row)
         config_summary: dict[str, Any] = {
             "cases_scored": len(rows),
-            "mean_total_out_of_12": round(statistics.fmean(row["total"] for row in rows), 3),
+            "mean_total_out_of_14": round(statistics.fmean(row["total"] for row in rows), 3),
             "metrics_mean_out_of_2": {
                 metric: round(statistics.fmean(row["scores"][metric] for row in rows), 3)
                 for metric in METRICS
@@ -132,7 +138,7 @@ def summarize(scorecard: Path) -> dict[str, Any]:
             "categories": {
                 category: {
                     "cases_scored": len(category_rows),
-                    "mean_total_out_of_12": round(statistics.fmean(row["total"] for row in category_rows), 3),
+                    "mean_total_out_of_14": round(statistics.fmean(row["total"] for row in category_rows), 3),
                 }
                 for category, category_rows in sorted(by_category.items())
             },

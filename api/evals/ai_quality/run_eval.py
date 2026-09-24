@@ -24,13 +24,17 @@ REQUIRED_CASE_FIELDS = {
     "id", "category", "title", "question", "context", "expected_evidence_types",
     "must_include", "must_not_claim", "human_scoring_notes", "risk_level", "source_kind",
 }
+# AI质量第二阶段(外部查证)新增：external_fact 这一类专门测试联网查证场景
+# （稳定事实/时效性/来源冲突/查不到要老实说/听书划线场景下问题仍在问现实
+# 世界的事），题目和对应踩过的真实bug都记在 docs/项目管理/04-开发进度记录.md
+# 续二十八至续三十。
 ALLOWED_CATEGORIES = {
     "current_context", "cross_chapter", "insufficient_context",
-    "conversation_memory", "high_risk", "literary_open",
+    "conversation_memory", "high_risk", "literary_open", "external_fact",
 }
 ALLOWED_EVIDENCE_TYPES = {
     "current_context", "user_selection", "conversation_memory",
-    "general_knowledge", "insufficient_context",
+    "general_knowledge", "insufficient_context", "external_fact",
 }
 ALLOWED_ADAPTERS = {"direct_model", "chatbook_api"}
 
