@@ -9,6 +9,7 @@ const {
   resolveJumpTarget,
   splitCaptionPhrases,
   rangeIndexAtOffset,
+  stripCitationMarkersForSpeech,
 } = require('../lib/listenPlayback');
 
 assert.equal(captionOpacityForIndex(3, 3), 1, '当前句必须首帧直接亮起');
@@ -102,5 +103,16 @@ const quotedPhrases = splitCaptionPhrases('他说：“可以。”然后继续�
 assert.equal(quotedPhrases[0].text, '他说：');
 assert.equal(quotedPhrases[1].text, '“可以。”', '句末引号应跟随前面的自然停顿');
 assert.equal(quotedPhrases.map((item) => item.text).join(''), '他说：“可以。”然后继续。');
+
+assert.equal(
+  stripCitationMarkersForSpeech('德勤收入增长。[1] 普华永道也增长【2】。'),
+  '德勤收入增长。 普华永道也增长。',
+  '朗读不得念出来源编号',
+);
+assert.equal(
+  stripCitationMarkersForSpeech('数据来自公开报告 [1][2][3]，请查看来源。'),
+  '数据来自公开报告，请查看来源。',
+  '连续引用编号及其标点前空格应一起清理',
+);
 
 console.log('listen playback tests passed');

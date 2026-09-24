@@ -10,7 +10,7 @@ import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import {
   View, Text, StyleSheet, TouchableOpacity, TextInput,
   ActivityIndicator, ScrollView, Platform, KeyboardAvoidingView, Switch,
-  Modal, Animated, AppState, Pressable,
+  Modal, Animated, AppState, Pressable, Linking,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Audio, InterruptionModeIOS, InterruptionModeAndroid } from 'expo-av';
@@ -47,6 +47,7 @@ const {
   resolveJumpTarget,
   splitCaptionPhrases,
   rangeIndexAtOffset,
+  stripCitationMarkersForSpeech,
 } = require('../lib/listenPlayback');
 
 // 听书页使用最终原型 listen-final-prototype 的中性炭黑暗色，不再沿用旧版
@@ -404,6 +405,7 @@ function NarrationParagraph({
   candidatePhraseIndex,
   onContainerLayout,
   onPhraseLayout,
+  onPhraseRef,
   onSentenceCandidate,
   onConfirmSentence,
   onInteractivePressIn,
@@ -434,6 +436,7 @@ function NarrationParagraph({
         if (showJumpButton) {
           return (
             <View
+              ref={(node) => onPhraseRef?.(index, node)}
               key={`${phrase.start}-${phrase.end}`}
               style={styles.captionCandidateGroup}
               onLayout={layoutPhrase}
@@ -471,6 +474,7 @@ function NarrationParagraph({
             phrase={phrase}
             visualState={visualState}
             onLayout={layoutPhrase}
+            phraseRef={(node) => onPhraseRef?.(index, node)}
             onPressIn={onInteractivePressIn}
             onPress={selectPhrase}
           />
@@ -490,9 +494,10 @@ function narrationPhraseStyle(visualState) {
   return { color: EMBER.inkSoft, opacity: 0.74, fontWeight: '400' };
 }
 
-function StaticNarrationPhrase({ phrase, visualState, onLayout, onPressIn, onPress }) {
+function StaticNarrationPhrase({ phrase, visualState, onLayout, phraseRef, onPressIn, onPress }) {
   return (
     <Pressable
+      ref={phraseRef}
       onLayout={onLayout}
       onPressIn={onPressIn}
       onPress={onPress}
@@ -505,6 +510,64 @@ function StaticNarrationPhrase({ phrase, visualState, onLayout, onPressIn, onPre
         {phrase.text}
       </Text>
     </Pressable>
+  );
+}
+
+function ListenAnswerText({ text, sources, style }) {
+  const sourceByIndex = useMemo(() => {
+    const map = {};
+    (sources || []).forEach((source) => {
+      if (source.index != null) map[Number(source.index)] = source;
+    });
+    return map;
+  }, [sources]);
+  const parts = useMemo(() => String(text || '').split(/(\[\d+\])/g), [text]);
+  return (
+    <Text style={style}>
+      {parts.map((part, index) => {
+        const match = part.match(/^\[(\d+)\]$/);
+        const source = match ? sourceByIndex[Number(match[1])] : null;
+        return source?.url ? (
+          <Text
+            key={`${part}-${index}`}
+            style={styles.listenCitationMark}
+            onPress={() => Linking.openURL(source.url).catch(() => {})}
+          >
+            {part}
+          </Text>
+        ) : part;
+      })}
+    </Text>
+  );
+}
+
+function ListenSourcesRow({ sources }) {
+  const [expanded, setExpanded] = useState(false);
+  if (!sources?.length) return null;
+  return (
+    <View style={styles.listenSourcesWrap}>
+      <TouchableOpacity style={styles.listenSourcesToggle} onPress={() => setExpanded((value) => !value)}>
+        <Text style={styles.listenSourcesToggleText}>
+          {expanded ? '收起来源' : `查看来源（${sources.length}）`}
+        </Text>
+      </TouchableOpacity>
+      {expanded && sources.map((source, index) => (
+        <TouchableOpacity
+          key={`${source.url || source.title}-${index}`}
+          style={styles.listenSourceItem}
+          disabled={!source.url}
+          onPress={() => source.url && Linking.openURL(source.url).catch(() => {})}
+        >
+          <Text style={styles.listenSourceIndex}>[{source.index ?? index + 1}]</Text>
+          <View style={styles.listenSourceBody}>
+            <Text style={styles.listenSourceTitle} numberOfLines={1}>
+              {source.title || source.siteName || '网页来源'}
+            </Text>
+            {!!source.url && <Text style={styles.listenSourceUrl} numberOfLines={1}>{source.url}</Text>}
+          </View>
+        </TouchableOpacity>
+      ))}
+    </View>
   );
 }
 
@@ -628,12 +691,15 @@ export default function ListenScreen({ route, navigation }) {
   // 语义句继续负责计数和跳转，视觉跟随改用更短的短语布局，避免一个跨多行
   // 长句只量到整块高度、声音念到后半句时视觉位置逐渐沉到屏幕下方。
   const captionPhraseLayoutsRef = useRef({});
+  const captionPhraseNodesRef = useRef({});
   // NarrationParagraph容器相对captionScrollContent（滚动内容顶层）的y——
   // 前面还有captionReadingRail等兄弟节点占位，需要加上这段偏移才能换算
   // 成"该滚动到的绝对位置"。
   const captionContainerYRef = useRef(0);
   const captionViewportHeightRef = useRef(0);
   const captionContentHeightRef = useRef(0);
+  const captionCurrentScrollYRef = useRef(0);
+  const captionCenterCorrectionTimerRef = useRef(null);
   const captionPendingScrollRef = useRef(null);
   // true=用户手指正在拖/惯性滚动尚未停，此时不能被代码的自动滚动打断。
   const captionUserScrollingRef = useRef(false);
@@ -653,6 +719,25 @@ export default function ListenScreen({ route, navigation }) {
   // 计时器那一刻的旧state。
   const captionPhraseIndexRef = useRef(0);
   useEffect(() => { captionPhraseIndexRef.current = captionPhraseIndex; }, [captionPhraseIndex]);
+
+  const correctAndroidCaptionCenter = useCallback((index) => {
+    if (Platform.OS !== 'android' || captionUserScrollingRef.current) return;
+    const phraseNode = captionPhraseNodesRef.current[index];
+    const scrollNode = captionScrollRef.current;
+    if (!phraseNode?.measureInWindow || !scrollNode?.measureInWindow) return;
+    phraseNode.measureInWindow((_x, phraseY, _width, phraseHeight) => {
+      if (captionUserScrollingRef.current || index !== captionPhraseIndexRef.current) return;
+      scrollNode.measureInWindow((_scrollX, scrollY, _scrollWidth, scrollHeight) => {
+        if (captionUserScrollingRef.current || index !== captionPhraseIndexRef.current) return;
+        const delta = phraseY + phraseHeight / 2 - (scrollY + scrollHeight / 2);
+        if (!Number.isFinite(delta) || Math.abs(delta) < 5) return;
+        const maxY = Math.max(0, captionContentHeightRef.current - captionViewportHeightRef.current);
+        const targetY = Math.max(0, Math.min(maxY, captionCurrentScrollYRef.current + delta));
+        captionProgrammaticScrollUntilRef.current = Date.now() + 180;
+        scrollNode.scrollTo({ y: targetY, animated: false });
+      });
+    });
+  }, []);
 
   const scrollCaptionToPhrase = useCallback((index, animated) => {
     const layout = captionPhraseLayoutsRef.current[index];
@@ -676,8 +761,18 @@ export default function ListenScreen({ route, navigation }) {
     captionPendingScrollRef.current = null;
     captionProgrammaticScrollUntilRef.current = Date.now() + (animated ? 1200 : 120);
     scrollNode.scrollTo({ y: targetY, animated });
+    if (captionCenterCorrectionTimerRef.current) clearTimeout(captionCenterCorrectionTimerRef.current);
+    if (Platform.OS === 'android') {
+      // Android 的 flexWrap 文字在字体加载、换行和滚动动画结束后，屏幕实际
+      // 位置可能与 onLayout 报告的内容坐标有偏差。先按内容坐标滚，再用真机
+      // 屏幕坐标复核一次，只纠正 Android，不改变已经正常的 iOS 路径。
+      captionCenterCorrectionTimerRef.current = setTimeout(() => {
+        captionCenterCorrectionTimerRef.current = null;
+        correctAndroidCaptionCenter(index);
+      }, animated ? 420 : 80);
+    }
     return true;
-  }, []);
+  }, [correctAndroidCaptionCenter]);
 
   const retryPendingCaptionScroll = useCallback(() => {
     const pending = captionPendingScrollRef.current;
@@ -781,6 +876,10 @@ export default function ListenScreen({ route, navigation }) {
   }, [clearCaptionCandidate]);
   const handleCaptionScrollBeginDrag = useCallback(() => {
     captionProgrammaticScrollUntilRef.current = 0;
+    if (captionCenterCorrectionTimerRef.current) {
+      clearTimeout(captionCenterCorrectionTimerRef.current);
+      captionCenterCorrectionTimerRef.current = null;
+    }
     captionSuppressPressUntilRef.current = Date.now() + 500;
     clearCaptionCandidate(false);
     captionUserScrollingRef.current = true;
@@ -806,7 +905,8 @@ export default function ListenScreen({ route, navigation }) {
     clearCaptionIdleTimer();
     armCaptionMomentumSafety();
   }, [armCaptionMomentumSafety, clearCaptionMomentumWait, clearCaptionIdleTimer]);
-  const handleCaptionScroll = useCallback(() => {
+  const handleCaptionScroll = useCallback(({ nativeEvent }) => {
+    captionCurrentScrollYRef.current = nativeEvent?.contentOffset?.y || 0;
     if (captionMomentumActiveRef.current) armCaptionMomentumSafety();
   }, [armCaptionMomentumSafety]);
   const handleCaptionMomentumScrollEnd = useCallback(() => {
@@ -823,6 +923,7 @@ export default function ListenScreen({ route, navigation }) {
   // 错误的句子，清空等新章节的onLayout重新测。
   useEffect(() => {
     captionPhraseLayoutsRef.current = {};
+    captionPhraseNodesRef.current = {};
     captionContainerYRef.current = 0;
     clearCaptionCandidate(false);
     captionPendingScrollRef.current = { index: captionPhraseIndexRef.current, animated: false };
@@ -1778,6 +1879,7 @@ export default function ListenScreen({ route, navigation }) {
       if (captionIdleTimerRef.current) clearTimeout(captionIdleTimerRef.current);
       if (captionMomentumWaitRef.current) clearTimeout(captionMomentumWaitRef.current);
       if (captionMomentumSafetyRef.current) clearTimeout(captionMomentumSafetyRef.current);
+      if (captionCenterCorrectionTimerRef.current) clearTimeout(captionCenterCorrectionTimerRef.current);
       if (autoListenRef.current && recordingRef.current) {
         recordingRef.current.stopAndUnloadAsync().catch(() => {});
       }
@@ -2394,7 +2496,7 @@ export default function ListenScreen({ route, navigation }) {
       };
 
       const enqueueReplyTts = (text) => {
-        const clean = (text || '').trim();
+        const clean = stripCitationMarkersForSpeech(text);
         if (!clean) return;
         if (!firstTtsQueued) {
           firstTtsQueued = true;
@@ -2462,7 +2564,7 @@ export default function ListenScreen({ route, navigation }) {
               : [...prev, { id: replyId, role: 'assistant', content: fullAnswer }]);
             if (HF_REPLY_TTS_STREAMING_ENABLED) flushSentences(false);
           },
-          onDone: async (answer) => {
+          onDone: async (answer, _evidenceType, externalSources) => {
             hfAbortRef.current = null;
             if (epoch !== epochRef.current || !hfActiveRef.current) {
               streamDone = true;
@@ -2476,8 +2578,8 @@ export default function ListenScreen({ route, navigation }) {
             }
             if (finalAnswer) {
               setVoiceMessages((prev) => prev.some((msg) => msg.id === replyId)
-                ? prev.map((msg) => msg.id === replyId ? { ...msg, content: finalAnswer } : msg)
-                : [...prev, { id: replyId, role: 'assistant', content: finalAnswer }]);
+                ? prev.map((msg) => msg.id === replyId ? { ...msg, content: finalAnswer, sources: externalSources || [] } : msg)
+                : [...prev, { id: replyId, role: 'assistant', content: finalAnswer, sources: externalSources || [] }]);
             }
             markHfTiming(`AI回复完成 answerChars=${finalAnswer.length}`, 'llm_done');
             setHfTimingMeta({ answerChars: finalAnswer.length });
@@ -2686,9 +2788,9 @@ export default function ListenScreen({ route, navigation }) {
       },
       {
         onDelta: (delta) => { fullAnswer += delta; },
-        onDone: async (answer) => {
+        onDone: async (answer, _evidenceType, externalSources) => {
           abortAskRef.current = null;
-          setConversation((prev) => [...prev, { role: 'assistant', content: answer }]);
+          setConversation((prev) => [...prev, { role: 'assistant', content: answer, sources: externalSources || [] }]);
           rememberPromptTurn(q, answer);
           // 打断瞬间截取的段落，本来无条件当成一次"自动划线"存下来——
           // 用户验收时明确提出想自己决定要不要存，改成只有勾选了"保存为
@@ -2709,7 +2811,7 @@ export default function ListenScreen({ route, navigation }) {
           setPhase('answering');
           const epoch = epochRef.current;
           try {
-            await playOneParagraph(answer, epoch);
+            await playOneParagraph(stripCitationMarkersForSpeech(answer), epoch);
           } catch (e) {
             // 回答播放失败不影响后续流程
           }
@@ -3228,6 +3330,10 @@ export default function ListenScreen({ route, navigation }) {
                               captionPhraseLayoutsRef.current[index] = layout;
                               if (captionPendingScrollRef.current?.index === index) retryPendingCaptionScroll();
                             }}
+                            onPhraseRef={(index, node) => {
+                              if (node) captionPhraseNodesRef.current[index] = node;
+                              else delete captionPhraseNodesRef.current[index];
+                            }}
                             onInteractivePressIn={() => { captionChildTouchRef.current = true; }}
                             onSentenceCandidate={selectCaptionCandidate}
                             onConfirmSentence={handleJumpToSentence}
@@ -3289,7 +3395,14 @@ export default function ListenScreen({ route, navigation }) {
                                   {msg.role === 'user' ? '我' : 'AI'}{msg.historical ? ' · 历史' : ''}
                                 </Text>
                                 <View style={[styles.bubble, msg.role === 'user' ? styles.bubbleUser : styles.bubbleAi]}>
-                                  <Text style={msg.role === 'user' ? styles.bubbleUserText : styles.bubbleAiText}>{msg.content}</Text>
+                                  {msg.role === 'user' ? (
+                                    <Text style={styles.bubbleUserText}>{msg.content}</Text>
+                                  ) : (
+                                    <>
+                                      <ListenAnswerText text={msg.content} sources={msg.sources} style={styles.bubbleAiText} />
+                                      <ListenSourcesRow sources={msg.sources} />
+                                    </>
+                                  )}
                                 </View>
                               </View>
                             ))}
@@ -3326,9 +3439,14 @@ export default function ListenScreen({ route, navigation }) {
                         key={idx}
                         style={[styles.bubble, msg.role === 'user' ? styles.bubbleUser : styles.bubbleAi]}
                       >
-                        <Text style={msg.role === 'user' ? styles.bubbleUserText : styles.bubbleAiText}>
-                          {msg.content}
-                        </Text>
+                        {msg.role === 'user' ? (
+                          <Text style={styles.bubbleUserText}>{msg.content}</Text>
+                        ) : (
+                          <>
+                            <ListenAnswerText text={msg.content} sources={msg.sources} style={styles.bubbleAiText} />
+                            <ListenSourcesRow sources={msg.sources} />
+                          </>
+                        )}
                       </View>
                     ))}
 
@@ -3639,6 +3757,15 @@ const styles = StyleSheet.create({
   },
   bubbleUserText: { fontSize: 13, lineHeight: 20.8, color: '#202123' },
   bubbleAiText: { fontSize: 13, lineHeight: 20.8, color: EMBER.paper },
+  listenCitationMark: { color: EMBER.emberBright, fontWeight: '700', textDecorationLine: 'underline' },
+  listenSourcesWrap: { marginTop: 8, alignSelf: 'stretch' },
+  listenSourcesToggle: { paddingVertical: 4 },
+  listenSourcesToggleText: { fontSize: 11, color: EMBER.emberBright },
+  listenSourceItem: { flexDirection: 'row', alignItems: 'flex-start', paddingVertical: 5, gap: 6 },
+  listenSourceIndex: { width: 24, fontSize: 11, color: EMBER.emberBright },
+  listenSourceBody: { flex: 1, minWidth: 0 },
+  listenSourceTitle: { fontSize: 11.5, lineHeight: 16, color: EMBER.paper },
+  listenSourceUrl: { marginTop: 1, fontSize: 9.5, lineHeight: 13, color: EMBER.paperDim },
   thinkingRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 4 },
   thinkingText: { fontSize: 13, color: EMBER.paperDim },
   resumeRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 2 },

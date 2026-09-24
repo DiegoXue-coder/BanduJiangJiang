@@ -120,6 +120,14 @@ function rangeIndexAtOffset(ranges, offset) {
   return found === -1 ? ranges.length - 1 : found;
 }
 
+function stripCitationMarkersForSpeech(text) {
+  return String(text || '')
+    .replace(/(?:\s*[\[【]\s*\d+(?:\s*[-–—,，、]\s*\d+)*\s*[\]】])+/g, '')
+    .replace(/[ \t]+([，。！？；：,.!?;:])/g, '$1')
+    .replace(/[ \t]{2,}/g, ' ')
+    .trim();
+}
+
 module.exports = {
   captionOpacityForIndex,
   captionVisualStateForSentence,
@@ -130,4 +138,5 @@ module.exports = {
   resolveJumpTarget,
   splitCaptionPhrases,
   rangeIndexAtOffset,
+  stripCitationMarkersForSpeech,
 };

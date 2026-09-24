@@ -86,6 +86,16 @@ class TriggerRuleTests(unittest.TestCase):
             "这些事务所的创始人是谁，营收状况怎么样？", "simple", "current_context",
         ))
 
+    def test_real_world_entity_definition_triggers(self):
+        self.assertTrue(should_trigger_external_search(
+            "八大会计师事务所是什么？", "simple", "user_selection",
+        ))
+
+    def test_plain_book_explanation_stays_in_context(self):
+        self.assertFalse(should_trigger_external_search(
+            "这句话是什么意思？", "simple", "user_selection",
+        ))
+
 
 class TrustLabelTests(unittest.TestCase):
     def test_trusted_domain(self):

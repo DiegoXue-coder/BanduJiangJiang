@@ -44,6 +44,10 @@ _REAL_WORLD_HINTS = (
     "创始人", "创办人", "谁创办", "成立于", "营收", "收入", "利润", "财报", "市值", "总部",
     "首席执行官", "CEO", "员工数", "市场份额",
 )
+_REAL_WORLD_ENTITY_HINTS = (
+    "事务所", "公司", "企业", "机构", "品牌", "银行", "基金", "大学", "医院", "组织",
+)
+_FACT_QUESTION_HINTS = ("是什么", "是谁", "有哪些", "哪几", "多少", "怎么样", "如何", "情况")
 # 2026-09-24真机实测发现的真bug：听书页打断提问时，context永远带着当前正在念
 # 的那句(selection非空)，导致available_evidence_type变成user_selection——原来
 # 要求"必须是insufficient_context/general_knowledge才触发"这条限制，会让所有
@@ -109,7 +113,16 @@ def should_trigger_external_search(question: str, style: str, available_evidence
     text = question or ""
     if any(h in text for h in _BOOK_ANCHORED_HINTS):
         return False
-    return any(h in text for h in _TIME_SENSITIVE_HINTS) or any(h in text for h in _REAL_WORLD_HINTS)
+    if any(h in text for h in _TIME_SENSITIVE_HINTS) or any(h in text for h in _REAL_WORLD_HINTS):
+        return True
+    # “八大会计师事务所是什么”这类问题没有“最新/营收”等显眼关键词，但
+    # 本质仍是在问现实世界实体。实体词+事实问法同时出现时主动查证，避免把
+    # “书里没有写”当成回答终点；只出现“是什么意思”而没有实体词的书内解释
+    # 仍留在原文问答链路，不会无差别联网。
+    return (
+        any(h in text for h in _REAL_WORLD_ENTITY_HINTS)
+        and any(h in text for h in _FACT_QUESTION_HINTS)
+    )
 
 
 # ── 来源可信度标注：纯域名规则匹配，不额外调用AI ────────────────────────────

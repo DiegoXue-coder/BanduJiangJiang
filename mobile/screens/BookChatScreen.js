@@ -17,6 +17,7 @@ import {
 import { useTheme } from '../theme';
 import { FONTS } from '../fonts';
 const { truncateAtParagraphBoundary } = require('../lib/readingContext');
+const { stripCitationMarkersForSpeech } = require('../lib/listenPlayback');
 
 // 按中文/英文句末标点切句——流式回答边生成边攒 buffer，攒够一整句就送去TTS，
 // 不用等全部回答生成完才开口。
@@ -306,15 +307,16 @@ export default function BookChatScreen({
   // 让下一句的加载时间跟当前句的播放时间重叠，播完直接无缝接上已经准备好的
   // 音频，不用现场再等一次网络请求。
   function enqueueTts(text) {
-    if (!ttsOn || !text.trim()) return;
+    const speechText = stripCitationMarkersForSpeech(text);
+    if (!ttsOn || !speechText) return;
     const seq = ++ttsSeqRef.current;
     // 临时诊断：真机反馈"分段播放顺序错乱、最后一句经常不播"，此前几次
     // 修复解决的是相邻但不同的症状，没有真正命中这两个具体问题——按决策层
     // 要求这次要用真实录音复现的日志确认根因，不能再假设"应该修过了"。
     // 每句话打一个自增序号，从入队到真正播放完的每一步都打日志，下次真机
     // 复现问题时能直接看到真实的事件顺序。排查完这几处日志就删。
-    console.log(`[TTS诊断] 入队 seq=${seq} 队列长度=${ttsQueueRef.current.length + 1} 文字="${text.trim().slice(0, 12)}…"`);
-    ttsQueueRef.current.push({ seq, text: text.trim() });
+    console.log(`[TTS诊断] 入队 seq=${seq} 队列长度=${ttsQueueRef.current.length + 1} 文字="${speechText.slice(0, 12)}…"`);
+    ttsQueueRef.current.push({ seq, text: speechText });
     if (ttsPlayingRef.current) {
       // 已经在放别的句子，趁这个空档把这句提前加载好
       prefetchNext();
