@@ -826,6 +826,7 @@ export default function ListenScreen({ route, navigation }) {
   const chaptersRef = useRef([]); // 已经过滤掉"目录"章节的列表
   const standardChaptersRef = useRef(false);
   const paragraphCacheRef = useRef({}); // chapterId -> string[]
+  const chapterLoadPromisesRef = useRef({}); // chapterId -> Promise<string[]>
   const epochRef = useRef(0); // 每次打断/停止自增，让还没awaitresolve的加载能认出自己过期
   const soundRef = useRef(null);
   const lastNarrationFinishedAtRef = useRef(0);
@@ -1305,6 +1306,26 @@ export default function ListenScreen({ route, navigation }) {
     return mergeParagraphsForNarration(paragraphs);
   }
 
+  function getNarrationParagraphs(chapter) {
+    const cached = paragraphCacheRef.current[chapter.id];
+    if (cached) return Promise.resolve(cached);
+    const inFlight = chapterLoadPromisesRef.current[chapter.id];
+    if (inFlight) return inFlight;
+
+    const promise = loadNarrationParagraphs(chapter)
+      .then((paragraphs) => {
+        paragraphCacheRef.current[chapter.id] = paragraphs;
+        return paragraphs;
+      })
+      .finally(() => {
+        if (chapterLoadPromisesRef.current[chapter.id] === promise) {
+          delete chapterLoadPromisesRef.current[chapter.id];
+        }
+      });
+    chapterLoadPromisesRef.current[chapter.id] = promise;
+    return promise;
+  }
+
   // 从指定位置开始顺序朗读，直到打断（epoch变化）或全书听完。
   // 录音/问答打断后优先按本次音频的WordBoundary保存段内字位；新接口
   // 不可用时才退回播放比例估算。恢复时从该字位前面少量回退继续读，
@@ -1321,7 +1342,7 @@ export default function ListenScreen({ route, navigation }) {
         setPhase('loading-chapter');
         setChapterTitle(chapter.title);
         try {
-          paragraphs = await loadNarrationParagraphs(chapter);
+          paragraphs = await getNarrationParagraphs(chapter);
           // 临时诊断：真机反馈"只听到'前言'两个字，后面都没有了"，加日志
           // 确认到底是"这一章后端就只返回了一段"，还是"返回了多段但播放
           // 循环提前退出"，不能靠猜。排查完就删。
@@ -1334,7 +1355,6 @@ export default function ListenScreen({ route, navigation }) {
           return;
         }
         if (epoch !== epochRef.current) return;
-        paragraphCacheRef.current[chapter.id] = paragraphs;
       }
       let paragraphRetryCount = 0;
       while (pi < paragraphs.length) {
@@ -1407,6 +1427,23 @@ export default function ListenScreen({ route, navigation }) {
         const nextPi = pi + 1;
         if (nextPi < paragraphs.length) {
           prepareNarrationSound(ci, nextPi, paragraphs[nextPi]);
+        }
+
+        const nextChapter = chapters[ci + 1];
+        if (nextChapter && nextPi >= paragraphs.length - 1) {
+          // 章节边界原来要等本章完全播完，才依次请求下一章正文和首段TTS。
+          // 倒数第二段先取正文，最后一段再预取首段音频，让两项网络等待都
+          // 藏在当前章仍在朗读的时间里。预取失败不改变主流程，切章时会重试。
+          getNarrationParagraphs(nextChapter)
+            .then((nextParagraphs) => {
+              if (epoch !== epochRef.current || manuallyPausedRef.current || hfActiveRef.current) return;
+              if (nextPi >= paragraphs.length && nextParagraphs.length > 0) {
+                prepareNarrationSound(ci + 1, 0, nextParagraphs[0]);
+              }
+            })
+            .catch((error) => {
+              console.log(`[听书诊断] 下一章预取失败，切章时重试：${error.message || error}`);
+            });
         }
 
         console.log(`[听书诊断] 开始加载 章节="${chapter.title}" 第${pi + 1}/${paragraphs.length}段 段内恢复=${shouldResumeWithinParagraph} 预取命中=${!!presetPromise}`);
